@@ -1,0 +1,1596 @@
+/* assets/styles.css - Options Dashboard Professional Styling */
+/* ========================================
+   PROFESSIONAL OPTIONS DASHBOARD DESIGN SYSTEM
+   ======================================== */
+
+/* CSS Custom Properties - Color Palette */
+:root {
+    /* Primary Colors */
+    --color-primary: #2E86C1;           /* McKinsey blue - primary brand color */
+    --color-primary-light: #5DADE2;     /* Lighter variant */
+    --color-primary-dark: #1B4F72;      /* Darker variant */
+    
+    /* Text Colors */
+    --color-text-primary: #1f2937;      /* Dark gray for headers */
+    --color-text-secondary: #374151;    /* Medium gray for labels */
+    --color-text-tertiary: #6b7280;     /* Light gray for secondary text */
+    --color-text-white: #ffffff;        /* White text */
+    
+    /* Background Colors */
+    --color-bg-white: #ffffff;          /* Pure white backgrounds */
+    --color-bg-light: #f9fafb;          /* Light background for sections */
+    --color-bg-lighter: #f8f9fa;        /* Slightly lighter variant */
+    --color-bg-controls: #f9fafb;       /* Control container backgrounds */
+    
+    /* Accent Colors */
+    --color-success: #28a745;           /* Success green */
+    --color-warning: #ffc107;           /* Warning yellow */
+    --color-danger: #dc3545;            /* Danger red */
+    --color-info: #17a2b8;              /* Info cyan */
+    
+    /* Border Colors */
+    --color-border-light: #e5e7eb;      /* Light borders */
+    --color-border-medium: #d1d5db;     /* Medium borders */
+    
+    /* Typography */
+    --font-family-primary: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-size-xs: 12px;               /* Small text */
+    --font-size-sm: 13px;               /* Body text */
+    --font-size-base: 14px;             /* Base size */
+    --font-size-md: 16px;               /* Medium headers */
+    --font-size-lg: 18px;               /* Large headers */
+    --font-size-xl: 24px;               /* Extra large headers */
+    --font-weight-normal: 400;
+    --font-weight-semibold: 600;
+    --font-weight-bold: 700;
+    
+    /* Spacing */
+    --spacing-xs: 4px;
+    --spacing-sm: 8px;
+    --spacing-md: 12px;
+    --spacing-lg: 16px;
+    --spacing-xl: 24px;
+    --spacing-2xl: 32px;
+    
+    /* Border Radius */
+    --border-radius-xs: 4px;
+    --border-radius-sm: 6px;
+    --border-radius-md: 8px;
+    --border-radius-lg: 12px;
+    
+    /* Shadows */
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+
+/* Base Styles */
+body {
+    font-family: var(--font-family-primary);
+    font-size: var(--font-size-sm);
+    color: var(--color-text-primary);
+    background-color: var(--color-bg-white);
+    line-height: 1.5;
+}
+
+/* ========================================
+   TYPOGRAPHY SYSTEM
+   ======================================== */
+
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-family-primary);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-primary);
+    line-height: 1.3;
+    margin: 0 0 var(--spacing-md) 0;
+}
+
+h1 { font-size: var(--font-size-lg); }
+h2 { font-size: var(--font-size-md); }
+h3 { font-size: var(--font-size-base); font-weight: var(--font-weight-bold); }
+h4 { font-size: var(--font-size-sm); font-weight: var(--font-weight-semibold); }
+h5 { font-size: var(--font-size-xs); font-weight: var(--font-weight-semibold); }
+
+/* Typography Utility Classes */
+.text-primary { color: var(--color-text-primary); }
+.text-secondary { color: var(--color-text-secondary); }
+.text-tertiary { color: var(--color-text-tertiary); }
+.text-white { color: var(--color-text-white); }
+
+.font-normal { font-weight: var(--font-weight-normal); }
+.font-semibold { font-weight: var(--font-weight-semibold); }
+.font-bold { font-weight: var(--font-weight-bold); }
+
+.text-xs { font-size: var(--font-size-xs); }
+.text-sm { font-size: var(--font-size-sm); }
+.text-base { font-size: var(--font-size-base); }
+.text-md { font-size: var(--font-size-md); }
+.text-lg { font-size: var(--font-size-lg); }
+
+/* ========================================
+   LAYOUT AND SPACING UTILITIES
+   ======================================== */
+
+/* Background Utilities */
+.bg-white { background-color: var(--color-bg-white); }
+.bg-light { background-color: var(--color-bg-light); }
+.bg-lighter { background-color: var(--color-bg-lighter); }
+.bg-controls { background-color: var(--color-bg-controls); }
+.bg-primary { background-color: var(--color-primary); }
+
+/* Border Utilities */
+.border-light { border: 1px solid var(--color-border-light); }
+.border-medium { border: 1px solid var(--color-border-medium); }
+.rounded-sm { border-radius: var(--border-radius-sm); }
+.rounded-md { border-radius: var(--border-radius-md); }
+.rounded-lg { border-radius: var(--border-radius-lg); }
+
+/* Spacing Utilities */
+.p-xs { padding: var(--spacing-xs); }
+.p-sm { padding: var(--spacing-sm); }
+.p-md { padding: var(--spacing-md); }
+.p-lg { padding: var(--spacing-lg); }
+.p-xl { padding: var(--spacing-xl); }
+
+.m-xs { margin: var(--spacing-xs); }
+.m-sm { margin: var(--spacing-sm); }
+.m-md { margin: var(--spacing-md); }
+.m-lg { margin: var(--spacing-lg); }
+.m-xl { margin: var(--spacing-xl); }
+
+/* Shadow Utilities */
+.shadow-sm { box-shadow: var(--shadow-sm); }
+.shadow-md { box-shadow: var(--shadow-md); }
+
+/* ========================================
+   COMPONENT STYLES
+   ======================================== */
+
+/* Button Styles */
+button {
+    font-family: var(--font-family-primary);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+    padding: var(--spacing-sm) var(--spacing-lg);
+    border-radius: var(--border-radius-sm);
+    border: 1px solid var(--color-border-medium);
+    background-color: var(--color-bg-white);
+    color: var(--color-text-primary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+button:hover {
+    background-color: var(--color-bg-light);
+    border-color: var(--color-primary);
+}
+
+.btn-primary {
+    background-color: var(--color-primary);
+    color: var(--color-text-white);
+    border-color: var(--color-primary);
+}
+
+.btn-primary:hover {
+    background-color: var(--color-primary-dark);
+    border-color: var(--color-primary-dark);
+}
+
+/* ========================================
+   DASH-SPECIFIC COMPONENT STYLES
+   ======================================== */
+
+/* Professional Container Classes */
+.dashboard-container {
+    background-color: var(--color-bg-white);
+    padding: var(--spacing-xl);
+    margin: 0;
+    min-height: 100vh;
+}
+
+.section-container {
+    background-color: var(--color-bg-white);
+    padding: var(--spacing-lg);
+    margin: 0 0 var(--spacing-lg) 0;
+    border: var(--border-light);
+    border-radius: var(--border-radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+.controls-container {
+    background-color: var(--color-bg-controls);
+    padding: var(--spacing-lg);
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--color-border-light);
+    margin-bottom: var(--spacing-lg);
+}
+
+.mckinsey-container {
+    background-color: var(--color-bg-white);
+    padding: var(--spacing-lg);
+    margin: 0;
+    border-radius: var(--border-radius-md);
+}
+
+/* Professional Headers */
+.professional-header {
+    color: var(--color-text-primary);
+    font-family: var(--font-family-primary);
+    font-weight: var(--font-weight-semibold);
+    font-size: var(--font-size-md);
+    margin-bottom: var(--spacing-md);
+}
+
+.mckinsey-header {
+    color: var(--color-text-primary);
+    font-family: var(--font-family-primary);
+    font-weight: var(--font-weight-semibold);
+    font-size: var(--font-size-lg);
+    margin-bottom: var(--spacing-lg);
+}
+
+/* Professional Table Styles */
+.professional-table {
+    font-family: var(--font-family-primary);
+    font-size: var(--font-size-xs);
+    border-collapse: collapse;
+    width: 100%;
+}
+
+.professional-table th {
+    background-color: var(--color-primary);
+    color: var(--color-text-white);
+    font-weight: var(--font-weight-bold);
+    font-size: var(--font-size-xs);
+    padding: var(--spacing-sm) var(--spacing-md);
+    text-align: center;
+    border: 1px solid var(--color-primary-dark);
+}
+
+.professional-table td {
+    padding: var(--spacing-sm) var(--spacing-md);
+    text-align: center;
+    border: 1px solid var(--color-border-light);
+    background-color: var(--color-bg-white);
+}
+
+.professional-table tr:nth-child(even) td {
+    background-color: var(--color-bg-lighter);
+}
+
+/* Professional Dropdown Styles */
+.professional-dropdown {
+    width: 160px;
+    font-size: var(--font-size-sm);
+    font-family: var(--font-family-primary);
+    border-radius: var(--border-radius-sm);
+    border: 1px solid var(--color-border-medium);
+    padding: var(--spacing-sm);
+}
+
+.professional-dropdown-sm {
+    width: 120px;
+    font-size: var(--font-size-sm);
+    font-family: var(--font-family-primary);
+    border-radius: var(--border-radius-sm);
+    border: 1px solid var(--color-border-medium);
+    padding: var(--spacing-sm);
+}
+
+/* Professional Button Styles */
+.btn-download {
+    padding: var(--spacing-xs) var(--spacing-lg);
+    background-color: var(--color-info);
+    color: var(--color-text-white);
+    border: none;
+    border-radius: var(--border-radius-xs);
+    cursor: pointer;
+    height: 32px;
+}
+
+/* Status Colors */
+.status-success { color: var(--color-success); }
+.status-warning { color: var(--color-warning); }
+.status-danger { color: var(--color-danger); }
+.status-info { color: var(--color-info); }
+
+/* ========================================
+   GLOBAL DATATABLE STYLES
+   ======================================== */
+
+/* Standard DataTable Header Style - McKinsey Blue Standard */
+.dash-table-container .dash-header {
+    background-color: var(--color-primary) !important;
+    color: var(--color-text-white) !important;
+    font-weight: var(--font-weight-bold) !important;
+    font-size: var(--font-size-xs) !important;
+    font-family: var(--font-family-primary) !important;
+}
+
+/* McKinsey Delta Table Styling */
+.mckinsey-delta-table {
+    font-family: var(--font-family-primary);
+    border-collapse: collapse;
+    width: 100%;
+}
+
+.mckinsey-delta-table .dash-header {
+    background-color: var(--color-primary) !important;
+    color: var(--color-text-white) !important;
+    font-weight: var(--font-weight-bold) !important;
+    font-size: var(--font-size-xs) !important;
+    padding: var(--spacing-sm) !important;
+    text-align: center !important;
+    border: 1px solid var(--color-primary-dark) !important;
+}
+
+.mckinsey-delta-table .dash-cell {
+    text-align: center !important;
+    padding: var(--spacing-sm) !important;
+    font-size: var(--font-size-xs) !important;
+    border: 1px solid var(--color-border-light) !important;
+}
+
+/* Heat Map Color Classes for Data Tables */
+.heatmap-critical-negative {
+    background-color: #dc2626 !important;
+    color: white !important;
+    font-weight: bold !important;
+}
+
+.heatmap-major-negative {
+    background-color: #ef4444 !important;
+    color: white !important;
+}
+
+.heatmap-moderate-negative {
+    background-color: #fecaca !important;
+    color: #991b1b !important;
+}
+
+.heatmap-small-negative {
+    background-color: #fef2f2 !important;
+    color: #991b1b !important;
+}
+
+.heatmap-zero {
+    background-color: #f9fafb !important;
+    color: #9ca3af !important;
+}
+
+.heatmap-small-positive {
+    background-color: #f0fdf4 !important;
+    color: #166534 !important;
+}
+
+.heatmap-moderate-positive {
+    background-color: #bbf7d0 !important;
+    color: #065f46 !important;
+}
+
+.heatmap-major-positive {
+    background-color: #22c55e !important;
+    color: white !important;
+}
+
+.heatmap-exceptional-positive {
+    background-color: #16a34a !important;
+    color: white !important;
+    font-weight: bold !important;
+}
+
+/* Table Border Separators */
+.column-separator {
+    border-right: 3px solid var(--color-primary) !important;
+}
+
+/* Total Row Styling */
+.total-row {
+    font-weight: var(--font-weight-bold) !important;
+    font-size: var(--font-size-base) !important;
+    background-color: var(--color-bg-light) !important;
+    color: var(--color-text-primary) !important;
+    border-top: 3px solid var(--color-primary) !important;
+}
+
+/* ========================================
+   EXISTING DASH COMPONENT FIXES
+   ======================================== */
+
+/* Remove the button created when DataTable has hide columns */
+button.show-hide { display: none; }
+
+/* Hide Default DataTable Export Buttons */
+.dash-table-container .export {
+    display: none !important;
+}
+
+/* Custom Export Button Styling */
+.custom-export-btn {
+    font-family: var(--font-family-primary);
+    font-size: 11px;
+    font-weight: 500;
+    padding: 4px 8px;
+    background-color: var(--color-primary);
+    color: white;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    vertical-align: middle;
+}
+
+.custom-export-btn:hover {
+    background-color: var(--color-primary-dark);
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(46, 134, 193, 0.3);
+}
+
+/* Date Picker Styling */
+.DateRangePickerInput {
+    border: none !important;
+}
+
+.custom-date-picker .DateRangePickerInput input {
+    font-size: var(--font-size-md) !important;
+    height: 32px !important;
+    font-family: var(--font-family-primary) !important;
+    border-radius: var(--border-radius-sm) !important;
+}
+
+.custom-date-picker .DateRangePickerInput {
+    font-size: var(--font-size-md) !important;
+}
+
+/* ========================================
+   PROFESSIONAL TOP BAR - OPTION B BLUE SYSTEM
+   ======================================== */
+
+/* Option B Professional Blue System Color Variables */
+:root {
+    --color-blue-primary: #1e40af;      /* Deep professional blue */
+    --color-blue-secondary: #3b82f6;    /* Medium blue */
+    --color-blue-light: #dbeafe;        /* Very light blue */
+    --color-blue-hover: #1d4ed8;        /* Hover state blue */
+    --color-blue-pressed: #1e3a8a;      /* Pressed state blue */
+    --color-text-primary: #1f2937;      /* Dark gray for text */
+    --color-text-secondary: #374151;    /* Medium gray for secondary text */
+    --color-bg-elevated: #ffffff;       /* Pure white background */
+    --color-border-subtle: #e5e7eb;     /* Subtle border color */
+}
+
+/* Top Bar Header Container */
+.top-bar-header {
+    background-color: #2E86C1;
+    border-bottom: 1px solid #1B4F72;
+    box-shadow: 0 2px 8px rgba(46, 134, 193, 0.3);
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+}
+
+/* Top Bar Content Wrapper */
+.top-bar-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+    min-height: 64px;
+}
+
+/* Main Navigation Container */
+.main-navigation {
+    display: flex;
+    align-items: center;
+    gap: 32px;
+}
+
+/* Primary Navigation Link - Europe S&D */
+.nav-link-primary {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    color: white;
+    text-decoration: none;
+    padding: 10px 16px;
+    border-radius: 8px;
+    background-color: rgba(255, 255, 255, 0.15);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    transition: all 0.2s ease;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+}
+
+.nav-link-primary:hover {
+    background-color: rgba(255, 255, 255, 0.25);
+    color: white;
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.nav-link-primary.active {
+    background-color: white;
+    color: #2E86C1;
+    font-weight: 600;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Secondary Navigation Group */
+.nav-group-secondary {
+    display: flex;
+    gap: 16px;
+    padding-left: 32px;
+    border-left: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+/* Secondary Navigation Links */
+.nav-link-secondary {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+    text-decoration: none;
+    padding: 8px 12px;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+}
+
+.nav-link-secondary:hover {
+    background-color: rgba(255, 255, 255, 0.15);
+    color: white;
+}
+
+.nav-link-secondary.active {
+    background-color: white;
+    color: #2E86C1;
+    font-weight: 600;
+}
+
+/* Top Bar Controls Section */
+.top-bar-controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+/* Balance Control Container */
+.balance-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Balance Label */
+.balance-label {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    color: white;
+    margin: 0;
+    white-space: nowrap;
+}
+
+/* Balance Dropdown */
+.balance-dropdown {
+    width: 160px !important;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-size: 13px !important;
+}
+
+.balance-dropdown .Select-control {
+    border: 1px solid rgba(255, 255, 255, 0.3) !important;
+    border-radius: 6px !important;
+    background-color: transparent !important;
+    min-height: 36px !important;
+}
+
+.balance-dropdown .Select-control:hover {
+    border-color: rgba(255, 255, 255, 0.5) !important;
+    background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Balance Dropdown Selected Value */
+.balance-dropdown .Select-value-label {
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+.balance-dropdown .Select-single-value {
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+/* Balance Dropdown Placeholder */
+.balance-dropdown .Select-placeholder {
+    color: rgba(255, 255, 255, 0.8) !important;
+}
+
+/* Balance Dropdown Arrow */
+.balance-dropdown .Select-arrow-zone {
+    color: white !important;
+}
+
+.balance-dropdown .Select-arrow {
+    border-color: white transparent transparent !important;
+}
+
+/* Balance Dropdown Selected Value */
+.balance-dropdown .Select-value-label {
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+.balance-dropdown .Select-single-value {
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+/* Balance Dropdown Placeholder */
+.balance-dropdown .Select-placeholder {
+    color: rgba(255, 255, 255, 0.8) !important;
+}
+
+/* Balance Dropdown Menu Options */
+.balance-dropdown .Select-menu-outer {
+    background-color: white !important;
+    border: 1px solid rgba(255, 255, 255, 0.3) !important;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+    border-radius: 6px !important;
+    margin-top: 2px !important;
+}
+
+.balance-dropdown .Select-option {
+    color: #2E86C1 !important;
+    font-weight: 500 !important;
+    padding: 8px 12px !important;
+}
+
+.balance-dropdown .Select-option:hover {
+    background-color: #f8f9fa !important;
+    color: #1B4F72 !important;
+}
+
+.balance-dropdown .Select-option.is-selected {
+    background-color: #2E86C1 !important;
+    color: white !important;
+    font-weight: 600 !important;
+}
+
+/* Professional Refresh Button */
+.btn-refresh {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 16px;
+    background-color: white;
+    color: #2E86C1;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.btn-refresh:hover {
+    background-color: #f8f9fa;
+    color: #1B4F72;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.btn-refresh:active {
+    background-color: #e9ecef;
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Run Balance Button */
+.btn-run-balance {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 16px;
+    background-color: #28a745;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    margin-left: 8px;
+}
+
+.btn-run-balance:hover {
+    background-color: #218838;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+}
+
+.btn-run-balance:active {
+    background-color: #1e7e34;
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Responsive Design for Top Bar */
+@media (max-width: 768px) {
+    .top-bar-content {
+        flex-direction: column;
+        gap: 16px;
+        padding: 12px 16px;
+    }
+    
+    .main-navigation {
+        width: 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 16px;
+    }
+    
+    .nav-group-secondary {
+        border-left: none;
+        padding-left: 0;
+        flex-wrap: wrap;
+        justify-content: center;
+    }
+    
+    .top-bar-controls {
+        width: 100%;
+        justify-content: center;
+        flex-wrap: wrap;
+    }
+}
+
+/* Focus States for Accessibility */
+.nav-link-primary:focus,
+.nav-link-secondary:focus,
+.btn-refresh:focus {
+    outline: 2px solid var(--color-blue-secondary);
+    outline-offset: 2px;
+}
+
+/* ========================================
+   OPTIONS-SPECIFIC PROFESSIONAL COMPONENTS
+   ======================================== */
+
+/* Options Dashboard Container */
+.options-dashboard-container {
+    padding: var(--spacing-xl);
+    background-color: var(--color-bg-white);
+    min-height: 100vh;
+}
+
+/* Options Section Container */
+.options-section-container {
+    background-color: var(--color-bg-white);
+    padding: var(--spacing-lg);
+    margin: 0 0 var(--spacing-lg) 0;
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--border-radius-md);
+    box-shadow: var(--shadow-sm);
+}
+
+/* Options Controls Container */
+.options-controls-container {
+    background-color: var(--color-bg-controls);
+    padding: var(--spacing-lg);
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--color-border-light);
+    margin-bottom: var(--spacing-lg);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-lg);
+    flex-wrap: wrap;
+}
+
+/* Options Control Group */
+.options-control-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    min-width: 140px;
+}
+
+/* Options Control Label */
+.options-control-label {
+    font-family: var(--font-family-primary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--color-text-secondary);
+    margin: 0;
+}
+
+/* Separate Action Buttons Box */
+.action-buttons-box {
+    background-color: var(--color-bg-white);
+    padding: var(--spacing-md);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--border-radius-md);
+    box-shadow: var(--shadow-sm);
+    margin-bottom: var(--spacing-lg);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-end;
+    width: fit-content;
+    margin-left: auto;
+}
+
+/* Greeks Specific Styling */
+.greeks-exposure-container {
+    background-color: #f8fafc;
+    border-left: 4px solid var(--color-primary);
+    padding: var(--spacing-lg);
+    margin: var(--spacing-lg) 0;
+    border-radius: 0 var(--border-radius-sm) var(--border-radius-sm) 0;
+}
+
+.greeks-title {
+    color: var(--color-primary);
+    font-weight: var(--font-weight-bold);
+    font-size: var(--font-size-md);
+    margin-bottom: var(--spacing-sm);
+}
+
+/* Options Chart Container */
+.options-chart-container {
+    background-color: var(--color-bg-white);
+    padding: var(--spacing-md);
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--color-border-light);
+    margin: var(--spacing-md) 0;
+}
+
+/* Options Table Styling */
+.options-table-container {
+    background-color: var(--color-bg-white);
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--color-border-light);
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin: var(--spacing-lg) 0;
+}
+
+/* Side-by-Side Tables Layout */
+.options-tables-side-by-side {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    width: 100% !important;
+    overflow-x: auto !important;
+    gap: 0 !important;
+}
+
+.options-table-left {
+    width: 60% !important;
+    margin-right: 20px !important;
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    min-width: 400px !important; /* Minimum width to ensure readability */
+}
+
+.options-table-right {
+    width: 40% !important;
+    box-sizing: border-box !important;
+    flex-shrink: 0 !important;
+    min-width: 300px !important; /* Minimum width to ensure readability */
+}
+
+/* ========================================
+   PROFESSIONAL CHART STYLING - OPTIONS DASHBOARD
+   ======================================== */
+
+/* Chart Height Standards */
+.options-chart-standard {
+    height: 420px;
+}
+
+.options-chart-tall {
+    height: 500px;
+}
+
+.options-chart-compact {
+    height: 350px;
+}
+
+/* Professional Chart Layout Patterns */
+.options-charts-container {
+    display: flex;
+    gap: var(--spacing-lg);
+    margin: var(--spacing-xl) 0;
+    flex-wrap: wrap;
+}
+
+.options-chart-left {
+    flex: 1;
+    margin-right: var(--spacing-sm);
+    min-width: 300px;
+}
+
+.options-chart-right {
+    flex: 1;
+    margin-left: var(--spacing-sm);
+    min-width: 300px;
+}
+
+/* Options Chart Color Palette - McKinsey Blue Based */
+:root {
+    --options-color-primary: #2E86C1;      /* McKinsey blue (primary) */
+    --options-color-secondary: #1B4F72;    /* Darker McKinsey blue */
+    --options-color-accent1: #85C1E9;      /* Lighter McKinsey blue */
+    --options-color-accent2: #5DADE2;      /* Medium McKinsey blue */
+    --options-color-complementary: #3498DB; /* Complementary blue */
+    --options-color-teal: #76D7C4;         /* Accent teal */
+    --options-color-warning: #F7DC6F;      /* Warning yellow */
+    --options-color-danger: #F1948A;       /* Alert red */
+    
+    /* Options-specific Greeks colors */
+    --options-color-delta: #2E86C1;        /* Delta - McKinsey blue */
+    --options-color-gamma: #1B4F72;        /* Gamma - Darker blue */
+    --options-color-vega: #76D7C4;         /* Vega - Teal */
+    --options-color-theta: #F7DC6F;        /* Theta - Yellow */
+    --options-color-rho: #85C1E9;          /* Rho - Light blue */
+    
+    /* Chart styling constants */
+    --chart-grid-color: rgba(200, 200, 200, 0.3);
+    --chart-line-color: #CCCCCC;
+    --chart-text-primary: #2C3E50;
+    --chart-text-secondary: #4A4A4A;
+    --chart-text-muted: #666666;
+}
+
+/* Professional Options Chart Styling */
+.dash-graph .plotly .main-svg {
+    font-family: var(--font-family-primary) !important;
+}
+
+/* Chart Title Styling */
+.dash-graph .gtitle {
+    font-family: var(--font-family-primary) !important;
+    font-size: 18px !important;
+    font-weight: 600 !important;
+    color: var(--chart-text-primary) !important;
+}
+
+/* Chart Axis Styling */
+.dash-graph .xtick text,
+.dash-graph .ytick text {
+    font-family: var(--font-family-primary) !important;
+    font-size: 11px !important;
+    color: var(--chart-text-muted) !important;
+}
+
+.dash-graph .xtitle,
+.dash-graph .ytitle {
+    font-family: var(--font-family-primary) !important;
+    font-size: 13px !important;
+    color: var(--chart-text-secondary) !important;
+}
+
+/* Chart Legend Styling */
+.dash-graph .legend {
+    font-family: var(--font-family-primary) !important;
+    font-size: 12px !important;
+    color: var(--chart-text-secondary) !important;
+}
+
+/* Hover Label Styling */
+.dash-graph .hoverlayer .hovertext {
+    font-family: var(--font-family-primary) !important;
+    font-size: 11px !important;
+    background-color: rgba(255, 255, 255, 0.95) !important;
+    border-color: rgba(200, 200, 200, 0.8) !important;
+}
+
+/* Professional Table with Greeks Heat Map */
+.greeks-table {
+    font-family: var(--font-family-primary);
+    border-collapse: collapse;
+    width: 100%;
+    font-size: var(--font-size-xs);
+}
+
+.greeks-table th {
+    background-color: var(--options-color-primary);
+    color: var(--color-text-white);
+    font-weight: var(--font-weight-bold);
+    padding: var(--spacing-sm) var(--spacing-md);
+    text-align: center;
+    border: 1px solid var(--options-color-secondary);
+}
+
+.greeks-table td {
+    padding: var(--spacing-sm) var(--spacing-md);
+    text-align: center;
+    border: 1px solid var(--color-border-light);
+    background-color: var(--color-bg-white);
+}
+
+.greeks-table tr:nth-child(even) td {
+    background-color: var(--color-bg-lighter);
+}
+
+/* Greeks-specific value coloring */
+.delta-positive { color: var(--options-color-delta); font-weight: 600; }
+.delta-negative { color: var(--options-color-danger); font-weight: 600; }
+.gamma-high { color: var(--options-color-gamma); font-weight: 600; }
+.vega-high { color: var(--options-color-vega); font-weight: 600; }
+.theta-decay { color: var(--options-color-theta); font-weight: 600; }
+
+/* ========================================
+   INLINE SECTION HEADERS - ORIGINAL STRUCTURE WITH PROFESSIONAL STYLING
+   ======================================== */
+
+/* Enterprise Standard Inline Section Header */
+.inline-section-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 24px;
+    padding: 14px 18px;
+    background-color: #f8fafc;  /* Light blue tint - subtle brand connection */
+    border-radius: 6px;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+/* Enterprise Section Title */
+.section-title-inline {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 18px;  /* Increased for better visibility and hierarchy */
+    font-weight: 500;  /* Medium weight - enterprise standard */
+    color: #1f2937;
+    margin: 0;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* Enterprise Filter Labels */
+.inline-filter-label {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;  /* Increased for better readability */
+    font-weight: 400;  /* Normal weight - clean hierarchy */
+    color: #4b5563;  /* Slightly lighter for better hierarchy */
+    margin: 0;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* Enterprise Date Picker Styling */
+.inline-date-picker .SingleDatePickerInput {
+    border: 1px solid #cbd5e1;  /* Softer border */
+    border-radius: 4px;  /* Smaller radius - enterprise standard */
+    background-color: white;
+}
+
+/* Enterprise Date Range Picker Styling */
+.inline-date-range-picker .DateRangePickerInput {
+    border: 1px solid #cbd5e1;  /* Softer border */
+    border-radius: 4px;  /* Smaller radius - enterprise standard */
+    background-color: white;
+    min-width: 250px;
+}
+
+.inline-date-range-picker .DateRangePickerInput input {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    color: #374151;
+    padding: 8px 12px;
+    border: none;
+    height: 20px;
+}
+
+.inline-date-range-picker .DateRangePickerInput:hover {
+    border-color: #94a3b8;  /* Softer hover */
+}
+
+.inline-date-range-picker .DateRangePickerInput.DateRangePickerInput__focused {
+    border-color: #2E86C1;  /* McKinsey blue focus */
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.15);  /* Subtler shadow */
+}
+
+.inline-date-picker .SingleDatePickerInput input {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    color: #374151;
+    padding: 8px 12px;  /* Original size restored */
+    border: none;
+    width: 110px;
+    height: 20px;
+}
+
+.inline-date-picker .SingleDatePickerInput:hover {
+    border-color: #94a3b8;  /* Softer hover */
+}
+
+.inline-date-picker .SingleDatePickerInput.SingleDatePickerInput__focused {
+    border-color: #2E86C1;  /* McKinsey blue focus */
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.15);  /* Subtler shadow */
+}
+
+/* Enterprise Dropdown Styling */
+.inline-dropdown {
+    min-width: 230px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;  /* Increased for better readability */
+}
+
+.inline-dropdown .Select-control {
+    min-height: 34px;  /* Slightly more compact */
+    border: 1px solid #cbd5e1;  /* Softer border matching date picker */
+    border-radius: 4px;  /* Enterprise standard radius */
+    background-color: white;
+    transition: all 0.15s ease;  /* Faster transition */
+}
+
+.inline-dropdown .Select-control:hover {
+    border-color: #94a3b8;  /* Softer hover matching date picker */
+}
+
+.inline-dropdown .Select-control.is-focused {
+    border-color: #2E86C1;  /* McKinsey blue focus */
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.15);  /* Matching shadow */
+}
+
+.inline-dropdown .Select-value-label,
+.inline-dropdown .Select-single-value {
+    color: #374151;
+    font-weight: 400;  /* Normal weight - enterprise standard */
+}
+
+.inline-dropdown .Select-placeholder {
+    color: #94a3b8;  /* Softer placeholder */
+}
+
+/* Date-Specific Dropdown Styling - Compact for dates */
+.inline-dropdown-date {
+    min-width: 120px;
+    max-width: 140px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+}
+
+.inline-dropdown-date .Select-control {
+    min-height: 34px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background-color: white;
+    transition: all 0.15s ease;
+}
+
+.inline-dropdown-date .Select-control:hover {
+    border-color: #94a3b8;
+}
+
+.inline-dropdown-date .Select-control.is-focused {
+    border-color: #2E86C1;
+    box-shadow: 0 0 0 3px rgba(46, 134, 193, 0.1);
+}
+
+.inline-dropdown-date .Select-value-label,
+.inline-dropdown-date .Select-single-value {
+    color: #1f2937;
+    font-weight: 500;
+}
+
+.inline-dropdown-date .Select-placeholder {
+    color: #94a3b8;
+}
+
+/* Greek Type Dropdown Styling - Sized for "Correlation" */
+.inline-dropdown-greek {
+    min-width: 130px;
+    max-width: 150px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+}
+
+.inline-dropdown-greek .Select-control {
+    min-height: 34px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background-color: white;
+    transition: all 0.15s ease;
+}
+
+.inline-dropdown-greek .Select-control:hover {
+    border-color: #94a3b8;
+}
+
+.inline-dropdown-greek .Select-control.is-focused {
+    border-color: #2E86C1;
+    box-shadow: 0 0 0 3px rgba(46, 134, 193, 0.1);
+}
+
+.inline-dropdown-greek .Select-value-label,
+.inline-dropdown-greek .Select-single-value {
+    color: #1f2937;
+    font-weight: 500;
+}
+
+.inline-dropdown-greek .Select-placeholder {
+    color: #94a3b8;
+}
+
+/* Date Aggregation Dropdown Styling - Sized for "Quarter" */
+.inline-dropdown-aggregation {
+    min-width: 100px;
+    max-width: 120px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+}
+
+.inline-dropdown-aggregation .Select-control {
+    min-height: 34px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background-color: white;
+    transition: all 0.15s ease;
+}
+
+.inline-dropdown-aggregation .Select-control:hover {
+    border-color: #94a3b8;
+}
+
+.inline-dropdown-aggregation .Select-control.is-focused {
+    border-color: #2E86C1;
+    box-shadow: 0 0 0 3px rgba(46, 134, 193, 0.1);
+}
+
+.inline-dropdown-aggregation .Select-value-label,
+.inline-dropdown-aggregation .Select-single-value {
+    color: #1f2937;
+    font-weight: 500;
+}
+
+.inline-dropdown-aggregation .Select-placeholder {
+    color: #94a3b8;
+}
+
+/* Enterprise Multi-Select Dropdown Styling */
+.inline-dropdown-multi {
+    min-width: 560px;
+    max-width: 640px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    position: relative;  /* Ensure proper positioning context */
+}
+
+/* Larger Multi-Select Dropdown for Strategies (30% wider) */
+.inline-dropdown-multi-strategies {
+    min-width: 728px;
+    max-width: 832px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+    position: relative;  /* Ensure proper positioning context */
+}
+
+.inline-dropdown-multi .Select-control,
+.inline-dropdown-multi-strategies .Select-control {
+    min-height: 34px;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    background-color: white;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.inline-dropdown-multi .Select-control:hover,
+.inline-dropdown-multi-strategies .Select-control:hover {
+    border-color: #94a3b8;
+}
+
+.inline-dropdown-multi .Select-control.is-focused,
+.inline-dropdown-multi-strategies .Select-control.is-focused {
+    border-color: #2E86C1;
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.15);
+}
+
+.inline-dropdown-multi .Select-placeholder,
+.inline-dropdown-multi-strategies .Select-placeholder {
+    color: #94a3b8;
+}
+
+/* Multi-Select Dropdown Menu Styling */
+.inline-dropdown-multi .Select-menu-outer,
+.inline-dropdown-multi-strategies .Select-menu-outer {
+    max-height: 400px !important;  /* Increased height for better visibility */
+    z-index: 9999 !important;  /* Ensure dropdown appears above other elements */
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);  /* Better shadow for visibility */
+}
+
+.inline-dropdown-multi .Select-menu,
+.inline-dropdown-multi-strategies .Select-menu {
+    max-height: 400px !important;  /* Match outer container */
+    overflow-y: auto !important;  /* Enable scrolling for many options */
+    overflow-x: hidden;
+}
+
+.inline-dropdown-multi .Select-option,
+.inline-dropdown-multi-strategies .Select-option {
+    height: 50px !important;  /* Match optionHeight from Python */
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    font-size: 14px;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.inline-dropdown-multi .Select-option:hover,
+.inline-dropdown-multi-strategies .Select-option:hover {
+    background-color: #f8fafc;
+}
+
+.inline-dropdown-multi .Select-option.is-selected,
+.inline-dropdown-multi-strategies .Select-option.is-selected {
+    background-color: #2E86C1;
+    color: white;
+}
+
+.inline-dropdown-multi .Select-option.is-selected:hover,
+.inline-dropdown-multi-strategies .Select-option.is-selected:hover {
+    background-color: #1B4F72;  /* Darker McKinsey blue on hover */
+}
+
+/* Multi-Select Value Container Styling */
+.inline-dropdown-multi .Select-multi-value-wrapper,
+.inline-dropdown-multi-strategies .Select-multi-value-wrapper {
+    max-height: 100px;  /* Allow for multiple selected values */
+    overflow-y: auto;
+}
+
+.inline-dropdown-multi .Select-value,
+.inline-dropdown-multi-strategies .Select-value {
+    background-color: #2E86C1;
+    color: white;
+    border-radius: 3px;
+    margin: 2px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+
+/* Enterprise Toggle Button Styling */
+.inline-toggle-button {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;  /* Increased for better readability */
+    font-weight: 500;
+    padding: 6px 12px;
+    background-color: #2E86C1;  /* McKinsey blue */
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    margin-left: auto;  /* Push to right side */
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-height: 28px;
+    display: flex;
+    align-items: center;
+}
+
+/* Enterprise Standard Inline Subheader */
+.inline-subheader {
+    display: flex;
+    align-items: center;
+    margin-bottom: 16px;
+    padding: 10px 14px;
+    background-color: #f1f5f9;  /* Slightly different tint for subheader hierarchy */
+    border-radius: 4px;
+    flex-wrap: wrap;
+    gap: 12px;
+    border-left: 3px solid #2E86C1;  /* McKinsey blue accent */
+}
+
+/* Subheader Title */
+.subheader-title-inline {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 16px;  /* Increased for better readability while maintaining hierarchy */
+    font-weight: 500;
+    color: #374151;  /* Slightly softer than main titles */
+    margin: 0;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* Subheader Dropdown Styling */
+.inline-dropdown-subheader {
+    min-width: 180px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;  /* Increased for better readability */
+}
+
+.inline-dropdown-subheader .Select-control {
+    min-height: 30px;  /* Slightly more compact than main dropdowns */
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;  /* Smaller radius for subheader */
+    background-color: white;
+    transition: all 0.15s ease;
+}
+
+.inline-dropdown-subheader .Select-control:hover {
+    border-color: #94a3b8;
+}
+
+.inline-dropdown-subheader .Select-control.is-focused {
+    border-color: #2E86C1;
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.1);
+}
+
+.inline-dropdown-subheader .Select-value-label,
+.inline-dropdown-subheader .Select-single-value {
+    color: #374151;
+    font-weight: 400;
+}
+
+.inline-dropdown-subheader .Select-placeholder {
+    color: #94a3b8;
+}
+
+/* Smaller Subheader Dropdown (Country) */
+.inline-dropdown-subheader-sm {
+    min-width: 130px;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;  /* Increased for better readability */
+}
+
+.inline-dropdown-subheader-sm .Select-control {
+    min-height: 30px;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+    background-color: white;
+    transition: all 0.15s ease;
+}
+
+.inline-dropdown-subheader-sm .Select-control:hover {
+    border-color: #94a3b8;
+}
+
+.inline-dropdown-subheader-sm .Select-control.is-focused {
+    border-color: #2E86C1;
+    box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.1);
+}
+
+.inline-dropdown-subheader-sm .Select-value-label,
+.inline-dropdown-subheader-sm .Select-single-value {
+    color: #374151;
+    font-weight: 400;
+}
+
+.inline-dropdown-subheader-sm .Select-placeholder {
+    color: #94a3b8;
+}
+
+/* Enterprise Standard Legend Styling */
+.legend-historical {
+    color: #2E86C1;  /* McKinsey blue - preserved from original */
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.legend-forecast {
+    color: #4CAF50;  /* Green - preserved from original */
+    font-weight: 600;
+    font-size: 13px;
+}
+
+.legend-separator {
+    margin: 0 10px;
+    color: #6b7280;
+    font-size: 13px;
+}
+
+.inline-toggle-button:hover {
+    background-color: #1B4F72;  /* Darker McKinsey blue */
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(46, 134, 193, 0.3);
+}
+
+.inline-toggle-button:active {
+    background-color: #174068;  /* Even darker for press state */
+    transform: translateY(0);
+    box-shadow: 0 1px 2px rgba(46, 134, 193, 0.3);
+}
+
+/* Enterprise Inline Button Styling */
+.inline-button-primary {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;  /* Increased for better readability */
+    font-weight: 500;
+    padding: 8px 16px;
+    background-color: #2E86C1;  /* McKinsey blue */
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-height: 34px;  /* Match dropdown height */
+}
+
+.inline-button-primary:hover {
+    background-color: #1B4F72;  /* Darker McKinsey blue */
+    transform: translateY(-1px);  /* Subtle lift effect */
+    box-shadow: 0 2px 8px rgba(46, 134, 193, 0.3);
+}
+
+.inline-button-secondary {
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;  /* Increased for better readability */
+    font-weight: 500;
+    padding: 8px 16px;
+    background-color: #f8fafc;  /* Light background matching section header */
+    color: #374151;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+    flex-shrink: 0;
+    min-height: 34px;  /* Match dropdown height */
+}
+
+.inline-button-secondary:hover {
+    background-color: #e2e8f0;
+    border-color: #94a3b8;
+    transform: translateY(-1px);  /* Subtle lift effect */
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Enterprise Responsive Design */
+@media (max-width: 768px) {
+    .inline-section-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 14px;
+        padding: 12px 16px;
+    }
+    
+    .section-title-inline {
+        font-size: 17px;  /* Proportionally larger on mobile */
+    }
+    
+    .inline-dropdown {
+        min-width: unset;
+        width: 100%;
+    }
+    
+    .inline-toggle-button {
+        margin-left: 0;  /* Remove auto margin on mobile */
+        align-self: flex-end;  /* Align to right on mobile */
+    }
+    
+    .inline-subheader {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 8px 12px;
+    }
+    
+    .subheader-title-inline {
+        font-size: 15px;  /* Proportionally larger on mobile */
+    }
+    
+    .inline-dropdown-subheader,
+    .inline-dropdown-subheader-sm {
+        min-width: unset;
+        width: 100%;
+    }
+}
+
+ 
