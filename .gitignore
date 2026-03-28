@@ -17,3 +17,5 @@ config.ini
 *.pdf
 *.pkl
 *.log
+*.html
+*.png
