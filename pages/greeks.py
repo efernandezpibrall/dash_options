@@ -1,1593 +1,1887 @@
 # pages/greeks.py
 import configparser
-from dash import html, dcc, dash_table, callback, Output, Input, State, Dash, html, dcc, ALL
-import plotly.graph_objects as go
-import dash_bootstrap_components as dbc
-import plotly.express as px
-import dash
-from dash.dash_table.Format import Format, Group, Scheme
+import io
 import os
-import json
-from dash import Dash, html, dcc, dash_table, Input, Output, callback_context
+from functools import lru_cache
+
+import dash
+import dash_ag_grid as dag
+from dash import Input, Output, State, callback, dcc, html
 import pandas as pd
-import psycopg2
-import requests # Add this import
-import datetime as dt
-import plotly.express as px
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
-#------ code to be able to access config.ini, even having the path in the .virtualenvs is not working without it ------#
+from dataframe_utils import concat_dataframes
+
+
 try:
-    # Get the directory where your script is located
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Navigate to the directory containing config.ini
-    # Adjust the number of '..' as needed to reach the correct directory
-    config_dir = os.path.abspath(os.path.join(script_dir, '..','..'))  # Go up one level
+    config_dir = os.path.abspath(os.path.join(script_dir, '..', '..'))
     CONFIG_FILE_PATH = os.path.join(config_dir, 'config.ini')
-except:
-    CONFIG_FILE_PATH = 'config.ini'  # Assumes it's in the same directory or the path it is detected
+except Exception:
+    CONFIG_FILE_PATH = 'config.ini'
 
-
-# --- Load Configuration from INI File ---
 config_reader = configparser.ConfigParser(interpolation=None)
 config_reader.read(CONFIG_FILE_PATH)
 
-# Read values from the ini file sections
 DB_CONNECTION_STRING = config_reader.get('DATABASE', 'CONNECTION_STRING', fallback=None)
 DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng')
-PROXY_URL = config_reader.get('NETWORK', 'PROXY_URL', fallback=None)
-ASPECT_USERNAME = config_reader.get('ASPECT', 'USERNAME', fallback=None)
-ASPECT_PASSWORD = config_reader.get('ASPECT', 'PASSWORD', fallback=None)
 
-# --- Essential Variable Checks ---
 if not DB_CONNECTION_STRING:
     raise ValueError(f"Missing DATABASE CONNECTION_STRING in {CONFIG_FILE_PATH}")
 
-# create engine
 engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
 
-def aspect_live_exposure_report(cob, username, password):
-    # Get today's date
-    today = dt.date.today()
-    # Convert cob to date object if it's a string
-    if isinstance(cob, str):
-        cob_date = dt.datetime.strptime(cob, "%Y-%m-%d").date()
-    else:
-        cob_date = cob
-    # Set todayPricing based on whether cob is today or before today
-    if cob_date == today:
-        today_pricing = 0  # yes
-    else:
-        today_pricing = 1  # no
-    param = {}
-    url = 'https://at.myaspect.net/webservice/aspectrs/_MiddleOffice_POSITION_ExposureReport'
-    cobdate = {
-        "cobDate": cob,
-        "todayPricing": today_pricing,
-        "book": 'AD-LNG',
-        'displayExchangeTradeOtc': True
-    }
-    proxies = {'http': PROXY_URL, 'https': PROXY_URL} if PROXY_URL else None
-    json_cobdate = json.dumps(cobdate)
-    aspect_call = requests.post(
-        url,
-        data=json_cobdate,
-        auth=(username, password),
-        params=param,
-        verify=False,
-        proxies=proxies
-    )
-    result = pd.DataFrame.from_records(aspect_call.json())
-    return result
+VALUATION_TABLE = f'{DB_SCHEMA}.trades_options_valuation'
 
+GREEK_DEFINITIONS = {
+    'delta': {
+        'label': 'Delta',
+        'type': 'instrument',
+        'side_columns': {'a': 'qty_delta_asset_a', 'b': 'qty_delta_asset_b'},
+    },
+    'gamma': {
+        'label': 'Gamma',
+        'type': 'instrument',
+        'side_columns': {'a': 'qty_gamma_asset_a', 'b': 'qty_gamma_asset_b'},
+    },
+    'vega': {
+        'label': 'Vega',
+        'type': 'instrument',
+        'side_columns': {'a': 'qty_vega_sigma1', 'b': 'qty_vega_sigma2'},
+    },
+    'theta': {
+        'label': 'Theta',
+        'type': 'pair',
+        'column': 'qty_theta',
+    },
+    'correlation': {
+        'label': 'Correlation',
+        'type': 'pair',
+        'column': 'qty_corr_sensitivity',
+    },
+}
 
-# Available Greeks
-GREEK_OPTIONS = [
-    {'label': 'Delta', 'value': 'delta'},
-    {'label': 'Gamma', 'value': 'gamma'},
-    {'label': 'Vega', 'value': 'vega'},
-    {'label': 'Theta', 'value': 'theta'},
-    {'label': 'Correlation', 'value': 'correlation'}
+GREEK_KEYS = list(GREEK_DEFINITIONS.keys())
+
+MATURITY_AGGREGATION_OPTIONS = [
+    {'label': 'Mixed', 'value': 'mixed'},
+    {'label': 'Month', 'value': 'month'},
+    {'label': 'Quarter', 'value': 'quarter'},
+    {'label': 'Year', 'value': 'year'},
+]
+
+UNIT_MODE_OPTIONS = [
+    {'label': 'Native', 'value': 'native'},
+    {'label': 'Lots', 'value': 'lots'},
+]
+
+ASSET_DISPLAY_LABELS = {
+    'ICE_BRENT_FUTURES': 'Brent',
+    'ICE_HH': 'HH',
+    'ICE_JKM': 'JKM',
+    'ICE_TTF': 'TTF',
+    'TFM': 'TTF',
+}
+
+ASSET_DISPLAY_ORDER = ['TTF', 'JKM', 'HH', 'Brent']
+
+DATA_COLUMNS = [
+    'cob_date',
+    'trade_date',
+    'substrategy',
+    'type_trade',
+    'type_option',
+    'put_call',
+    'buy_sell',
+    'expiration_date',
+    'quantity',
+    'unit_quantity',
+    'asset_a',
+    'asset_b',
+    'maturity_date_type_a',
+    'maturity_date_a',
+    'maturity_date_type_b',
+    'maturity_date_b',
+    'price_a',
+    'price_b',
+    'adjusted_vol_a',
+    'adjusted_vol_b',
+    'correlation',
+    'qty_delta_asset_a',
+    'qty_delta_asset_b',
+    'qty_gamma_asset_a',
+    'qty_gamma_asset_b',
+    'qty_vega_sigma1',
+    'qty_vega_sigma2',
+    'qty_theta',
+    'qty_corr_sensitivity',
+    'qty_value',
+    'qty_pnl',
 ]
 
 
-# ---------------------- Data Functions ----------------------
-def fetch_options_valuation_data(engine, cob_date=None):
-    try:
-        query = f"""
-        SELECT *
-        FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{cob_date}'
-        """
-
-        return pd.read_sql(query, engine)
-    except Exception as e:
-        print(f"Failed to fetch options data: {str(e)}")
-        return pd.DataFrame()
-
-
-def mapping_instrument_units(engine, cob_date=None):
-    try:
-        query = f"""
-        SELECT a.instrument,b."Conv_factor", b."To_unit" as "unit"
-        FROM {DB_SCHEMA}.mapping_instrument_marker a
-        left join at_lng.mapping_instrument_curve_enverus b
-        on a."Marker"=b."Instrument"
-        """
-
-        return pd.read_sql(query, engine)
-    except Exception as e:
-        print(f"Failed to fetch options data: {str(e)}")
-        return pd.DataFrame()
-
-
-def get_available_dates(engine):
-    """Get list of available trade dates."""
-    try:
-        query = "SELECT DISTINCT cob_date FROM at_lng.trades_options_valuation ORDER BY cob_date DESC"
-        dates = pd.read_sql(query, engine)
-        return dates['cob_date'].tolist()
-    except Exception as e:
-        print(f"Failed to fetch available dates: {str(e)}")
-        return []
-
-
-def get_strategies(engine, cob_date):
-    """Get list of available strategies and assets for a given date."""
-    try:
-        query = f"""
-        SELECT DISTINCT substrategy
-        FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{cob_date}'
-        """
-        data = pd.read_sql(query, engine)
-        return sorted(data['substrategy'].unique())
-    except Exception as e:
-        print(f"Failed to fetch strategies and assets: {str(e)}")
-        return []
-
-
-# First, add a function to get available trade types
-def get_trade_types(engine, cob_date):
-    """Get list of available trade types for a given date."""
-    try:
-        query = f"""
-        SELECT DISTINCT type_trade
-        FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{cob_date}'
-        """
-        data = pd.read_sql(query, engine)
-        return sorted(data['type_trade'].unique())
-    except Exception as e:
-        print(f"Failed to fetch trade types: {str(e)}")
-        return []
-
-
-# Function to create consistent asset pair naming
-def create_standardized_asset_pair(asset_a, asset_b):
-    """
-    Create a standardized asset pair name by alphabetically ordering the assets.
-    This ensures that 'ICE_HH-ICE_JKM' and 'ICE_JKM-ICE_HH' are treated as the same pair.
-    Args:
-        asset_a: First asset name
-        asset_b: Second asset name
-    Returns:
-        Standardized asset pair name
-    """
-    # Sort the assets alphabetically to ensure consistent naming
-    assets = sorted([asset_a, asset_b])
-    return f"{assets[0]}-{assets[1]}"
-
-
-def create_greeks_pivot_table(data, greek_type, lots_enabled=False):
-    """
-    Create a pivot table with maturity dates as rows and assets as columns.
-    When maturity_date_type is 'calendar', spread the greeks evenly across all 12 months of the year.
-    For correlation, preserves calendar labels without monthly splitting.
-    Uses mapping_instrument_units for unit conversion.
-
-    Args:
-        data: DataFrame containing the Greek data
-        greek_type: Type of Greek to calculate (delta, gamma, vega, theta, correlation)
-        lots_enabled: Boolean indicating whether to convert to lots
-    """
-    # Create a copy of the data
-    df = data.copy()
-
-    # Handle correlation differently
-    if greek_type == 'correlation':
-        return create_correlation_pivot_table(df)
-
-    # Map Greek type to corresponding columns
-    greek_columns = {
-        'delta': ['qty_delta_asset_a', 'qty_delta_asset_b'],
-        'gamma': ['qty_gamma_asset_a', 'qty_gamma_asset_b'],
-        'vega': ['qty_vega_sigma1', 'qty_vega_sigma2'],
-        'theta': ['qty_theta'],
-        'correlation': ['qty_corr_sensitivity']
+def _empty_store(message='No data available'):
+    return {
+        'meta': {
+            'message': message,
+            'cob_date': None,
+            'raw_rows': 0,
+            'normalized_rows': 0,
+            'strategies': 0,
+            'trade_types': 0,
+            'units': [],
+            'aggregation': 'mixed',
+            'month_through': None,
+            'quarter_through': None,
+            'unit_mode': 'native',
+        },
+        'rows': [],
     }
 
-    # Get instrument to unit mapping and conversion factors
-    instrument_mapping_df = mapping_instrument_units(engine)
 
-    # Create a dictionary for quick lookups
-    unit_conv_map = {}
-    if not instrument_mapping_df.empty:
-        for _, row in instrument_mapping_df.iterrows():
-            if row['instrument'] and not pd.isna(row['instrument']):
-                unit_conv_map[row['instrument']] = {
-                    'unit': row['unit'] if not pd.isna(row['unit']) else '',
-                    'conv_factor': row['Conv_factor'] if not pd.isna(row['Conv_factor']) else 1.0
-                }
-
-    # Separate calendar and month entries
-    calendar_entries = df[df['maturity_date_type_a'] == 'calendar'].copy()
-    month_entries = df[df['maturity_date_type_a'] != 'calendar'].copy()
-
-    # Create expanded DataFrame to hold all entries including distributed calendar entries
-    expanded_entries = []
-
-    # Process month entries normally
-    if not month_entries.empty:
-        # Ensure maturity_date column exists and is properly formatted
-        try:
-            # Extract year and month from maturity date
-            month_entries['maturity_date'] = month_entries['maturity_date_a'].dt.strftime('%Y-%m')
-        except Exception as e:
-            print(f"Error formatting maturity date: {e}")
-            # Create a default maturity_date if there's an issue
-            month_entries['maturity_date'] = "Unknown"
-
-        expanded_entries.append(month_entries)
-
-    # Process calendar entries - distribute across all 12 months
-    if not calendar_entries.empty:
-        for _, row in calendar_entries.iterrows():
-            year = row['maturity_date_a'].year
-
-            # Create 12 copies of this row, one for each month
-            for month in range(1, 13):
-                month_row = row.copy()
-                month_row['maturity_date'] = f"{year}-{month:02d}"
-
-                # Divide all Greek values by 12 to distribute evenly
-                for greek_col in [col for sublist in greek_columns.values() for col in sublist]:
-                    if greek_col in month_row:
-                        month_row[greek_col] = month_row[greek_col] / 12
-
-                expanded_entries.append(pd.DataFrame([month_row]))
-
-    # Combine all entries
-    if expanded_entries:
-        df_expanded = pd.concat(expanded_entries, ignore_index=True)
-    else:
-        print("No data to process after calendar/month filtering")
-        return pd.DataFrame(), {}  # Return empty DataFrame and empty unit map if no data
-
-    # Create asset-specific Greek values
-    result_dfs = []
-
-    # Process asset_a
-    df_a = df_expanded.copy()
-    df_a['asset'] = df_a['asset_a']
-
-    # Get conversion factor for the asset
-    df_a['conv_factor'] = df_a['asset'].map(lambda x: unit_conv_map.get(x, {}).get('conv_factor', 1.0))
-
-    # Get unit for the asset
-    df_a['unit'] = df_a['asset'].map(lambda x: unit_conv_map.get(x, {}).get('unit', ''))
-
-    # Apply appropriate calculations based on the greek type and lots setting
-    if greek_type == 'delta' or greek_type == 'gamma':
-        # Apply conversion factor for delta and gamma
-        df_a['greek_value'] = df_a[greek_columns[greek_type][0]] * df_a['conv_factor']
-
-        # Apply lots conversion if enabled for delta/gamma
-        if lots_enabled:
-            # Apply lots conversion based on the unit
-            df_a['greek_value'] = df_a.apply(
-                lambda row: row['greek_value'] / 1000 if row['unit'] == 'BBL' else
-                row['greek_value'] / 10000 if row['unit'] == 'MMBtu' else
-                row['greek_value'],  # No change for 'Day' or other units
-                axis=1
-            )
-    elif greek_type == 'theta':
-        # For theta, split the total theta between assets (50% each)
-        # No conversion factor for theta
-        df_a['greek_value'] = df_a[greek_columns[greek_type][0]] * 0.5
-    else:
-        # For other Greeks (vega, etc.), no conversion factor needed
-        df_a['greek_value'] = df_a[greek_columns[greek_type][0]]
-
-    result_dfs.append(df_a[['maturity_date', 'asset', 'greek_value']])
-
-    # Process asset_b
-    df_b = df_expanded.copy()
-    df_b['asset'] = df_b['asset_b']
-
-    # Get conversion factor for the asset
-    df_b['conv_factor'] = df_b['asset'].map(lambda x: unit_conv_map.get(x, {}).get('conv_factor', 1.0))
-
-    # Get unit for the asset
-    df_b['unit'] = df_b['asset'].map(lambda x: unit_conv_map.get(x, {}).get('unit', ''))
-
-    # Apply appropriate calculations based on the greek type and lots setting
-    if greek_type == 'delta' or greek_type == 'gamma':
-        # Apply conversion factor for delta and gamma
-        df_b['greek_value'] = df_b[greek_columns[greek_type][1]] * df_b['conv_factor']
-
-        # Apply lots conversion if enabled for delta/gamma
-        if lots_enabled:
-            # Apply lots conversion based on the unit
-            df_b['greek_value'] = df_b.apply(
-                lambda row: row['greek_value'] / 1000 if row['unit'] == 'BBL' else
-                row['greek_value'] / 10000 if row['unit'] == 'MMBtu' else
-                row['greek_value'],  # No change for 'Day' or other units
-                axis=1
-            )
-    elif greek_type == 'theta':
-        # For theta, split the total theta between assets (50% each)
-        # No conversion factor for theta
-        df_b['greek_value'] = df_b[greek_columns[greek_type][0]] * 0.5
-    else:
-        # For other Greeks (vega, etc.), no conversion factor needed
-        df_b['greek_value'] = df_b[greek_columns[greek_type][1]]
-
-    result_dfs.append(df_b[['maturity_date', 'asset', 'greek_value']])
-
-    # Combine results
-    combined_df = pd.concat(result_dfs)
-
-    # Group by maturity date and asset, sum up the Greek values
-    grouped_df = combined_df.groupby(['maturity_date', 'asset'])['greek_value'].sum().reset_index()
-
-    # Create the pivot table
-    pivot_df = grouped_df.pivot(index='maturity_date', columns='asset', values='greek_value')
-
-    # Replace NaN with 0
-    pivot_df = pivot_df.fillna(0)
-
-    # Sort by maturity date
-    pivot_df = pivot_df.sort_index()
-
-    # Add row totals
-    pivot_df['Row Total'] = pivot_df.sum(axis=1)
-
-    # Calculate column totals
-    totals_row = pivot_df.sum().to_frame().T
-    totals_row.index = ['Total']
-
-    # Combine the pivot table with the totals row
-    final_df = pd.concat([pivot_df, totals_row])
-
-    # Convert all values to integers for better readability
-    final_df = final_df.astype(int)
-
-    # Build unit map using the instrument_mapping_df
-    unit_map = {}
-    for asset in pivot_df.columns:
-        if asset != 'Row Total':
-            unit_info = unit_conv_map.get(asset, {})
-            unit_map[asset] = unit_info.get('unit', '')
-
-    return final_df, unit_map
+def _safe_number(value, default=0.0):
+    if value is None or pd.isna(value):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
-def aggregate_by_date_level(data, date_column, aggregation_level):
-    """
-    Aggregates data based on selected date aggregation level.
-    Args:
-        data: DataFrame with date column
-        date_column: Name of the date column
-        aggregation_level: 'month', 'quarter', or 'year'
-    Returns:
-        DataFrame with aggregated dates
-    """
-    # Create a copy to avoid modifying the original
-    df = data.copy()
-    # Make sure the date column is in the right format
-    # First check if we need to handle special cases like correlation with maturity_pair
-    if date_column == 'maturity_pair' and '/' in str(df[date_column].iloc[0]):
-        # This is a correlation table with maturity pairs
-        # We'll need to handle each part of the pair separately
+def _normalize_unit(unit):
+    if unit is None or pd.isna(unit):
+        return 'N/A'
 
-        # Create a function to process each date part in the pair
-        def process_maturity_pair(pair_str):
-            if '/' not in pair_str:
-                # Single date/cal entry
-                return process_single_date(pair_str)
-            else:
-                # Split the pair and process each part
-                parts = pair_str.split('/')
-                processed_parts = [process_single_date(part) for part in parts]
-                return '/'.join(processed_parts)
-
-        # Helper to process a single date or calendar entry
-        def process_single_date(date_str):
-            # Handle calendar entries
-            if '-CAL' in date_str:
-                year = date_str.split('-')[0]
-                return f"{year}-CAL"  # Calendar entries stay as they are
-            # Handle regular dates based on aggregation level
-            try:
-                date_obj = pd.to_datetime(date_str)
-                if aggregation_level == 'month':
-                    return date_obj.strftime('%Y-%m')
-                elif aggregation_level == 'quarter':
-                    return f"{date_obj.year}-Q{(date_obj.month - 1) // 3 + 1}"
-                elif aggregation_level == 'year':
-                    return str(date_obj.year)
-            except:
-                return date_str  # If parsing fails, return as is
-            return date_str
-
-        # Apply the processing to each maturity pair
-        df[date_column] = df[date_column].apply(process_maturity_pair)
-    else:
-        # Standard date column handling
-        try:
-            # Check if we're dealing with string dates in YYYY-MM format
-            if df[date_column].dtype == 'object':
-                # For string date formats like "2023-05"
-                def process_string_date(date_str):
-                    # Skip 'Total' or other non-date values
-                    if not isinstance(date_str, str) or date_str == 'Total':
-                        return date_str
-                    # Handle YYYY-MM format
-                    if '-' in date_str and len(date_str.split('-')) == 2:
-                        year, month = date_str.split('-')
-                        if aggregation_level == 'month':
-                            return date_str  # Keep as is
-                        elif aggregation_level == 'quarter':
-                            try:
-                                month_num = int(month)
-                                quarter = (month_num - 1) // 3 + 1
-                                return f"{year}-Q{quarter}"
-                            except ValueError:
-                                return date_str
-                        elif aggregation_level == 'year':
-                            return year
-                    return date_str
-
-                df[date_column] = df[date_column].apply(process_string_date)
-            # Try to convert to datetime if not already
-            elif not pd.api.types.is_datetime64_any_dtype(df[date_column]):
-                # Save the 'Total' row if it exists
-                mask_total = df[date_column] == 'Total'
-                total_indices = df.index[mask_total]
-                # Convert non-Total values to datetime
-                if not all(mask_total):
-                    df.loc[~mask_total, date_column] = pd.to_datetime(
-                        df.loc[~mask_total, date_column],
-                        errors='coerce'
-                    )
-                # Now apply the aggregation based on level
-                if aggregation_level == 'month':
-                    # Keep as Year-Month
-                    df.loc[~mask_total, date_column] = df.loc[~mask_total, date_column].dt.strftime('%Y-%m')
-                elif aggregation_level == 'quarter':
-                    # Convert to Year-Quarter
-                    df.loc[~mask_total, date_column] = df.loc[~mask_total, date_column].apply(
-                        lambda x: f"{x.year}-Q{(x.month - 1) // 3 + 1}" if pd.notna(x) else "Unknown"
-                    )
-                elif aggregation_level == 'year':
-                    # Convert to just Year
-                    df.loc[~mask_total, date_column] = df.loc[~mask_total, date_column].dt.year.astype(str)
-            # For data already in datetime format
-            else:
-                # Apply formatting to datetime column
-                if aggregation_level == 'month':
-                    df[date_column] = df[date_column].dt.strftime('%Y-%m')
-                elif aggregation_level == 'quarter':
-                    df[date_column] = df[date_column].apply(
-                        lambda x: f"{x.year}-Q{(x.month - 1) // 3 + 1}" if pd.notna(x) else "Unknown"
-                    )
-                elif aggregation_level == 'year':
-                    df[date_column] = df[date_column].dt.year.astype(str)
-        except Exception as e:
-            print(f"Error during date processing: {e}")
-            # If datetime conversion fails, try string manipulation
-            # This handles string date formats or cases where we have special entries
-            if aggregation_level == 'quarter' or aggregation_level == 'year':
-                def extract_year_and_aggregate(val):
-                    # Try to extract year from string like "2023-05" or "2023-CAL"
-                    if isinstance(val, str) and '-' in val:
-                        year = val.split('-')[0]
-                        if aggregation_level == 'year':
-                            return year
-                        elif aggregation_level == 'quarter':
-                            # Try to extract month and convert to quarter
-                            parts = val.split('-')
-                            if len(parts) >= 2 and parts[1].isdigit():
-                                month = int(parts[1])
-                                quarter = (month - 1) // 3 + 1
-                                return f"{year}-Q{quarter}"
-                    return val
-
-                df[date_column] = df[date_column].apply(extract_year_and_aggregate)
-
-    # Group by the processed date column and sum up all numeric columns
-    if not df.empty:
-        # Save Total row if it exists
-        total_row = None
-        if 'Total' in df[date_column].values:
-            total_row = df[df[date_column] == 'Total']
-            df = df[df[date_column] != 'Total']  # Remove total for grouping
-        # Get numeric columns excluding the date column
-        numeric_cols = [col for col in df.select_dtypes(include=['number']).columns
-                        if col != date_column]
-        if numeric_cols:
-            # Create a different approach to avoid the column collision
-            # 1. Rename the date column temporarily
-            temp_col_name = f"temp_{date_column}"
-            df.rename(columns={date_column: temp_col_name}, inplace=True)
-            # 2. Group by the temporary column name
-            df_grouped = df.groupby(temp_col_name)[numeric_cols].sum().reset_index()
-            # 3. Rename back to the original column name
-            df_grouped.rename(columns={temp_col_name: date_column}, inplace=True)
-            # Add back the total row if it exists
-            if total_row is not None:
-                cols_to_use = [date_column] + [col for col in numeric_cols if col in total_row.columns]
-                total_subset = total_row[cols_to_use]
-                df_grouped = pd.concat([df_grouped, total_subset], ignore_index=True)
-            return df_grouped
-    # If we can't aggregate, return the original data with processed dates
-    if total_row is not None:
-        df = pd.concat([df, total_row], ignore_index=True)
-    return df
+    normalized = str(unit).strip()
+    normalized_key = normalized.lower().replace(' ', '')
+    unit_map = {
+        'mmbtu': 'MMBtu',
+        'mmbtus': 'MMBtu',
+        'mmbtu/day': 'MMBtu',
+        'mmbtu/d': 'MMBtu',
+        'mmbtuperday': 'MMBtu',
+        'bbl': 'BBL',
+        'bbls': 'BBL',
+        'barrel': 'BBL',
+        'barrels': 'BBL',
+        'day': 'Day',
+        'days': 'Day',
+    }
+    return unit_map.get(normalized_key, normalized)
 
 
-def create_correlation_pivot_table(df):
-    """
-    Create a pivot table specifically for correlation sensitivity,
-    showing asset pairs as columns and maturity date pairs as rows.
-    For calendar maturities, preserve the calendar label without splitting.
-    Uses standardized asset pair naming to avoid duplicates.
-    """
-    # Create a copy of the data
-    df = df.copy()
+def _lot_divisor(unit):
+    normalized = _normalize_unit(unit)
+    if normalized == 'BBL':
+        return 1000.0
+    if normalized == 'MMBtu':
+        return 10000.0
+    return 1.0
 
-    # Create expanded DataFrame to hold all entries
-    processed_entries = []
-    # Process each row to create the maturity pair labels
-    for _, row in df.iterrows():
-        try:
-            # Determine display format for each asset based on its maturity type
-            if row['maturity_date_type_a'] == 'calendar':
-                # For calendar type, use the year as label
-                year_a = row['maturity_date_a'].year
-                mat_label_a = f"{year_a}-CAL"
-            else:
-                # For month type, use year-month format
-                mat_label_a = row['maturity_date_a'].strftime('%Y-%m')
-            if row['maturity_date_type_b'] == 'calendar':
-                # For calendar type, use the year as label
-                year_b = row['maturity_date_b'].year
-                mat_label_b = f"{year_b}-CAL"
-            else:
-                # For month type, use year-month format
-                mat_label_b = row['maturity_date_b'].strftime('%Y-%m')
-            # Create maturity pair label
-            if mat_label_a == mat_label_b:
-                # Same maturity type and period for both assets
-                row['maturity_pair'] = mat_label_a
-            else:
-                # Different maturity dates or types
-                # Sort maturity labels to maintain consistency when possible
-                # But only sort if they're the same format (both calendar or both monthly)
-                if ('CAL' in mat_label_a and 'CAL' in mat_label_b) or \
-                        ('CAL' not in mat_label_a and 'CAL' not in mat_label_b):
-                    maturities = sorted([mat_label_a, mat_label_b])
-                    row['maturity_pair'] = f"{maturities[0]}/{maturities[1]}"
-                else:
-                    # Don't sort if mixing calendar and monthly
-                    row['maturity_pair'] = f"{mat_label_a}/{mat_label_b}"
-            # Create standardized asset pair name
-            row['asset_pair'] = create_standardized_asset_pair(row['asset_a'], row['asset_b'])
-            processed_entries.append(row)
-        except Exception as e:
-            print(f"Error formatting maturity date: {e}")
-            row['maturity_pair'] = "Unknown"
-            row['asset_pair'] = create_standardized_asset_pair(row['asset_a'], row['asset_b'])
-            processed_entries.append(row)
-    # Convert processed entries to DataFrame
-    if processed_entries:
-        df_processed = pd.DataFrame(processed_entries)
-    else:
-        print("No data to process")
-        return pd.DataFrame(), {}  # Return empty DataFrame and empty unit map if no data
-    # Select relevant columns and group by maturity pair and asset pair
-    corr_df = df_processed[['maturity_pair', 'asset_pair', 'qty_corr_sensitivity']]
-    grouped_df = corr_df.groupby(['maturity_pair', 'asset_pair'])['qty_corr_sensitivity'].sum().reset_index()
-    # Create the pivot table with asset pairs as columns
-    pivot_df = grouped_df.pivot(
-        index='maturity_pair',
-        columns='asset_pair',
-        values='qty_corr_sensitivity'
+
+def _standard_pair(asset_a, asset_b):
+    assets = [str(asset).strip() for asset in [asset_a, asset_b] if asset is not None and not pd.isna(asset)]
+    if not assets:
+        return 'N/A'
+    if len(assets) == 1:
+        return assets[0]
+    return ' / '.join(sorted(assets))
+
+
+def _display_asset_label(value):
+    if value is None or pd.isna(value):
+        return 'N/A'
+
+    label = str(value).strip()
+    if not label:
+        return 'N/A'
+
+    if label in ASSET_DISPLAY_LABELS:
+        return ASSET_DISPLAY_LABELS[label]
+
+    upper_label = label.upper()
+    if upper_label in ASSET_DISPLAY_LABELS:
+        return ASSET_DISPLAY_LABELS[upper_label]
+
+    if upper_label.startswith('ICE_'):
+        cleaned = label[4:].replace('_FUTURES', '').replace('_', ' ').strip()
+        return cleaned.title() if cleaned else label
+
+    return label
+
+
+def _compact_pair_label(value):
+    parts = [_display_asset_label(part) for part in str(value or '').split(' / ') if part.strip()]
+    if not parts:
+        return 'N/A'
+
+    unique_parts = []
+    for part in parts:
+        if part not in unique_parts:
+            unique_parts.append(part)
+
+    preferred_orders = {
+        frozenset(['TTF', 'JKM']): ['TTF', 'JKM'],
+        frozenset(['Brent', 'HH']): ['Brent', 'HH'],
+    }
+    preferred_order = preferred_orders.get(frozenset(unique_parts))
+    if preferred_order:
+        unique_parts = [part for part in preferred_order if part in unique_parts]
+
+    if len(unique_parts) == 1:
+        return unique_parts[0]
+    return '-'.join(unique_parts)
+
+
+def _asset_sort_position(label):
+    if label in ASSET_DISPLAY_ORDER:
+        return ASSET_DISPLAY_ORDER.index(label)
+    return len(ASSET_DISPLAY_ORDER) + 1
+
+
+def _ladder_column_sort_key(column):
+    parts = str(column).split('-')
+    return (
+        1 if len(parts) > 1 else 0,
+        [_asset_sort_position(part) for part in parts],
+        str(column),
     )
-    # Replace NaN with 0
-    pivot_df = pivot_df.fillna(0)
 
-    # Sort by maturity date - custom sorting to handle calendar labels
-    def maturity_sort_key(maturity_pair):
-        """Custom sort key for maturity pairs including calendars"""
-        if '/' in maturity_pair:
-            # Split the pair and sort by each component
-            mat_a, mat_b = maturity_pair.split('/')
-            # Handle calendar labels
-            key_a = (mat_a.replace('-CAL', '-13'), mat_a)  # Place calendars after months
-            key_b = (mat_b.replace('-CAL', '-13'), mat_b)
-            return (key_a, key_b)
-        else:
-            # Single maturity, might be calendar
-            return ((maturity_pair.replace('-CAL', '-13'), maturity_pair),)
+
+def _to_timestamp(value):
+    date_value = pd.to_datetime(value, errors='coerce')
+    if pd.isna(date_value):
+        return None
+    return pd.Timestamp(date_value).normalize()
+
+
+def _format_cutoff_value(value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
+        return None
+    return date_value.strftime('%Y-%m-%d')
+
+
+def _quarter_end(value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
+        return None
+    return (date_value + pd.offsets.QuarterEnd(0)).normalize()
+
+
+def _year_end(value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
+        return None
+    return (date_value + pd.offsets.YearEnd(0)).normalize()
+
+
+def _quarter_label(value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
+        return 'Unknown'
+    return f'{date_value.year}-Q{((date_value.month - 1) // 3) + 1}'
+
+
+def _month_through_label(value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
+        return 'Unknown'
+    return f'{_quarter_label(date_value)} / {date_value.strftime("%Y-%m")}'
+
+
+def _quarter_through_label(value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
+        return 'Unknown'
+    return str(date_value.year)
+
+
+def _default_month_cutoff(cob_date):
+    date_value = _to_timestamp(cob_date)
+    if date_value is None:
+        date_value = pd.Timestamp.today().normalize()
+    return _quarter_end(date_value + pd.DateOffset(months=6))
+
+
+def _default_quarter_cutoff(cob_date):
+    date_value = _to_timestamp(cob_date)
+    if date_value is None:
+        date_value = pd.Timestamp.today().normalize()
+    return _year_end(date_value + pd.DateOffset(months=12))
+
+
+def _resolve_maturity_cutoffs(cob_date, month_through=None, quarter_through=None):
+    month_cutoff = _to_timestamp(month_through) or _default_month_cutoff(cob_date)
+    quarter_cutoff = _to_timestamp(quarter_through) or _default_quarter_cutoff(cob_date)
+    if quarter_cutoff < month_cutoff:
+        quarter_cutoff = _year_end(month_cutoff)
+    return month_cutoff, quarter_cutoff
+
+
+def _format_date_bucket(value, aggregation='mixed', month_through=None, quarter_through=None, cob_date=None):
+    date_value = pd.to_datetime(value, errors='coerce')
+    if pd.isna(date_value):
+        return 'Unknown'
+
+    if aggregation == 'mixed':
+        month_cutoff, quarter_cutoff = _resolve_maturity_cutoffs(cob_date, month_through, quarter_through)
+        date_value = pd.Timestamp(date_value).normalize()
+        if date_value <= month_cutoff:
+            return date_value.strftime('%Y-%m')
+        if date_value <= quarter_cutoff:
+            return _quarter_label(date_value)
+        return str(date_value.year)
+    if aggregation == 'year':
+        return str(date_value.year)
+    if aggregation == 'quarter':
+        return f'{date_value.year}-Q{((date_value.month - 1) // 3) + 1}'
+    return date_value.strftime('%Y-%m')
+
+
+def _maturity_sort_key(value):
+    value = str(value)
+    if value == 'Unknown':
+        return (9999, 12, 9, value)
+
+    first_component = value.split(' / ', 1)[0]
+    if first_component.endswith('-CAL') and len(first_component) >= 8:
+        year_part = first_component[:4]
+        if year_part.isdigit():
+            return (int(year_part), 12, 3, value)
+    if '-Q' in first_component:
+        year_part, quarter_part = first_component.split('-Q', 1)
+        if year_part.isdigit() and quarter_part[:1].isdigit():
+            return (int(year_part), int(quarter_part[:1]) * 3, 2, value)
+    if len(first_component) == 7 and first_component[4] == '-':
+        year_part, month_part = first_component.split('-', 1)
+        if year_part.isdigit() and month_part.isdigit():
+            return (int(year_part), int(month_part), 1, value)
+    if len(first_component) == 4 and first_component.isdigit():
+        return (int(first_component), 12, 4, value)
+    return (9998, 12, 8, value)
+
+
+def _calendar_month_starts(value):
+    date_value = pd.to_datetime(value, errors='coerce')
+    if pd.isna(date_value):
+        return []
+    return [pd.Timestamp(year=date_value.year, month=month, day=1) for month in range(1, 13)]
+
+
+def _expand_instrument_maturity(
+    value,
+    maturity_type,
+    greek_value,
+    aggregation,
+    month_through=None,
+    quarter_through=None,
+    cob_date=None,
+):
+    maturity_type = str(maturity_type or '').strip().lower()
+    if maturity_type == 'calendar':
+        months = _calendar_month_starts(value)
+        if not months:
+            return [('Unknown', greek_value)]
+        allocated_value = greek_value / len(months)
+        return [
+            (
+                _format_date_bucket(month, aggregation, month_through, quarter_through, cob_date),
+                allocated_value,
+            )
+            for month in months
+        ]
+    return [(_format_date_bucket(value, aggregation, month_through, quarter_through, cob_date), greek_value)]
+
+
+def _format_maturity_component(
+    value,
+    maturity_type,
+    aggregation,
+    month_through=None,
+    quarter_through=None,
+    cob_date=None,
+):
+    maturity_type = str(maturity_type or '').strip().lower()
+    date_value = pd.to_datetime(value, errors='coerce')
+    if pd.isna(date_value):
+        return 'Unknown'
+    if maturity_type == 'calendar':
+        return f'{date_value.year}-CAL'
+    return _format_date_bucket(date_value, aggregation, month_through, quarter_through, cob_date)
+
+
+def _format_maturity_pair(row, aggregation, month_through=None, quarter_through=None, cob_date=None):
+    label_a = _format_maturity_component(
+        row.get('maturity_date_a'),
+        row.get('maturity_date_type_a'),
+        aggregation,
+        month_through,
+        quarter_through,
+        cob_date,
+    )
+    label_b = _format_maturity_component(
+        row.get('maturity_date_b'),
+        row.get('maturity_date_type_b'),
+        aggregation,
+        month_through,
+        quarter_through,
+        cob_date,
+    )
+    if label_a == label_b:
+        return label_a
+    return f'{label_a} / {label_b}'
+
+
+def _format_cob_option(value):
+    date_value = pd.to_datetime(value, errors='coerce')
+    if pd.isna(date_value):
+        return None
+    return date_value.strftime('%Y-%m-%d')
+
+
+def _read_sql(query, params=None):
+    return pd.read_sql(text(query), engine, params=params or {})
+
+
+def get_available_dates():
+    try:
+        query = f'''
+            SELECT DISTINCT cob_date
+            FROM {VALUATION_TABLE}
+            ORDER BY cob_date DESC
+        '''
+        dates = _read_sql(query)
+        return [_format_cob_option(value) for value in dates['cob_date'].dropna()]
+    except Exception:
+        return []
+
+
+def fetch_filter_values(cob_date):
+    if not cob_date:
+        return [], [], []
+
+    data = fetch_options_data(cob_date)
+    if data.empty:
+        return [], [], []
+
+    strategies = sorted(data['substrategy'].dropna().astype(str).unique().tolist())
+    trade_types = sorted(data['type_trade'].dropna().astype(str).unique().tolist())
+
+    assets = sorted(
+        set(data['asset_a'].dropna().astype(str).tolist())
+        | set(data['asset_b'].dropna().astype(str).tolist())
+    )
+    pairs = sorted(
+        {
+            _standard_pair(row['asset_a'], row['asset_b'])
+            for _, row in data[['asset_a', 'asset_b']].dropna(how='all').iterrows()
+        }
+    )
+
+    bucket_options = (
+        [{'label': f'Instrument | {asset}', 'value': f'instrument::{asset}'} for asset in assets]
+        + [{'label': f'Pair | {pair}', 'value': f'pair::{pair}'} for pair in pairs]
+    )
+    return strategies, trade_types, bucket_options
+
+
+def fetch_options_data(cob_date):
+    return _fetch_options_data_cached(cob_date).copy()
+
+
+@lru_cache(maxsize=8)
+def _fetch_options_data_cached(cob_date):
+    if not cob_date:
+        return pd.DataFrame(columns=DATA_COLUMNS)
+
+    query = f'''
+        SELECT {', '.join(DATA_COLUMNS)}
+        FROM {VALUATION_TABLE}
+        WHERE cob_date = :cob_date
+    '''
+    try:
+        data = _read_sql(query, {'cob_date': cob_date})
+    except Exception:
+        return pd.DataFrame(columns=DATA_COLUMNS)
+
+    for column in ['cob_date', 'trade_date', 'expiration_date', 'maturity_date_a', 'maturity_date_b']:
+        if column in data.columns:
+            data[column] = pd.to_datetime(data[column], errors='coerce')
+
+    return data
+
+
+def fetch_max_maturity_date(cob_date):
+    if not cob_date:
+        return None
 
     try:
-        # Sort with custom key function
-        pivot_df = pivot_df.reindex(sorted(pivot_df.index, key=maturity_sort_key))
-    except Exception as e:
-        print(f"Error sorting maturity pairs: {e}")
-        # If sorting fails, leave as is
+        data = fetch_options_data(cob_date)
+    except Exception:
+        return None
 
-    # Add row totals
-    pivot_df['Row Total'] = pivot_df.sum(axis=1)
+    if data.empty:
+        return None
 
-    # Calculate column totals
-    totals_row = pivot_df.sum().to_frame().T
-    totals_row.index = ['Total']
-    # Combine the pivot table with the totals row
-    final_df = pd.concat([pivot_df, totals_row])
-    # Convert all values to integers for better readability
-    final_df = final_df.astype(int)
-
-    # Return an empty unit map for correlation
-    return final_df, {}
+    maturities = concat_dataframes([
+        data[['maturity_date_a']].rename(columns={'maturity_date_a': 'maturity_date'}),
+        data[['maturity_date_b']].rename(columns={'maturity_date_b': 'maturity_date'}),
+    ], ignore_index=True)
+    maturity_dates = pd.to_datetime(maturities['maturity_date'], errors='coerce').dropna()
+    if maturity_dates.empty:
+        return None
+    return pd.Timestamp(maturity_dates.max()).normalize()
 
 
-# ---------------------- Visualization Functions ----------------------
-def plot_greeks_bar_chart(pivot_df, greek_type):
-    """
-    Create a bar chart visualization of Greeks exposure.
-    Updated for correlation pairs with calendar labels.
-    """
-    # Remove the Total row for the bar chart
-    bar_df = pivot_df.copy()
-    if 'Total' in bar_df.index:
-        bar_df = bar_df.drop(index=['Total'])
+def _iter_quarter_ends(start_date, end_date):
+    current = _quarter_end(start_date)
+    end = _quarter_end(end_date)
+    if current is None or end is None:
+        return []
 
-    # Remove the Row Total column for visualization
-    if 'Row Total' in bar_df.columns:
-        bar_df = bar_df.drop(columns=['Row Total'])
+    values = []
+    while current <= end:
+        values.append(current)
+        current = (current + pd.offsets.QuarterEnd(1)).normalize()
+    return values
 
-    # Melt the DataFrame for easier plotting
-    id_var = 'maturity_pair' if greek_type == 'correlation' else 'maturity_date'
 
-    # For non-correlation, ensure the id_var exists
-    if greek_type != 'correlation' and id_var not in bar_df.index.names:
-        # Reset index to get columns
-        bar_df = bar_df.reset_index()
-        # Rename the index column if needed
-        if 'index' in bar_df.columns and id_var not in bar_df.columns:
-            bar_df = bar_df.rename(columns={'index': id_var})
-    else:
-        bar_df = bar_df.reset_index()
+def _iter_year_ends(start_date, end_date):
+    current = _year_end(start_date)
+    end = _year_end(end_date)
+    if current is None or end is None:
+        return []
 
-    melted_df = bar_df.melt(
-        id_vars=id_var,
-        value_vars=[col for col in bar_df.columns if col != id_var],
-        var_name='Asset Pair' if greek_type == 'correlation' else 'Asset',
-        value_name='Value'
-    )
+    values = []
+    while current <= end:
+        values.append(current)
+        current = (current + pd.offsets.YearEnd(1)).normalize()
+    return values
 
-    # Professional Distinct Color Palette - High Contrast
-    professional_colors = [
-        '#2E86C1',  # McKinsey blue (primary)
-        '#E74C3C',  # Vibrant red
-        '#27AE60',  # Forest green
-        '#F39C12',  # Orange
-        '#9B59B6',  # Purple
-        '#1ABC9C',  # Turquoise
-        '#34495E',  # Dark gray-blue
-        '#F1C40F',  # Bright yellow
-        '#E67E22',  # Dark orange
-        '#95A5A6',  # Gray
-        '#8E44AD',  # Dark purple
-        '#16A085'   # Dark turquoise
+
+def build_maturity_cutoff_options(cob_date):
+    cob_ts = _to_timestamp(cob_date)
+    if cob_ts is None:
+        return [], None, [], None
+
+    max_maturity = fetch_max_maturity_date(cob_date) or cob_ts
+    default_month = _default_month_cutoff(cob_ts)
+    default_quarter = _default_quarter_cutoff(cob_ts)
+    option_end = max(max_maturity, default_month, default_quarter)
+
+    month_options = [
+        {'label': _month_through_label(value), 'value': _format_cutoff_value(value)}
+        for value in _iter_quarter_ends(cob_ts, option_end)
+    ]
+    quarter_options = [
+        {'label': _quarter_through_label(value), 'value': _format_cutoff_value(value)}
+        for value in _iter_year_ends(cob_ts, option_end)
     ]
 
-    # Create the bar chart
-    fig = px.bar(
-        melted_df,
-        x=id_var,
-        y='Value',
-        color='Asset Pair' if greek_type == 'correlation' else 'Asset',
-        barmode='group',
-        color_discrete_sequence=professional_colors,
-        height=420  # Standard professional height
+    return (
+        month_options,
+        _format_cutoff_value(default_month),
+        quarter_options,
+        _format_cutoff_value(default_quarter),
     )
 
-    # Professional Chart Styling - Following .claude/commands guidelines
-    x_title = 'Maturity Pair' if greek_type == 'correlation' else 'Maturity (YYYY-MM)'
-    y_title = 'Correlation Sensitivity' if greek_type == 'correlation' else f'{greek_type.capitalize()} Exposure'
-    legend_title = 'Asset Pair' if greek_type == 'correlation' else 'Asset'
-    
-    fig.update_layout(
-        # Professional Title Styling (Empty for section title usage)
-        title=dict(
-            text='',
-            font=dict(size=18, color='#2C3E50', family='Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif')
-        ),
-        
-        # X-Axis Professional Styling (No Title)
-        xaxis=dict(
-            title=dict(text='', font=dict(size=13, color='#4A4A4A')),  # Empty title
-            tickangle=0,  # Horizontal for readability
-            showgrid=True,
-            gridcolor='rgba(200, 200, 200, 0.3)',  # Subtle grid
-            gridwidth=0.5,
-            linecolor='#CCCCCC',
-            linewidth=1,
-            tickfont=dict(size=11, color='#666666'),
-            tickmode='auto'
-        ),
-        
-        # Y-Axis Professional Styling
-        yaxis=dict(
-            title=dict(text=y_title, font=dict(size=13, color='#4A4A4A')),
-            showgrid=True,
-            gridcolor='rgba(200, 200, 200, 0.3)',
-            gridwidth=0.5,
-            linecolor='#CCCCCC',
-            linewidth=1,
-            tickfont=dict(size=11, color='#666666'),
-            zeroline=True,
-            zerolinecolor='rgba(150, 150, 150, 0.4)',
-            zerolinewidth=1
-        ),
-        
-        # Professional Legend Positioning - Right Side (No Title)
-        legend=dict(
-            title=dict(text='', font=dict(size=12, color='#4A4A4A')),  # Empty title
-            orientation='v',  # Vertical layout
-            yanchor='middle',
-            y=0.5,  # Centered vertically
-            xanchor='left',
-            x=1.02,  # Right side of chart
-            bgcolor='rgba(255, 255, 255, 0)',  # Transparent
-            bordercolor='rgba(255, 255, 255, 0)',
-            borderwidth=0,
-            font=dict(size=11, color='#4A4A4A'),
-            itemsizing='constant'
-        ),
-        
-        # Professional Background and Margins
-        plot_bgcolor='rgba(248, 249, 250, 0.5)',  # Subtle background
-        paper_bgcolor='white',
-        margin=dict(l=70, r=140, t=40, b=60),  # More space on right for legend
-        
-        # Enhanced Interactivity
-        hovermode='x unified',
-        hoverlabel=dict(
-            bgcolor='rgba(255, 255, 255, 0.95)',
-            bordercolor='rgba(200, 200, 200, 0.8)',
-            font=dict(size=11, color='#2C3E50'),
-            align='left'
-        ),
+
+@lru_cache(maxsize=1)
+def fetch_instrument_unit_map():
+    try:
+        query = f'''
+            SELECT a.instrument, b."Conv_factor", b."To_unit" AS unit
+            FROM {DB_SCHEMA}.mapping_instrument_marker a
+            LEFT JOIN {DB_SCHEMA}.mapping_instrument_curve_enverus b
+                ON a."Marker" = b."Instrument"
+        '''
+        mapping = _read_sql(query)
+    except Exception:
+        return {}
+
+    unit_map = {}
+    for _, row in mapping.iterrows():
+        instrument = row.get('instrument')
+        if instrument is None or pd.isna(instrument):
+            continue
+        unit_map[str(instrument)] = {
+            'unit': _normalize_unit(row.get('unit')),
+            'conv_factor': _safe_number(row.get('Conv_factor'), 1.0) or 1.0,
+        }
+    return unit_map
+
+
+def _instrument_unit_info(asset, unit_map, fallback_unit):
+    info = unit_map.get(str(asset), {})
+    return {
+        'unit': _normalize_unit(info.get('unit') or fallback_unit),
+        'conv_factor': _safe_number(info.get('conv_factor'), 1.0) or 1.0,
+    }
+
+
+def normalize_greek_contributions(
+    data,
+    aggregation='mixed',
+    unit_mode='native',
+    month_through=None,
+    quarter_through=None,
+    cob_date=None,
+):
+    if data.empty:
+        return pd.DataFrame()
+
+    unit_map = fetch_instrument_unit_map()
+    normalized_rows = []
+    data = data.reset_index(drop=True)
+
+    for source_row_id, row in data.iterrows():
+        pair = _standard_pair(row.get('asset_a'), row.get('asset_b'))
+        base = {
+            'source_row_id': int(source_row_id),
+            'cob_date': _format_cob_option(row.get('cob_date')),
+            'strategy': row.get('substrategy') or 'N/A',
+            'trade_type': row.get('type_trade') or 'N/A',
+            'option_type': row.get('type_option') or 'N/A',
+            'put_call': row.get('put_call') or 'N/A',
+            'asset_pair': pair,
+            'quantity': _safe_number(row.get('quantity')),
+            'value': _safe_number(row.get('qty_value')),
+            'pnl': _safe_number(row.get('qty_pnl')),
+        }
+
+        for greek_key in ['delta', 'gamma', 'vega']:
+            definition = GREEK_DEFINITIONS[greek_key]
+            for side, source_column in definition['side_columns'].items():
+                asset = row.get(f'asset_{side}')
+                if asset is None or pd.isna(asset):
+                    continue
+
+                raw_value = _safe_number(row.get(source_column))
+                unit_info = _instrument_unit_info(asset, unit_map, row.get('unit_quantity'))
+                display_unit = unit_info['unit']
+                display_value = raw_value
+
+                if greek_key in ['delta', 'gamma']:
+                    display_value = display_value * unit_info['conv_factor']
+                    if unit_mode == 'lots':
+                        display_value = display_value / _lot_divisor(display_unit)
+
+                maturity_column = f'maturity_date_{side}'
+                maturity_type_column = f'maturity_date_type_{side}'
+                maturity_entries = _expand_instrument_maturity(
+                    row.get(maturity_column),
+                    row.get(maturity_type_column),
+                    display_value,
+                    aggregation,
+                    month_through,
+                    quarter_through,
+                    cob_date,
+                )
+
+                for maturity_bucket, allocated_value in maturity_entries:
+                    normalized_rows.append({
+                        **base,
+                        'greek': greek_key,
+                        'greek_label': definition['label'],
+                        'bucket_type': 'Instrument',
+                        'risk_bucket': str(asset),
+                        'instrument': str(asset),
+                        'unit': display_unit,
+                        'maturity_bucket': maturity_bucket,
+                        'maturity_pair': maturity_bucket,
+                        'exposure': allocated_value,
+                    })
+
+        theta_value = _safe_number(row.get('qty_theta'))
+        theta_maturity = _format_maturity_pair(row, aggregation, month_through, quarter_through, cob_date)
+        normalized_rows.append({
+            **base,
+            'greek': 'theta',
+            'greek_label': 'Theta',
+            'bucket_type': 'Pair',
+            'risk_bucket': pair,
+            'instrument': 'N/A',
+            'unit': _normalize_unit(row.get('unit_quantity')),
+            'maturity_bucket': theta_maturity,
+            'maturity_pair': theta_maturity,
+            'exposure': theta_value,
+        })
+
+        corr_value = _safe_number(row.get('qty_corr_sensitivity'))
+        corr_maturity = _format_maturity_pair(row, aggregation, month_through, quarter_through, cob_date)
+        normalized_rows.append({
+            **base,
+            'greek': 'correlation',
+            'greek_label': 'Correlation',
+            'bucket_type': 'Pair',
+            'risk_bucket': pair,
+            'instrument': 'N/A',
+            'unit': _normalize_unit(row.get('unit_quantity')),
+            'maturity_bucket': corr_maturity,
+            'maturity_pair': corr_maturity,
+            'exposure': corr_value,
+        })
+
+    return pd.DataFrame(normalized_rows)
+
+
+def _split_bucket_filter(values):
+    instruments = set()
+    pairs = set()
+    for value in values or []:
+        if isinstance(value, str) and value.startswith('instrument::'):
+            instruments.add(value.split('::', 1)[1])
+        elif isinstance(value, str) and value.startswith('pair::'):
+            pairs.add(value.split('::', 1)[1])
+    return instruments, pairs
+
+
+def filter_normalized_rows(rows, bucket_values):
+    if rows.empty or not bucket_values:
+        return rows
+
+    instruments, pairs = _split_bucket_filter(bucket_values)
+    mask = pd.Series(False, index=rows.index)
+    if instruments:
+        mask = mask | ((rows['bucket_type'] == 'Instrument') & rows['risk_bucket'].isin(instruments))
+    if pairs:
+        mask = mask | ((rows['bucket_type'] == 'Pair') & rows['risk_bucket'].isin(pairs))
+    return rows[mask].copy()
+
+
+def _add_greek_columns(grouped, include_zero_columns=True):
+    for greek_key in GREEK_KEYS:
+        greek_col = GREEK_DEFINITIONS[greek_key]["label"]
+        if greek_col not in grouped.columns:
+            grouped[greek_col] = 0.0
+
+    ordered_columns = []
+    for greek_key in GREEK_KEYS:
+        greek_col = GREEK_DEFINITIONS[greek_key]['label']
+        if include_zero_columns or grouped[greek_col].abs().sum():
+            ordered_columns.append(greek_col)
+    return grouped, ordered_columns
+
+
+def create_summary_df(rows):
+    if rows.empty:
+        return pd.DataFrame()
+
+    bucket_grouped = (
+        rows.groupby(['bucket_type', 'risk_bucket', 'unit', 'greek'], dropna=False)
+        .agg(net=('exposure', 'sum'))
+        .reset_index()
+    )
+    bucket_pivot = bucket_grouped.pivot_table(
+        index=['bucket_type', 'risk_bucket', 'unit'],
+        columns='greek',
+        values='net',
+        aggfunc='sum',
+        fill_value=0,
+    )
+    bucket_pivot.columns = [GREEK_DEFINITIONS[greek]["label"] for greek in bucket_pivot.columns]
+    bucket_pivot = bucket_pivot.reset_index().rename(
+        columns={'bucket_type': 'Bucket Type', 'risk_bucket': 'Risk Bucket', 'unit': 'Unit'}
+    )
+    bucket_pivot, greek_columns = _add_greek_columns(bucket_pivot)
+    bucket_pivot['_sort_type'] = bucket_pivot['Bucket Type'].map({'Instrument': 0, 'Pair': 1}).fillna(9)
+    bucket_pivot['_sort_abs'] = bucket_pivot[greek_columns].abs().sum(axis=1)
+    bucket_pivot = bucket_pivot.sort_values(['_sort_type', '_sort_abs', 'Risk Bucket'], ascending=[True, False, True])
+    bucket_pivot = bucket_pivot.drop(columns=['_sort_type', '_sort_abs'])
+    bucket_pivot = bucket_pivot[['Bucket Type', 'Risk Bucket', 'Unit'] + greek_columns]
+
+    unit_rows = create_unit_aggregate_df(rows)
+    if not unit_rows.empty:
+        unit_rows.insert(0, 'Risk Bucket', '')
+        unit_rows.insert(0, 'Bucket Type', 'Unit')
+        unit_rows = unit_rows[['Bucket Type', 'Risk Bucket', 'Unit'] + greek_columns]
+        bucket_pivot = concat_dataframes([bucket_pivot, unit_rows], ignore_index=True)
+
+    return bucket_pivot
+
+
+def create_unit_aggregate_df(rows):
+    if rows.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        rows.groupby(['unit', 'greek'], dropna=False)
+        .agg(net=('exposure', 'sum'))
+        .reset_index()
+    )
+    pivot = grouped.pivot_table(
+        index=['unit'],
+        columns='greek',
+        values='net',
+        aggfunc='sum',
+        fill_value=0,
+    )
+    pivot.columns = [GREEK_DEFINITIONS[greek]["label"] for greek in pivot.columns]
+    pivot = pivot.reset_index().rename(columns={'unit': 'Unit'})
+    pivot, greek_columns = _add_greek_columns(pivot)
+    pivot['_sort_abs'] = pivot[greek_columns].abs().sum(axis=1)
+    pivot = pivot.sort_values(['_sort_abs', 'Unit'], ascending=[False, True]).drop(columns=['_sort_abs'])
+    return pivot[['Unit'] + greek_columns]
+
+
+def create_ladder_df(rows, greek_key):
+    if rows.empty:
+        return pd.DataFrame()
+
+    greek_rows = rows[rows['greek'] == greek_key].copy()
+    if greek_rows.empty:
+        return pd.DataFrame()
+
+    greek_rows['ladder_bucket'] = greek_rows['risk_bucket'].map(_compact_pair_label)
+    column_name = 'ladder_bucket'
+
+    index_name = 'Maturity'
+    net = greek_rows.pivot_table(
+        index='maturity_bucket',
+        columns=column_name,
+        values='exposure',
+        aggfunc='sum',
+        fill_value=0,
     )
 
-    # If there are many asset pairs, keep right-side legend but add scrolling
-    if greek_type == 'correlation' and len(bar_df.columns) > 8:
-        fig.update_layout(
-            legend=dict(
-                title=dict(text=''),  # No title for many items case too
-                orientation="v",  # Keep vertical for many items
-                yanchor="top",
-                y=1.0,  # Top alignment for many items
-                xanchor="left",
-                x=1.02,
-                bgcolor='rgba(255, 255, 255, 0.9)',  # Slight background for many items
-                bordercolor='rgba(200, 200, 200, 0.3)',
-                borderwidth=1
-            )
+    net = net.reset_index().rename(columns={'maturity_bucket': index_name})
+    net = net.loc[sorted(net.index, key=lambda index: _maturity_sort_key(net.at[index, index_name]))].reset_index(drop=True)
+
+    numeric_columns = [column for column in net.columns if column != index_name]
+    if _should_add_theta_total(greek_rows, greek_key):
+        net['Total'] = net[numeric_columns].sum(axis=1)
+        numeric_columns.append('Total')
+
+    total_row = {index_name: 'Total', '_row_type': 'total'}
+    for column in numeric_columns:
+        total_row[column] = net[column].sum()
+
+    net['_row_type'] = 'normal'
+    net = concat_dataframes([net, pd.DataFrame([total_row])], ignore_index=True)
+
+    total_columns = [column for column in numeric_columns if column == 'Total']
+    exposure_columns = [column for column in numeric_columns if column != 'Total']
+    ordered_columns = [index_name] + sorted(exposure_columns, key=_ladder_column_sort_key) + total_columns + ['_row_type']
+    return net[ordered_columns]
+
+
+def _single_unit_label(rows):
+    units = sorted({str(value) for value in rows['unit'] if value is not None and not pd.isna(value) and str(value).strip()})
+    if len(units) == 1:
+        return units[0]
+    return None
+
+
+def _should_add_theta_total(greek_rows, greek_key):
+    return greek_key == 'theta' and _single_unit_label(greek_rows) is not None
+
+
+def _format_unit_header(values):
+    units = sorted({str(value) for value in values if value is not None and not pd.isna(value) and str(value).strip()})
+    if not units:
+        return ''
+    if len(units) == 1:
+        return units[0]
+    return 'Mixed'
+
+
+def create_ladder_unit_headers(rows, greek_key):
+    if rows.empty:
+        return {}
+
+    greek_rows = rows[rows['greek'] == greek_key].copy()
+    if greek_rows.empty:
+        return {}
+
+    greek_rows['ladder_bucket'] = greek_rows['risk_bucket'].map(_compact_pair_label)
+    unit_headers = {
+        bucket: _format_unit_header(group['unit'])
+        for bucket, group in greek_rows.groupby('ladder_bucket', dropna=False)
+    }
+    unit_headers['Maturity'] = ''
+    theta_unit = _single_unit_label(greek_rows)
+    if greek_key == 'theta' and theta_unit is not None:
+        unit_headers['Total'] = theta_unit
+    return unit_headers
+
+
+def create_unit_ladder_df(rows, greek_key):
+    if rows.empty:
+        return pd.DataFrame()
+
+    greek_rows = rows[rows['greek'] == greek_key].copy()
+    if greek_rows.empty:
+        return pd.DataFrame()
+
+    index_name = 'Maturity'
+    net = greek_rows.pivot_table(
+        index='maturity_bucket',
+        columns='unit',
+        values='exposure',
+        aggfunc='sum',
+        fill_value=0,
+    )
+
+    net = net.reset_index().rename(columns={'maturity_bucket': index_name})
+    net = net.loc[sorted(net.index, key=lambda index: _maturity_sort_key(net.at[index, index_name]))].reset_index(drop=True)
+
+    numeric_columns = [column for column in net.columns if column != index_name]
+    if _should_add_theta_total(greek_rows, greek_key):
+        net['Total'] = net[numeric_columns].sum(axis=1)
+        numeric_columns.append('Total')
+
+    total_row = {index_name: 'Total', '_row_type': 'total'}
+    for column in numeric_columns:
+        total_row[column] = net[column].sum()
+
+    net['_row_type'] = 'normal'
+    net = concat_dataframes([net, pd.DataFrame([total_row])], ignore_index=True)
+
+    total_columns = [column for column in numeric_columns if column == 'Total']
+    exposure_columns = [column for column in numeric_columns if column != 'Total']
+    ordered_columns = [index_name] + sorted(exposure_columns) + total_columns + ['_row_type']
+    return net[ordered_columns]
+
+
+def _bucket_greek_column_labels(bucket_type):
+    greek_keys = ['theta', 'correlation'] if bucket_type == 'Pair' else ['delta', 'gamma', 'vega']
+    return [GREEK_DEFINITIONS[greek_key]['label'] for greek_key in greek_keys]
+
+
+def create_bucket_greek_tables(rows):
+    if rows.empty:
+        return []
+
+    working = rows.copy()
+    working['display_bucket'] = working['risk_bucket'].map(_compact_pair_label)
+
+    grouped = (
+        working.groupby(['bucket_type', 'display_bucket', 'unit', 'maturity_bucket', 'greek'], dropna=False)
+        .agg(net=('exposure', 'sum'))
+        .reset_index()
+    )
+    sort_source = (
+        grouped.groupby(['bucket_type', 'display_bucket', 'unit'], dropna=False)['net']
+        .apply(lambda values: values.abs().sum())
+        .reset_index(name='abs_total')
+    )
+    sort_source['_sort_type'] = sort_source['bucket_type'].map({'Instrument': 0, 'Pair': 1}).fillna(9)
+    sort_source = sort_source.sort_values(
+        ['_sort_type', 'abs_total', 'display_bucket', 'unit'],
+        ascending=[True, False, True, True],
+    )
+
+    bucket_tables = []
+    for index, bucket in sort_source.reset_index(drop=True).iterrows():
+        bucket_filter = (
+            (grouped['bucket_type'] == bucket['bucket_type'])
+            & (grouped['display_bucket'] == bucket['display_bucket'])
         )
+        if pd.isna(bucket['unit']):
+            bucket_filter = bucket_filter & grouped['unit'].isna()
+        else:
+            bucket_filter = bucket_filter & (grouped['unit'] == bucket['unit'])
+        bucket_rows = grouped[bucket_filter]
+        if bucket_rows.empty:
+            continue
 
-    return fig
+        table = bucket_rows.pivot_table(
+            index='maturity_bucket',
+            columns='greek',
+            values='net',
+            aggfunc='sum',
+            fill_value=0,
+        )
+        table.columns = [GREEK_DEFINITIONS[greek]['label'] for greek in table.columns]
+        table = table.reset_index().rename(columns={'maturity_bucket': 'Maturity'})
+        table = table.loc[
+            sorted(table.index, key=lambda row_index: _maturity_sort_key(table.at[row_index, 'Maturity']))
+        ].reset_index(drop=True)
+        greek_columns = _bucket_greek_column_labels(bucket['bucket_type'])
+        for column in greek_columns:
+            if column not in table.columns:
+                table[column] = 0.0
+
+        total_row = {'Maturity': 'Total', '_row_type': 'total'}
+        for column in greek_columns:
+            total_row[column] = table[column].sum()
+
+        table['_row_type'] = 'normal'
+        table = concat_dataframes([table, pd.DataFrame([total_row])], ignore_index=True)
+        unit_label = str(bucket['unit']) if bucket['unit'] is not None and not pd.isna(bucket['unit']) else ''
+        title = f"{bucket['display_bucket']} ({unit_label})" if unit_label else str(bucket['display_bucket'])
+        bucket_tables.append({
+            'id': f'bucket-greeks-{index}',
+            'title': title,
+            'bucket_type': bucket['bucket_type'],
+            'risk_bucket': str(bucket['display_bucket']),
+            'unit': unit_label,
+            'table': table[['Maturity'] + greek_columns + ['_row_type']],
+        })
+
+    return bucket_tables
 
 
-# ---------------------- Dash App Setup ----------------------
+def create_bucket_greek_export_df(bucket_tables):
+    if not bucket_tables:
+        return pd.DataFrame()
 
-# Initialize database connection
-available_dates = get_available_dates(engine)
+    frames = []
+    for bucket_table in bucket_tables:
+        table = bucket_table['table'].drop(columns=['_row_type'], errors='ignore').copy()
+        table.insert(0, 'Unit', bucket_table.get('unit', ''))
+        table.insert(0, 'Risk Bucket', bucket_table.get('risk_bucket', ''))
+        table.insert(0, 'Bucket Type', bucket_table.get('bucket_type', ''))
+        frames.append(table)
 
-# Initialize empty lists for filters
-all_strategies = []
-all_trade_types = []
+    return concat_dataframes(frames, ignore_index=True)
 
-# Try to load initial data to populate filters
-if available_dates:
-    all_strategies = get_strategies(engine, available_dates[0])
-    all_trade_types = get_trade_types(engine, available_dates[0])
-# ---------------------- App Layout ----------------------
-# Improved layout with better aesthetics - replace only the layout portion of your code
-# Full-width layout with filters at the top
-# Layout with Lots background aligned with Greek Type dropdown
-layout = html.Div([
-    # Store for Aspect data
-    dcc.Store(id='aspect-data-store', storage_type='memory'),
-    # Store for refresh trigger
-    dcc.Store(id='refresh-trigger-store', storage_type='memory'),
-    # Download components for custom export
-    dcc.Download(id="download-exposure-data"),
-    dcc.Download(id="download-units-data"),
 
-    # Top section with dropdowns on the left and buttons on the right
-    html.Div([
-        # Left side - Dropdowns section with two rows
+def create_raw_rows_df(rows):
+    if rows.empty:
+        return pd.DataFrame()
+
+    columns = [
+        'cob_date',
+        'source_row_id',
+        'strategy',
+        'trade_type',
+        'option_type',
+        'greek_label',
+        'bucket_type',
+        'risk_bucket',
+        'unit',
+        'maturity_bucket',
+        'asset_pair',
+        'exposure',
+        'quantity',
+        'value',
+        'pnl',
+    ]
+    return rows[columns].rename(
+        columns={
+            'cob_date': 'COB Date',
+            'source_row_id': 'Source Row',
+            'strategy': 'Strategy',
+            'trade_type': 'Trade Type',
+            'option_type': 'Option Type',
+            'greek_label': 'Greek',
+            'bucket_type': 'Bucket Type',
+            'risk_bucket': 'Risk Bucket',
+            'unit': 'Unit',
+            'maturity_bucket': 'Maturity',
+            'asset_pair': 'Asset Pair',
+            'exposure': 'Exposure',
+            'quantity': 'Quantity',
+            'value': 'Value',
+            'pnl': 'P&L',
+        }
+    )
+
+
+def build_display_tables(rows):
+    bucket_greek_tables = create_bucket_greek_tables(rows)
+    return {
+        'summary': create_summary_df(rows),
+        'bucket_greek_tables': bucket_greek_tables,
+        **{f'{greek_key}_ladder': create_ladder_df(rows, greek_key) for greek_key in GREEK_KEYS},
+        **{f'{greek_key}_ladder_units': create_ladder_unit_headers(rows, greek_key) for greek_key in GREEK_KEYS},
+        **{f'{greek_key}_unit_ladder': create_unit_ladder_df(rows, greek_key) for greek_key in GREEK_KEYS},
+    }
+
+
+def build_output_tables(rows):
+    tables = build_display_tables(rows)
+    return {
+        **tables,
+        'unit_aggregate': create_unit_aggregate_df(rows),
+        'bucket_greek_export': create_bucket_greek_export_df(tables['bucket_greek_tables']),
+        'raw': create_raw_rows_df(rows),
+    }
+
+
+def _round_numeric(df):
+    if df.empty:
+        return df
+    rounded = df.copy()
+    for column in rounded.select_dtypes(include='number').columns:
+        rounded[column] = rounded[column].round(0)
+    return rounded
+
+
+def _format_grid_number(value):
+    numeric_value = _safe_number(value)
+    if numeric_value == 0:
+        return None
+    return f'{numeric_value:,.0f}'
+
+
+def _format_grid_records(df, numeric_columns):
+    formatted = []
+    for record in df.to_dict('records'):
+        clean = {}
+        for key, value in record.items():
+            if value is None or pd.isna(value):
+                clean[key] = None
+            elif key in numeric_columns:
+                raw_key = f'__raw_{key}'
+                clean[raw_key] = _safe_number(value)
+                clean[key] = _format_grid_number(value)
+            else:
+                clean[key] = value
+        formatted.append(clean)
+    return formatted
+
+
+def _clamp_width(value, minimum, maximum):
+    return int(max(minimum, min(maximum, value)))
+
+
+def _estimate_content_width(df, column, numeric_columns):
+    header_length = len(str(column))
+    values = df[column].dropna().tolist() if column in df.columns else []
+
+    if column in numeric_columns:
+        display_lengths = [len(_format_grid_number(value) or '') for value in values]
+        content_length = max([header_length, *display_lengths], default=header_length)
+        return _clamp_width(content_length * 8 + 24, 72, 230)
+
+    display_lengths = [len(str(value)) for value in values]
+    content_length = max([header_length, *display_lengths], default=header_length)
+    if column == 'Maturity':
+        return _clamp_width(content_length * 8 + 28, 88, 122)
+    if column == 'Risk Bucket':
+        return _clamp_width(content_length * 7 + 36, 140, 260)
+    if column == 'Bucket Type':
+        return _clamp_width(content_length * 7 + 28, 96, 124)
+    if column == 'Unit':
+        return _clamp_width(content_length * 7 + 28, 72, 90)
+    return _clamp_width(content_length * 7 + 28, 84, 220)
+
+
+def _with_unit_header(column_def, unit_headers, column):
+    if unit_headers is None or column not in unit_headers:
+        return column_def
+
+    return {
+        'headerName': unit_headers.get(column) or '',
+        'headerClass': 'mckinsey-ag-grid-header greeks-unit-group-header',
+        'children': [column_def],
+    }
+
+
+def _ag_grid_column_defs(df, fit_to_content=False, unit_headers=None):
+    column_defs = []
+    numeric_columns = set(df.select_dtypes(include='number').columns.tolist())
+    text_columns = {'Bucket Type', 'Risk Bucket', 'Unit', 'Maturity'}
+    text_widths = {
+        'Bucket Type': {'minWidth': 92, 'flex': 1.0},
+        'Risk Bucket': {'minWidth': 170, 'flex': 1.8},
+        'Unit': {'minWidth': 74, 'flex': 0.7},
+        'Maturity': {'minWidth': 112, 'flex': 1.0},
+    }
+
+    for column in df.columns:
+        if column == '_row_type':
+            continue
+
+        if column in numeric_columns:
+            raw_field = f'__raw_{column}'
+            column_def = {
+                'headerName': column,
+                'field': column,
+                'type': 'rightAligned',
+                'sortable': True,
+                'filter': False,
+                'resizable': True,
+                'minWidth': 64,
+                'cellClass': 'mckinsey-ag-grid-cell mckinsey-ag-grid-number-cell greeks-number-cell',
+                'headerClass': 'mckinsey-ag-grid-header greeks-number-header',
+                'headerTooltip': column,
+                'cellClassRules': {
+                    'greeks-positive-cell': f"Number(params.data['{raw_field}']) > 0",
+                    'greeks-negative-cell': f"Number(params.data['{raw_field}']) < 0",
+                },
+            }
+            if fit_to_content:
+                column_def['width'] = _estimate_content_width(df, column, numeric_columns)
+            else:
+                column_def['flex'] = 1
+            column_defs.append(_with_unit_header(column_def, unit_headers, column))
+        else:
+            column_def = {
+                'headerName': column,
+                'field': column,
+                'sortable': True,
+                'filter': False,
+                'resizable': True,
+                'minWidth': text_widths.get(column, {}).get('minWidth', 84 if column in text_columns else 72),
+                'cellClass': 'mckinsey-ag-grid-cell mckinsey-ag-grid-text-cell greeks-text-cell',
+                'headerClass': 'mckinsey-ag-grid-header greeks-text-header',
+                'headerTooltip': column,
+                'tooltipField': column,
+            }
+            if fit_to_content:
+                column_def['width'] = _estimate_content_width(df, column, numeric_columns)
+            else:
+                column_def['flex'] = text_widths.get(column, {}).get('flex', 1.3 if column in text_columns else 1)
+            column_defs.append(_with_unit_header(column_def, unit_headers, column))
+
+    return column_defs
+
+
+def _column_width_sum(column_defs):
+    total = 0
+    for column in column_defs:
+        if 'children' in column:
+            total += _column_width_sum(column['children'])
+        else:
+            total += int(column.get('width') or column.get('minWidth') or 0)
+    return total
+
+
+def build_compact_table(table_id, df, max_height=None, fit_to_content=False, grid_class_suffix='', unit_headers=None):
+    del max_height
+    if df.empty:
+        return html.Div('No data for the current selection.', className='greeks-empty-state')
+
+    display_df = _round_numeric(df)
+    numeric_columns = display_df.select_dtypes(include='number').columns.tolist()
+    records = _format_grid_records(display_df, numeric_columns)
+    column_defs = _ag_grid_column_defs(display_df, fit_to_content=fit_to_content, unit_headers=unit_headers)
+    content_width = _column_width_sum(column_defs) + 28
+    grid_style = (
+        {'width': f'{content_width}px', 'maxWidth': '100%', 'height': 'auto'}
+        if fit_to_content
+        else {'width': '100%', 'height': 'auto'}
+    )
+
+    return dag.AgGrid(
+        id=table_id,
+        rowData=records,
+        columnDefs=column_defs,
+        defaultColDef={
+            'wrapHeaderText': False,
+            'autoHeaderHeight': False,
+            'suppressHeaderMenuButton': True,
+            'suppressHeaderFilterButton': True,
+            'resizable': True,
+        },
+        dashGridOptions={
+            'domLayout': 'autoHeight',
+            'rowHeight': 30,
+            'headerHeight': 32,
+            'groupHeaderHeight': 28,
+            'pagination': False,
+            'suppressPaginationPanel': True,
+            'enableCellTextSelection': True,
+            'ensureDomOrder': True,
+            'animateRows': False,
+            'alwaysShowHorizontalScroll': False,
+            'alwaysShowVerticalScroll': False,
+            'suppressHorizontalScroll': True,
+        },
+        rowClassRules={
+            'greeks-total-row': "params.data && params.data._row_type === 'total'",
+            'greeks-unit-row': "params.data && params.data['Bucket Type'] === 'Unit'",
+        },
+        className=(
+            'ag-theme-alpine mckinsey-ag-grid supply-dest-summary-grid greeks-ag-grid'
+            + (' greeks-content-fit-grid' if fit_to_content else '')
+            + grid_class_suffix
+        ),
+        style=grid_style,
+        columnSize=None if fit_to_content else 'responsiveSizeToFit',
+        columnSizeOptions={
+            'defaultMinWidth': 58,
+            'columnLimits': [
+                {'key': 'Risk Bucket', 'minWidth': 170},
+                {'key': 'Maturity', 'minWidth': 112},
+                {'key': 'Bucket Type', 'minWidth': 92},
+                {'key': 'Unit', 'minWidth': 74},
+            ],
+        },
+        dangerously_allow_code=True,
+    )
+
+
+def build_bucket_greek_sections(tables):
+    bucket_tables = tables.get('bucket_greek_tables', [])
+    if not bucket_tables:
+        return html.Div('No data for the current selection.', className='greeks-empty-state')
+
+    return html.Div([
         html.Div([
-            # First row - Main controls
+            html.Div(bucket_table['title'], className='greeks-bucket-greek-title'),
+            build_compact_table(
+                f"greeks-{bucket_table['id']}-table",
+                bucket_table['table'],
+                fit_to_content=True,
+                grid_class_suffix=' greeks-bucket-greek-grid',
+            ),
+        ], className='greeks-bucket-greek-panel')
+        for bucket_table in bucket_tables
+    ], className='greeks-bucket-greek-grid-wrap')
+
+
+def build_ladder_sections(tables):
+    sections = []
+    for greek_key in GREEK_KEYS:
+        greek_label = GREEK_DEFINITIONS[greek_key]['label']
+        exposure_table = build_compact_table(
+            f'greeks-{greek_key}-ladder-table',
+            tables.get(f'{greek_key}_ladder', pd.DataFrame()),
+            fit_to_content=True,
+            grid_class_suffix=' greeks-ladder-grid',
+            unit_headers=tables.get(f'{greek_key}_ladder_units', {}),
+        )
+        unit_exposure_table = build_compact_table(
+            f'greeks-{greek_key}-unit-ladder-table',
+            tables.get(f'{greek_key}_unit_ladder', pd.DataFrame()),
+            fit_to_content=True,
+            grid_class_suffix=' greeks-ladder-grid greeks-unit-exposure-grid',
+        )
+        sections.append(
             html.Div([
-                html.Label('Trade Date:', className="inline-filter-label"),
+                html.Div([
+                    html.H3(f'{greek_label} Ladder', className='section-title-inline greeks-monitor-title'),
+                ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
+                html.Div([
+                    html.Div([
+                        html.Div('By Bucket', className='greeks-ladder-subtitle'),
+                        exposure_table,
+                    ], className='supply-dest-table-container greeks-monitor-table-wrap greeks-ladder-table-panel'),
+                    html.Div([
+                        html.Div('By Unit', className='greeks-ladder-subtitle'),
+                        unit_exposure_table,
+                    ], className='supply-dest-table-container greeks-monitor-table-wrap greeks-unit-ladder-table-panel'),
+                ], className='greeks-ladder-table-pair'),
+            ], className='main-section-container supply-dest-section greeks-monitor-section')
+        )
+    return sections
+
+
+def _format_number(value):
+    value = _safe_number(value)
+    return f'{value:,.0f}'
+
+
+def _format_currency(value):
+    value = _safe_number(value)
+    sign = '-' if value < 0 else ''
+    return f'{sign}${abs(value):,.0f}'
+
+
+def _theta_kpi_class(value):
+    value = _safe_number(value)
+    if value < 0:
+        return 'greeks-kpi-value greeks-kpi-value-negative'
+    if value > 0:
+        return 'greeks-kpi-value greeks-kpi-value-positive'
+    return 'greeks-kpi-value greeks-kpi-value-neutral'
+
+
+def build_kpi_strip(rows, meta):
+    if rows.empty:
+        return html.Div([
+            html.Div([
+                html.Div('COB Date', className='greeks-kpi-label'),
+                html.Div(meta.get('cob_date') or '-', className='greeks-kpi-value'),
+            ], className='greeks-kpi-card'),
+        ], className='greeks-kpi-strip')
+
+    theta_per_day = rows.loc[rows['greek'] == 'theta', 'exposure'].sum()
+
+    return html.Div([
+        html.Div([
+            html.Div('COB Date', className='greeks-kpi-label'),
+            html.Div(meta.get('cob_date') or '-', className='greeks-kpi-value'),
+        ], className='greeks-kpi-card'),
+        html.Div([
+            html.Div('Strategies', className='greeks-kpi-label'),
+            html.Div(_format_number(meta.get('strategies', 0)), className='greeks-kpi-value'),
+        ], className='greeks-kpi-card'),
+        html.Div([
+            html.Div('Daily Theta P&L', className='greeks-kpi-label'),
+            html.Div(_format_currency(theta_per_day), className=_theta_kpi_class(theta_per_day)),
+        ], className='greeks-kpi-card greeks-theta-kpi-card'),
+    ], className='greeks-kpi-strip')
+
+
+def _preserve_or_default(current_values, available_values):
+    available_set = set(available_values)
+    preserved = [value for value in (current_values or []) if value in available_set]
+    return preserved if preserved else available_values
+
+
+def _option_values(options):
+    return {option['value'] for option in options}
+
+
+layout = html.Div([
+    dcc.Store(id='refresh-trigger-store', storage_type='memory'),
+    dcc.Store(id='greeks-unfiltered-normalized-store', storage_type='memory'),
+    dcc.Store(id='greeks-normalized-store', storage_type='memory'),
+    dcc.Download(id='download-greeks-monitor-workbook'),
+
+    html.Div([
+        html.Div([
+            html.Div([
+                html.Label('COB Date', className='inline-filter-label'),
                 dcc.Dropdown(
                     id='date-selector',
-                    options=[
-                        {
-                            'label': pd.to_datetime(date).strftime('%Y-%m-%d') if pd.notna(date) else str(date), 
-                            'value': date
-                        } for date in available_dates
-                    ],
-                    value=available_dates[0] if available_dates else None,
+                    options=[],
+                    value=None,
                     clearable=False,
-                    className="inline-dropdown-date"
+                    className='inline-dropdown-date',
                 ),
-                html.Label('Greek Type:', className="inline-filter-label"),
-                dcc.Dropdown(
-                    id='greek-selector',
-                    options=GREEK_OPTIONS,
-                    value='delta',
-                    clearable=False,
-                    className="inline-dropdown-greek"
-                ),
-                html.Label('Aggregation:', className="inline-filter-label"),
-                dcc.Dropdown(
-                    id='date-aggregation-selector',
-                    options=[
-                        {'label': 'Month', 'value': 'month'},
-                        {'label': 'Quarter', 'value': 'quarter'},
-                        {'label': 'Year', 'value': 'year'}
-                    ],
-                    value='month',
-                    clearable=False,
-                    className="inline-dropdown-aggregation"
-                ),
-                html.Label('Lots:', className="inline-filter-label"),
-                dcc.RadioItems(
-                    id='lots-toggle',
-                    options=[
-                        {'label': 'Off', 'value': False},
-                        {'label': 'On', 'value': True}
-                    ],
-                    value=False,
-                    inline=True,
-                    style={'display': 'flex', 'gap': '10px', 'align-items': 'center'}
-                )
-            ], style={'display': 'flex', 'align-items': 'center', 'gap': '16px', 'flex-wrap': 'nowrap', 'margin-bottom': '8px'}),
-            
-            # Second row - Multi-select dropdowns (forced to second row)
+            ], className='greeks-monitor-control-group greeks-control-date'),
             html.Div([
-                html.Label('Strategies:', className="inline-filter-label"),
+                html.Label('Aggregation', className='inline-filter-label'),
+                dcc.RadioItems(
+                    id='maturity-aggregation-mode-selector',
+                    options=MATURITY_AGGREGATION_OPTIONS,
+                    value='mixed',
+                    inline=True,
+                    className='supply-dest-view-selector exporters-sticky-selector greeks-aggregation-mode-selector',
+                    inputClassName='greeks-aggregation-mode-input',
+                    labelClassName='greeks-aggregation-mode-option',
+                    inputStyle={'display': 'none'},
+                    labelStyle={'marginRight': '0'},
+                ),
+            ], className='greeks-monitor-control-group greeks-control-aggregation'),
+            html.Div([
+                html.Label('Monthly Through', className='inline-filter-label'),
+                dcc.Dropdown(
+                    id='month-through-selector',
+                    options=[],
+                    value=None,
+                    clearable=False,
+                    className='greeks-inline-dropdown-cutoff',
+                ),
+            ], className='greeks-monitor-control-group greeks-control-month-through'),
+            html.Div([
+                html.Label('Quarterly Through', className='inline-filter-label'),
+                dcc.Dropdown(
+                    id='quarter-through-selector',
+                    options=[],
+                    value=None,
+                    clearable=False,
+                    className='greeks-inline-dropdown-cutoff',
+                ),
+            ], className='greeks-monitor-control-group greeks-control-quarter-through'),
+            html.Div([
+                html.Label('Unit Mode', className='inline-filter-label'),
+                dcc.RadioItems(
+                    id='unit-mode-selector',
+                    options=UNIT_MODE_OPTIONS,
+                    value='native',
+                    inline=True,
+                    className='supply-dest-view-selector exporters-sticky-selector greeks-unit-mode-selector',
+                    inputClassName='greeks-unit-mode-input',
+                    labelClassName='greeks-unit-mode-option',
+                    inputStyle={'display': 'none'},
+                    labelStyle={'marginRight': '0'},
+                ),
+            ], className='greeks-monitor-control-group greeks-control-unit-mode'),
+            html.Div([
+                html.Button('Export Workbook', id='export-greeks-workbook-btn', className='inline-button-primary'),
+            ], className='greeks-monitor-actions'),
+        ], className='greeks-monitor-control-row'),
+        html.Div([
+            html.Div([
+                html.Label('Strategies', className='inline-filter-label'),
                 dcc.Dropdown(
                     id='strategy-selector',
-                    options=[{'label': s, 'value': s} for s in all_strategies],
-                    value=all_strategies,
+                    options=[],
+                    value=[],
                     multi=True,
-                    placeholder='Select strategies...',
-                    className="inline-dropdown-multi-strategies"
+                    placeholder='Select strategies',
+                    className='greeks-inline-dropdown-multi',
                 ),
-                html.Label('Trade Types:', className="inline-filter-label"),
+            ], className='greeks-monitor-control-group greeks-control-strategies'),
+            html.Div([
+                html.Label('Trade Types', className='inline-filter-label'),
                 dcc.Dropdown(
                     id='trade-type-selector',
-                    options=[{'label': t, 'value': t} for t in all_trade_types],
-                    value=all_trade_types,
+                    options=[],
+                    value=[],
                     multi=True,
-                    placeholder='Select trade types...',
-                    className="inline-dropdown-multi"
-                )
-            ], style={'display': 'flex', 'align-items': 'center', 'gap': '16px', 'flex-wrap': 'nowrap', 'width': '100%'})
-        ], className="inline-section-header", style={'flex': '1'}),
-        
-        # Right side - Action buttons with matching styling
-        html.Div([
-            html.H3('Aspect Exposure', className="greeks-title"),
-            html.Button('Refresh Settlement', id='refresh-button', className='inline-button-primary'),
-            html.Button('Refresh Live', id='refresh-live-button', className='inline-button-secondary', style={'background-color': '#28a745', 'color': 'white', 'border': 'none'})
-        ], className="inline-section-header", style={'flex': '0 0 auto', 'margin-left': '20px', 'flex-direction': 'column', 'align-items': 'flex-start', 'gap': '8px'})
-    ], style={'display': 'flex', 'align-items': 'stretch', 'gap': '20px'}),
-    # Professional Content Area
-    dcc.Loading(
-        id="loading-indicator",
-        type="circle",
-        children=[
-            # Section header according to .claude/commands guidelines
-            html.H3('Options Greeks Exposure Analysis', id='chart-section-title', className="greeks-title"),
-            # Chart without container wrapper
-            dcc.Graph(
-                id='greeks-bar-chart',
-                config={
-                    'displayModeBar': True,
-                    'responsive': True,
-                    'modeBarButtonsToRemove': ['lasso2d', 'select2d']
-                },
-                style={'height': '420px', 'margin-bottom': '24px'}
-            ),
-            # Tables with individual section headers and export buttons - side by side layout
+                    placeholder='Select trade types',
+                    className='greeks-inline-dropdown-trade-type',
+                ),
+            ], className='greeks-monitor-control-group greeks-control-trade-types'),
             html.Div([
-                # Left side - Exposure Data (60% width)
+                html.Label('Asset / Pair', className='inline-filter-label'),
+                dcc.Dropdown(
+                    id='risk-bucket-selector',
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder='Select instruments and pairs',
+                    className='greeks-inline-dropdown-multi',
+                ),
+            ], className='greeks-monitor-control-group greeks-control-risk-buckets'),
+        ], className='greeks-monitor-control-row'),
+    ], className='professional-section-header greeks-sticky-filter-bar greeks-monitor-controls'),
+
+    dcc.Loading(
+        id='greeks-monitor-loading',
+        type='circle',
+        children=[
+            html.Div(id='greeks-kpi-strip'),
+            html.Div([
                 html.Div([
                     html.Div([
-                        html.H3('Exposure Data', className="greeks-title", style={'margin': '0', 'display': 'inline-block'}),
-                        html.Button('Export', id='export-exposure-btn', 
-                                   className='custom-export-btn',
-                                   style={'margin-left': '12px', 'font-size': '11px', 'padding': '4px 8px', 
-                                         'background-color': '#2E86C1', 'color': 'white', 'border': 'none', 
-                                         'border-radius': '3px', 'cursor': 'pointer', 'font-weight': '500'})
-                    ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '12px'}),
-                    html.Div(id='pivot-table-container', className="options-table-container", 
-                            style={'border': 'none', 'overflow': 'visible'})
-                ], style={'width': '60%', 'margin-right': '20px', 'box-sizing': 'border-box'}),
-                # Right side - Unit Aggregation (40% width)
+                        html.H3('Current Greeks Summary', className='section-title-inline greeks-monitor-title'),
+                    ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
+                    html.Div(id='greeks-summary-table-container', className='supply-dest-table-container greeks-monitor-table-wrap'),
+                ], className='main-section-container supply-dest-section greeks-monitor-section'),
                 html.Div([
                     html.Div([
-                        html.H3('Unit Aggregation', className="greeks-title", style={'margin': '0', 'display': 'inline-block'}),
-                        html.Button('Export', id='export-units-btn', 
-                                   className='custom-export-btn',
-                                   style={'margin-left': '12px', 'font-size': '11px', 'padding': '4px 8px', 
-                                         'background-color': '#2E86C1', 'color': 'white', 'border': 'none', 
-                                         'border-radius': '3px', 'cursor': 'pointer', 'font-weight': '500'})
-                    ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '12px'}),
-                    html.Div(id='units-table-container', className="options-table-container",
-                            style={'border': 'none', 'overflow': 'visible'})
-                ], style={'width': '40%', 'box-sizing': 'border-box'})
-            ], style={'display': 'flex', 'flex-wrap': 'nowrap', 'width': '100%', 'align-items': 'flex-start'}),
+                        html.H3('Maturity by Risk Bucket', className='section-title-inline greeks-monitor-title'),
+                    ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
+                    html.Div(id='greeks-bucket-greek-tables-container', className='supply-dest-table-container greeks-monitor-table-wrap'),
+                ], className='main-section-container supply-dest-section greeks-monitor-section'),
+                html.Div(id='greeks-ladder-sections', className='greeks-monitor-grid'),
+            ], className='greeks-monitor-grid'),
         ],
-        style={'width': '100%'}
     ),
-    # Hidden div for storing the processed data
-    html.Div(id='processed-data', style={'display': 'none'})
-], className="options-dashboard-container")
+], className='options-dashboard-container greeks-page greeks-monitor-page')
 
 
-# ---------------------- Callbacks ----------------------
-
-# Callback to trigger data refresh from navigation bar
 @callback(
     Output('refresh-trigger-store', 'data'),
     Input('refresh-options-data', 'n_clicks'),
-    prevent_initial_call=True
+    prevent_initial_call=True,
 )
 def trigger_data_refresh(n_clicks):
-    """Trigger refresh of all PostgreSQL data when navigation refresh button is clicked"""
     if n_clicks:
-        print("Refreshing PostgreSQL options data...")
-        # Return timestamp to trigger dependent callbacks
+        _fetch_options_data_cached.cache_clear()
+        fetch_instrument_unit_map.cache_clear()
         return {'timestamp': pd.Timestamp.now().isoformat(), 'refresh_count': n_clicks}
     return dash.no_update
 
-# Callback to fetch Aspect data when refresh button is clicked
+
 @callback(
-    Output('aspect-data-store', 'data'),
-    Input('refresh-button', 'n_clicks'),
-    Input('refresh-live-button', 'n_clicks'),
+    Output('date-selector', 'options'),
+    Output('date-selector', 'value'),
+    Input('refresh-trigger-store', 'data'),
     State('date-selector', 'value'),
-    prevent_initial_call=True  # Prevent callback on initial load
 )
-def fetch_aspect_data(refresh_clicks, refresh_live_clicks, selected_date):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return dash.no_update
-
-    # Determine which button was clicked
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
-
-    if triggered_id == 'refresh-button':
-        if not refresh_clicks or not selected_date:
-            return dash.no_update
-
-        # Use selected date from dropdown
-        if isinstance(selected_date, str):
-            date_obj = pd.to_datetime(selected_date)
-            date_str = date_obj.strftime('%Y-%m-%d')
-        else:
-            date_str = selected_date.strftime('%Y-%m-%d')
-
-        print(f"Fetching Aspect data for selected date: {date_str}...")
-
-    elif triggered_id == 'refresh-live-button':
-        if not refresh_live_clicks:
-            return dash.no_update
-
-        # Use today's date
-        today = pd.Timestamp.now().strftime('%Y-%m-%d')
-        date_str = today
-        print(f"Fetching Aspect data for today's date: {date_str}...")
-
-    else:
-        return dash.no_update
-
-    # Fetch the data from the slow API
-    try:
-        aspect_data = aspect_live_exposure_report(date_str, ASPECT_USERNAME, ASPECT_PASSWORD)
-        print("Aspect data fetch complete")
-        # Convert to a format that can be stored in dcc.Store (JSON serializable)
-        return aspect_data.to_dict('records')
-    except Exception as e:
-        print(f"Failed to fetch aspect data: {str(e)}")
-        return []
+def update_date_options(refresh_trigger, selected_date):
+    del refresh_trigger
+    dates = get_available_dates()
+    options = [{'label': date, 'value': date} for date in dates]
+    resolved_date = selected_date if selected_date in dates else (dates[0] if dates else None)
+    return options, resolved_date
 
 
 @callback(
-    # Strategy dropdown outputs
     Output('strategy-selector', 'options'),
     Output('strategy-selector', 'value'),
-    # Trade type dropdown outputs
     Output('trade-type-selector', 'options'),
     Output('trade-type-selector', 'value'),
-    # Inputs
+    Output('risk-bucket-selector', 'options'),
+    Output('risk-bucket-selector', 'value'),
     Input('date-selector', 'value'),
-    Input('aspect-data-store', 'modified_timestamp'),  # triggers updates
-    Input('refresh-trigger-store', 'data'),  # triggers refresh from navigation
-    # State
-    State('aspect-data-store', 'data')
+    Input('refresh-trigger-store', 'data'),
+    State('strategy-selector', 'value'),
+    State('trade-type-selector', 'value'),
+    State('risk-bucket-selector', 'value'),
 )
-def update_strategy_and_trade_types(selected_date, aspect_data_timestamp, refresh_trigger, aspect_data):
-    # Default returns in case something goes wrong
-    empty_result = ([], [], [], [])
+def update_filter_options(selected_date, refresh_trigger, selected_strategies, selected_trade_types, selected_buckets):
+    del refresh_trigger
+    strategies, trade_types, bucket_options = fetch_filter_values(selected_date)
+    bucket_values = [option['value'] for option in bucket_options]
 
-    if not selected_date:
-        return empty_result
-
-    # Check if refresh was triggered from navigation
-    if refresh_trigger:
-        print(f"Strategy/Trade types refresh triggered from navigation bar: {refresh_trigger}")
-
-    try:
-        # 1) Fetch all strategies from the DB
-        query_strategies = f"""
-            SELECT DISTINCT substrategy
-            FROM at_lng.trades_options_valuation
-            WHERE cob_date = '{selected_date}'
-        """
-        db_strategies_df = pd.read_sql(query_strategies, engine)
-        db_strategies = sorted(db_strategies_df['substrategy'].unique())
-
-        # 2) Fetch all trade types from the DB
-        query_trade_types = f"""
-            SELECT DISTINCT type_trade
-            FROM at_lng.trades_options_valuation
-            WHERE cob_date = '{selected_date}'
-        """
-        db_trade_types_df = pd.read_sql(query_trade_types, engine)
-        db_trade_types = sorted(db_trade_types_df['type_trade'].unique())
-
-        # 3) Merge in aspect data if it exists
-        if aspect_data:
-            df_aspect = pd.DataFrame(aspect_data)
-
-            # Merge in strategies
-            if 'strategy' in df_aspect.columns:
-                aspect_strategies = sorted(df_aspect['strategy'].unique())
-                all_strategies = sorted(set(db_strategies) | set(aspect_strategies))
-            else:
-                all_strategies = db_strategies
-
-            # Merge in trade types
-            if 'entityType' in df_aspect.columns:
-                aspect_trade_types = sorted(df_aspect['entityType'].unique())
-                all_trade_types = sorted(set(db_trade_types) | set(aspect_trade_types))
-            else:
-                all_trade_types = db_trade_types
-        else:
-            # If no aspect data, just use DB results
-            all_strategies = db_strategies
-            all_trade_types = db_trade_types
-
-        # 4) Build dropdown options and default selections
-        strategy_options = [{'label': s, 'value': s} for s in all_strategies]
-        trade_type_options = [{'label': t, 'value': t} for t in all_trade_types]
-
-        return (
-            strategy_options,  # strategy-selector options
-            all_strategies,  # strategy-selector value
-            trade_type_options,
-            all_trade_types
-        )
-
-    except Exception as e:
-        print(f"Error updating strategy/trade type dropdowns: {e}")
-        return empty_result
+    return (
+        [{'label': strategy, 'value': strategy} for strategy in strategies],
+        _preserve_or_default(selected_strategies, strategies),
+        [{'label': trade_type, 'value': trade_type} for trade_type in trade_types],
+        _preserve_or_default(selected_trade_types, trade_types),
+        bucket_options,
+        _preserve_or_default(selected_buckets, bucket_values),
+    )
 
 
-# Update the process_data callback to include lots toggle state
 @callback(
-    Output('processed-data', 'children'),
+    Output('month-through-selector', 'options'),
+    Output('month-through-selector', 'value'),
+    Output('quarter-through-selector', 'options'),
+    Output('quarter-through-selector', 'value'),
+    Output('month-through-selector', 'disabled'),
+    Output('quarter-through-selector', 'disabled'),
     Input('date-selector', 'value'),
-    Input('strategy-selector', 'value'),
-    Input('trade-type-selector', 'value'),
-    Input('greek-selector', 'value'),
-    Input('lots-toggle', 'value'),
-    Input('date-aggregation-selector', 'value'),
-    Input('aspect-data-store', 'data'),
-    Input('refresh-trigger-store', 'data')
+    Input('maturity-aggregation-mode-selector', 'value'),
+    Input('refresh-trigger-store', 'data'),
+    State('month-through-selector', 'value'),
+    State('quarter-through-selector', 'value'),
 )
-def process_data(selected_date, selected_strategies, selected_trade_types, greek_type, lots_enabled, date_aggregation, aspect_data, refresh_trigger):
-    if not selected_date or not selected_strategies or not greek_type or not engine:
-        return "No data"
+def update_maturity_cutoff_controls(
+    selected_date,
+    aggregation_mode,
+    refresh_trigger,
+    selected_month_through,
+    selected_quarter_through,
+):
+    del refresh_trigger
+    month_options, default_month, quarter_options, default_quarter = build_maturity_cutoff_options(selected_date)
+    if not month_options or not quarter_options:
+        return month_options, default_month, quarter_options, default_quarter, True, True
 
-    # Check if refresh was triggered from navigation
-    if refresh_trigger:
-        print(f"Data refresh triggered from navigation bar: {refresh_trigger}")
+    triggered_id = dash.callback_context.triggered[0]['prop_id'].split('.')[0] if dash.callback_context.triggered else None
+    reset_to_default = triggered_id in {None, 'date-selector', 'refresh-trigger-store'}
 
-    # Fetch data
-    options_data = fetch_options_valuation_data(engine, selected_date)
-    options_data['dealType'] = 'option'
+    month_values = _option_values(month_options)
+    quarter_values = _option_values(quarter_options)
+    month_through = (
+        default_month
+        if reset_to_default or selected_month_through not in month_values
+        else selected_month_through
+    )
+    quarter_through = (
+        default_quarter
+        if reset_to_default or selected_quarter_through not in quarter_values
+        else selected_quarter_through
+    )
 
-    # Only include Aspect data if available (after button click)
-    if aspect_data:
-        # Convert aspect_data from dict to DataFrame
-        delta_futures = pd.DataFrame(aspect_data)
-
-        if not delta_futures.empty:
-            # Check if required columns exist
-            required_columns = ['instrument', 'qty', 'uoM', 'maturityForwardDate',
-                                'strategy', 'dealType', 'entityType', 'exchangeTradeOtc']
-
-            if all(col in delta_futures.columns for col in required_columns):
-                # Process delta_futures
-                delta_futures = delta_futures[required_columns].rename(columns={
-                    'instrument': 'asset_a',
-                    'maturityForwardDate': 'maturity_date_a',
-                    'strategy': 'substrategy',
-                    'qty': 'quantity',
-                    'uoM': 'unit_quantity',
-                    'entityType': 'type_trade'
-                })
-                delta_futures['asset_a_multiplier'] = 1
-                delta_futures['asset_a_premium'] = 0
-                delta_futures['maturity_date_type_a'] = 'month'
-                delta_futures['exchangeTradeOtc'] = 'Physical Option'
-                delta_futures['qty_delta_asset_a'] = delta_futures['quantity']
-                delta_futures['asset_b'] = delta_futures['asset_a']  # Copy asset_a to asset_b for consistency
-                delta_futures['qty_delta_asset_b'] = 0  # No delta for asset_b in this case
-
-                # Convert date columns
-                if 'maturity_date_a' in delta_futures.columns:
-                    delta_futures['maturity_date_a'] = pd.to_datetime(delta_futures['maturity_date_a'])
-
-                # Add maturity_date_b as a copy of maturity_date_a for consistency
-                delta_futures['maturity_date_b'] = delta_futures['maturity_date_a']
-                delta_futures['maturity_date_type_b'] = delta_futures['maturity_date_type_a']
-
-                # Combine options_data and delta_futures
-                options_data = pd.concat([options_data, delta_futures])
-
-    if options_data.empty:
-        return "No data"
-
-    # Convert date columns
-    date_columns = ['trade_date', 'maturity_date_a', 'maturity_date_b', 'expiration_date']
-    for col in date_columns:
-        if col in options_data.columns:
-            options_data[col] = pd.to_datetime(options_data[col])
-
-    # Apply filters
-    filtered_data = options_data[options_data['substrategy'].isin(selected_strategies)]
-    filtered_data = filtered_data[filtered_data['type_trade'].isin(selected_trade_types)]
-
-    if filtered_data.empty:
-        return "No data"
-
-    # Create the pivot table - pass the lots_enabled parameter
-    pivot_df, unit_map = create_greeks_pivot_table(filtered_data, greek_type, lots_enabled)
-
-    # Make sure the index is named correctly before converting to JSON
-    pivot_df = pivot_df.reset_index()
-
-    # Ensure the first column is consistently named for both standard Greeks and correlation
-    first_col = pivot_df.columns[0]
-    if greek_type == 'correlation':
-        pivot_df.rename(columns={first_col: 'maturity_pair'}, inplace=True)
-    else:
-        pivot_df.rename(columns={first_col: 'maturity_date'}, inplace=True)
-
-    # Store both the pivot table and the unit map and lots information
-    result = {
-        'pivot_data': pivot_df.to_dict('records'),
-        'columns': pivot_df.columns.tolist(),
-        'unit_map': unit_map,
-        'lots_enabled': lots_enabled,
-        'date_aggregation': date_aggregation  # Include the date aggregation setting
-    }
-
-    # Return as JSON
-    return json.dumps(result)
-
-
-# Update visualizations with the processed data
-@callback(
-    Output('greeks-bar-chart', 'figure'),
-    Output('pivot-table-container', 'children'),
-    Output('units-table-container', 'children'),
-    Output('chart-section-title', 'children'),
-    Input('processed-data', 'children'),
-    Input('greek-selector', 'value'),
-    Input('date-aggregation-selector', 'value')
-)
-def update_visualizations(json_data, greek_type, date_aggregation):
-    if not json_data or not greek_type:
-        # Create empty figure and empty divs as default returns
-        empty_fig = px.bar(title="No data available")
-        empty_table = html.Div("No data available")
-        empty_units_table = html.Div("No data available")
-        empty_title = "Options Greeks Exposure Analysis"
-        return (empty_fig, empty_table, empty_units_table, empty_title)
-
-    # Parse the JSON data
-    try:
-        result = json.loads(json_data)
-        data_records = result['pivot_data']
-        columns = result['columns']
-        unit_map = result['unit_map']
-        lots_enabled = result.get('lots_enabled', False)  # Get lots_enabled state
-        stored_date_agg = result.get('date_aggregation', 'month')
-
-        # Use the latest setting (either from the dropdown or stored in processed data)
-        # If they're different, we need to reaggregate
-        need_reaggregation = date_aggregation != stored_date_agg
-    except (json.JSONDecodeError, KeyError) as e:
-        print(f"Error parsing JSON data: {e}")
-        # Create empty figure and empty divs as default returns
-        empty_fig = px.bar(title="Error parsing data")
-        empty_table = html.Div("Error parsing data")
-        empty_units_table = html.Div("Error parsing data")
-        empty_title = "Options Greeks Exposure Analysis"
-        return (empty_fig, empty_table, empty_units_table, empty_title)
-
-    # Convert to DataFrame
-    data = pd.DataFrame(data_records)
-
-    if data.empty:
-        # Create empty figure and empty divs as default returns
-        empty_fig = px.bar(title="No data available")
-        empty_table = html.Div("No data available")
-        empty_units_table = html.Div("No data available")
-        empty_title = "Options Greeks Exposure Analysis"
-        return (empty_fig, empty_table, empty_units_table, empty_title)
-
-    # Set the appropriate index column based on Greek type
-    index_col = 'maturity_pair' if greek_type == 'correlation' else 'maturity_date'
-
-    # # Apply date aggregation if needed
-    # if need_reaggregation:
-    #     print(f"Reaggregating data from {stored_date_agg} to {date_aggregation}")
-    #     # Apply the date aggregation function
-    data = aggregate_by_date_level(data, index_col, date_aggregation)
-
-    if index_col in data.columns:
-        pivot_df = data.set_index(index_col)
-    else:
-        # Fallback to first column if the expected column isn't found
-        pivot_df = data.set_index(data.columns[0])
-
-    # Create visualizations
-    bar_fig = plot_greeks_bar_chart(pivot_df, greek_type)
-
-    # Add a title that indicates the date aggregation level
-    level_display = {
-        'month': 'by Month',
-        'quarter': 'by Quarter',
-        'year': 'by Year'
-    }.get(date_aggregation, '')
-
-    # Chart title already set to empty in professional styling
-
-    # Create columns for DataTable - use single-level headers with units included in the names
-    table_columns = []
-
-    # Add the maturity/date column first
-    table_columns.append({
-        "name": index_col,
-        "id": index_col
-    })
-
-    # Create a dictionary to categorize columns by their unit
-    # Structure: {unit: {column_name: column_index, ...}, ...}
-    columns_by_unit = {}
-
-    # We'll also need to track which columns belong to which units for later aggregation
-    column_unit_mapping = {}
-
-    # Add columns for each asset with their units incorporated in the name
-    for col in data.columns:
-        if col != index_col and col != 'Row Total':
-            # For regular Greeks (not correlation), include the unit in the column name
-            if greek_type != 'correlation' and col in unit_map and unit_map[col]:
-                unit_display = unit_map[col]
-                # Add "(Lots)" to the unit display if lots enabled for delta/gamma
-                if lots_enabled and (greek_type == 'delta' or greek_type == 'gamma'):
-                    display_name = f"{col} ({unit_display}, Lots)"
-                    unit_key = f"{unit_display} (Lots)"
-                else:
-                    display_name = f"{col} ({unit_display})"
-                    unit_key = unit_display
-
-                # Track which unit this column belongs to
-                column_unit_mapping[col] = unit_key
-
-                # Initialize the unit in our mapping if it doesn't exist
-                if unit_key not in columns_by_unit:
-                    columns_by_unit[unit_key] = {}
-
-                # Add this column to the appropriate unit
-                columns_by_unit[unit_key][col] = True
-            else:
-                display_name = col
-
-                # For correlation or items without unit, use "N/A" as unit
-                if col != 'Row Total':
-                    unit_key = "N/A"
-                    column_unit_mapping[col] = unit_key
-
-                    if unit_key not in columns_by_unit:
-                        columns_by_unit[unit_key] = {}
-
-                    columns_by_unit[unit_key][col] = True
-
-            table_columns.append({
-                "name": display_name,
-                "id": col,
-                "type": "numeric",
-                "format": Format(
-                    group=Group.yes,  # Enable grouping (thousand separators)
-                    scheme=Scheme.fixed,  # Use fixed precision
-                    precision=0,  # No decimal places for integers
-                    group_delimiter=',',  # Use comma as thousand separator
-                    decimal_delimiter='.'  # Use period as decimal separator
-                )
+    month_cutoff, quarter_cutoff = _resolve_maturity_cutoffs(selected_date, month_through, quarter_through)
+    resolved_quarter_through = _format_cutoff_value(quarter_cutoff)
+    if resolved_quarter_through != quarter_through:
+        quarter_through = resolved_quarter_through
+        if quarter_through not in quarter_values:
+            quarter_options.append({
+                'label': _quarter_through_label(quarter_through),
+                'value': quarter_through,
             })
 
-    # Add the Row Total column
-    if 'Row Total' in data.columns:
-        table_columns.append({
-            "name": "Row Total",
-            "id": "Row Total",
-            "type": "numeric",
-            "format": Format(
-                group=Group.yes,
-                scheme=Scheme.fixed,
-                precision=0,
-                group_delimiter=',',
-                decimal_delimiter='.'
-            )
-        })
+    controls_disabled = aggregation_mode != 'mixed'
+    return month_options, month_through, quarter_options, quarter_through, controls_disabled, controls_disabled
 
-    # Create data table with appropriate header
-    table_props = {
-        'id': 'pivot-table',
-        'columns': table_columns,
-        'data': data.to_dict('records'),
-        'style_table': {'overflowX': 'auto'},
-        'style_cell': {
-            'textAlign': 'center',
-            'padding': '10px',
-            'fontFamily': 'Arial'
-        },
-        'style_header': {
-            'backgroundColor': 'rgb(230, 230, 230)',
-            'fontWeight': 'bold',
-            'textAlign': 'center',
-            'height': 'auto',  # Allow the header to expand to fit content
-            'whiteSpace': 'normal',  # Allow line breaks in headers
-        },
-        'style_data_conditional': [
-            {
-                'if': {'row_index': len(data) - 1},  # Last row (Total)
-                'backgroundColor': 'rgb(230, 230, 230)',
-                'fontWeight': 'bold'
-            },
-            {
-                'if': {'column_id': index_col},  # Maturity column
-                'fontWeight': 'bold',
-                'textAlign': 'left'
-            },
-            {
-                'if': {'column_id': 'Row Total'},  # Row Total column
-                'backgroundColor': 'rgb(230, 230, 230)',
-                'fontWeight': 'bold'
-            }
-        ],
-        'fill_width': False,
-        'export_format': "xlsx"
+
+def _build_unfiltered_greeks_store(
+    selected_date,
+    aggregation,
+    month_through,
+    quarter_through,
+    unit_mode,
+):
+    if not selected_date:
+        return _empty_store('No COB date selected')
+
+    data = fetch_options_data(selected_date)
+    if data.empty:
+        return _empty_store('No option Greeks found')
+
+    month_cutoff, quarter_cutoff = _resolve_maturity_cutoffs(selected_date, month_through, quarter_through)
+    normalized = normalize_greek_contributions(
+        data,
+        aggregation or 'mixed',
+        unit_mode,
+        _format_cutoff_value(month_cutoff),
+        _format_cutoff_value(quarter_cutoff),
+        selected_date,
+    )
+
+    if normalized.empty:
+        return _empty_store('No option Greeks found')
+
+    meta = {
+        'message': 'OK',
+        'cob_date': selected_date,
+        'raw_rows': int(data.shape[0]),
+        'normalized_rows': int(normalized.shape[0]),
+        'strategies': int(data['substrategy'].nunique()),
+        'trade_types': int(data['type_trade'].nunique()),
+        'units': sorted(normalized['unit'].dropna().unique().tolist()),
+        'aggregation': aggregation or 'mixed',
+        'month_through': _format_cutoff_value(month_cutoff),
+        'quarter_through': _format_cutoff_value(quarter_cutoff),
+        'unit_mode': unit_mode,
     }
 
-    table = dash_table.DataTable(**table_props)
+    return {'meta': meta, 'rows': normalized.to_dict('records')}
 
-    # Create the unit-based table with maturity dates as rows and units as columns
-    # First, create a new DataFrame for the unit aggregation
-    unit_df = pd.DataFrame(index=pivot_df.index)
 
-    # Set of all units
-    all_units = set(column_unit_mapping.values())
+def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets):
+    if not base_store:
+        return _empty_store('No COB date selected')
 
-    # For each unit, sum up all columns that belong to that unit
-    for unit in all_units:
-        # Get all columns for this unit
-        unit_columns = [col for col, unit_name in column_unit_mapping.items() if unit_name == unit]
+    base_message = (base_store or {}).get('meta', {}).get('message')
+    if base_message == 'No COB date selected':
+        return base_store
+    if selected_strategies == []:
+        return _empty_store('No strategies selected')
+    if selected_trade_types == []:
+        return _empty_store('No trade types selected')
+    if selected_buckets == []:
+        return _empty_store('No instruments or pairs selected')
 
-        # Sum these columns to get the unit total for each maturity date
-        if unit_columns:
-            unit_df[unit] = pivot_df[unit_columns].sum(axis=1)
-        else:
-            unit_df[unit] = 0
+    if not base_store or not base_store.get('rows'):
+        return _empty_store(base_message or 'No data available')
 
-    # Reset index to get the maturity date as a column
-    unit_df = unit_df.reset_index()
+    rows = pd.DataFrame(base_store['rows'])
+    if rows.empty:
+        return _empty_store(base_message or 'No data available')
 
-    # Create columns for the units table
-    unit_table_columns = []
+    if selected_strategies:
+        rows = rows[rows['strategy'].astype(str).isin(selected_strategies)]
+    if selected_trade_types:
+        rows = rows[rows['trade_type'].astype(str).isin(selected_trade_types)]
 
-    # Add the maturity date column first
-    unit_table_columns.append({
-        "name": index_col,
-        "id": index_col
-    })
+    if rows.empty:
+        return _empty_store('No rows match selected strategy/trade-type filters')
 
-    # Add columns for each unit
-    for unit in sorted(all_units):
-        unit_table_columns.append({
-            "name": unit,
-            "id": unit,
-            "type": "numeric",
-            "format": Format(
-                group=Group.yes,
-                scheme=Scheme.fixed,
-                precision=0,
-                group_delimiter=',',
-                decimal_delimiter='.'
-            )
-        })
+    source_order = rows['source_row_id'].drop_duplicates().tolist()
+    source_id_map = {source_row_id: dense_id for dense_id, source_row_id in enumerate(source_order)}
+    rows = rows.copy()
+    rows['source_row_id'] = rows['source_row_id'].map(source_id_map).astype(int)
+    strategy_trade_rows = rows
 
-    # Create the units table props
-    units_table_props = {
-        'id': 'units-table',
-        'columns': unit_table_columns,
-        'data': unit_df.to_dict('records'),
-        'style_table': {'overflowX': 'auto'},
-        'style_cell': {
-            'textAlign': 'center',
-            'padding': '10px',
-            'fontFamily': 'Arial'
-        },
-        'style_header': {
-            'backgroundColor': 'rgb(230, 230, 230)',
-            'fontWeight': 'bold',
-            'textAlign': 'center',
-            'height': 'auto',
-            'whiteSpace': 'normal',
-        },
-        'style_data_conditional': [
-            {
-                'if': {'row_index': len(unit_df) - 1},  # Last row (Total)
-                'backgroundColor': 'rgb(230, 230, 230)',
-                'fontWeight': 'bold'
-            },
-            {
-                'if': {'column_id': index_col},  # Maturity column
-                'fontWeight': 'bold',
-                'textAlign': 'left'
-            }
-        ],
-        'fill_width': False,
-        'export_format': "xlsx"
+    normalized = filter_normalized_rows(strategy_trade_rows, selected_buckets)
+    if normalized.empty:
+        return _empty_store('No Greek rows match selected risk buckets')
+
+    normalized = normalized.sort_values(['greek', 'bucket_type', 'risk_bucket', 'maturity_bucket']).reset_index(drop=True)
+    base_meta = base_store.get('meta', {})
+
+    meta = {
+        'message': 'OK',
+        'cob_date': base_meta.get('cob_date'),
+        'raw_rows': int(len(source_order)),
+        'normalized_rows': int(normalized.shape[0]),
+        'strategies': int(strategy_trade_rows['strategy'].replace('N/A', pd.NA).nunique()),
+        'trade_types': int(strategy_trade_rows['trade_type'].replace('N/A', pd.NA).nunique()),
+        'units': sorted(normalized['unit'].dropna().unique().tolist()),
+        'aggregation': base_meta.get('aggregation') or 'mixed',
+        'month_through': base_meta.get('month_through'),
+        'quarter_through': base_meta.get('quarter_through'),
+        'unit_mode': base_meta.get('unit_mode'),
     }
 
-    units_table = dash_table.DataTable(**units_table_props)
-
-    # Create dynamic section title based on Greek type
-    dynamic_title = f"Options {greek_type.capitalize()} Exposure Analysis"
-    
-    return (bar_fig, table, units_table, dynamic_title)
+    return {'meta': meta, 'rows': normalized.to_dict('records')}
 
 
-# Custom Export Callbacks
-@callback(
-    Output("download-exposure-data", "data"),
-    Input("export-exposure-btn", "n_clicks"),
-    State('processed-data', 'children'),
-    State('greek-selector', 'value'),
-    prevent_initial_call=True
-)
-def export_exposure_data(n_clicks, json_data, greek_type):
-    """Export Exposure Data table to Excel"""
-    if n_clicks and json_data:
-        try:
-            import io
-            result = json.loads(json_data)
-            data_records = result['pivot_data']
-            df = pd.DataFrame(data_records)
-            
-            # Set the appropriate index column
-            index_col = 'maturity_pair' if greek_type == 'correlation' else 'maturity_date'
-            if index_col in df.columns:
-                df = df.set_index(index_col)
-            
-            # Create Excel file in memory
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='Exposure Data', index=True)
-            output.seek(0)
-            
-            return dcc.send_bytes(output.getvalue(), f"exposure_data_{greek_type}.xlsx")
-        except Exception as e:
-            print(f"Export error: {e}")
-            return None
-    return None
+def process_current_greeks(
+    selected_date,
+    selected_strategies,
+    selected_trade_types,
+    selected_buckets,
+    aggregation,
+    month_through,
+    quarter_through,
+    unit_mode,
+    refresh_trigger=None,
+):
+    del refresh_trigger
+    base_store = _build_unfiltered_greeks_store(
+        selected_date,
+        aggregation,
+        month_through,
+        quarter_through,
+        unit_mode,
+    )
+    return _filter_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets)
 
 
 @callback(
-    Output("download-units-data", "data"),
-    Input("export-units-btn", "n_clicks"),
-    State('processed-data', 'children'),
-    State('greek-selector', 'value'),
-    prevent_initial_call=True
+    Output('greeks-unfiltered-normalized-store', 'data'),
+    Input('date-selector', 'value'),
+    Input('maturity-aggregation-mode-selector', 'value'),
+    Input('month-through-selector', 'value'),
+    Input('quarter-through-selector', 'value'),
+    Input('unit-mode-selector', 'value'),
+    Input('refresh-trigger-store', 'data'),
 )
-def export_units_data(n_clicks, json_data, greek_type):
-    """Export Unit Aggregation data to Excel"""
-    if n_clicks and json_data:
-        try:
-            import io
-            result = json.loads(json_data)
-            data_records = result['pivot_data']
-            unit_map = result['unit_map']
-            
-            df = pd.DataFrame(data_records)
-            index_col = 'maturity_pair' if greek_type == 'correlation' else 'maturity_date'
-            
-            if index_col in df.columns:
-                pivot_df = df.set_index(index_col)
-            else:
-                pivot_df = df.set_index(df.columns[0])
-            
-            # Create unit aggregation similar to the visualization callback
-            column_unit_mapping = {}
-            for col in df.columns:
-                if col != index_col and col != 'Row Total':
-                    if greek_type != 'correlation' and col in unit_map and unit_map[col]:
-                        unit_key = unit_map[col]
-                        column_unit_mapping[col] = unit_key
-                    else:
-                        column_unit_mapping[col] = "N/A"
-            
-            unit_df = pd.DataFrame(index=pivot_df.index)
-            all_units = set(column_unit_mapping.values())
-            
-            for unit in all_units:
-                unit_columns = [col for col, unit_name in column_unit_mapping.items() if unit_name == unit]
-                if unit_columns:
-                    unit_df[unit] = pivot_df[unit_columns].sum(axis=1)
-                else:
-                    unit_df[unit] = 0
-            
-            unit_df = unit_df.reset_index()
-            
-            # Create Excel file in memory
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                unit_df.to_excel(writer, sheet_name='Unit Aggregation', index=False)
-            output.seek(0)
-            
-            return dcc.send_bytes(output.getvalue(), f"unit_aggregation_{greek_type}.xlsx")
-        except Exception as e:
-            print(f"Export error: {e}")
-            return None
-    return None
+def update_unfiltered_greeks_store(
+    selected_date,
+    aggregation,
+    month_through,
+    quarter_through,
+    unit_mode,
+    refresh_trigger,
+):
+    del refresh_trigger
+    return _build_unfiltered_greeks_store(
+        selected_date,
+        aggregation,
+        month_through,
+        quarter_through,
+        unit_mode,
+    )
 
- 
+
+@callback(
+    Output('greeks-normalized-store', 'data'),
+    Input('greeks-unfiltered-normalized-store', 'data'),
+    Input('strategy-selector', 'value'),
+    Input('trade-type-selector', 'value'),
+    Input('risk-bucket-selector', 'value'),
+)
+def update_filtered_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets):
+    return _filter_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets)
+
+
+@callback(
+    Output('greeks-kpi-strip', 'children'),
+    Output('greeks-summary-table-container', 'children'),
+    Output('greeks-bucket-greek-tables-container', 'children'),
+    Output('greeks-ladder-sections', 'children'),
+    Input('greeks-normalized-store', 'data'),
+)
+def update_monitor_tables(store_data):
+    if not store_data or not store_data.get('rows'):
+        empty = html.Div('No data for the current selection.', className='greeks-empty-state')
+        return empty, empty, empty, []
+
+    rows = pd.DataFrame(store_data['rows'])
+    meta = store_data.get('meta', {})
+    tables = build_display_tables(rows)
+
+    return (
+        build_kpi_strip(rows, meta),
+        build_compact_table('greeks-summary-table', tables['summary'], fit_to_content=True),
+        build_bucket_greek_sections(tables),
+        build_ladder_sections(tables),
+    )
+
+
+@callback(
+    Output('download-greeks-monitor-workbook', 'data'),
+    Input('export-greeks-workbook-btn', 'n_clicks'),
+    State('greeks-normalized-store', 'data'),
+    prevent_initial_call=True,
+)
+def export_greeks_workbook(n_clicks, store_data):
+    if not n_clicks or not store_data or not store_data.get('rows'):
+        return dash.no_update
+
+    rows = pd.DataFrame(store_data['rows'])
+    tables = build_output_tables(rows)
+    cob_date = store_data.get('meta', {}).get('cob_date') or pd.Timestamp.now().strftime('%Y-%m-%d')
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        sheet_map = {
+            'Summary': tables['summary'],
+            'Bucket Greeks': tables['bucket_greek_export'],
+            'Delta Ladder': tables['delta_ladder'],
+            'Delta Unit Ladder': tables['delta_unit_ladder'],
+            'Gamma Ladder': tables['gamma_ladder'],
+            'Gamma Unit Ladder': tables['gamma_unit_ladder'],
+            'Vega Ladder': tables['vega_ladder'],
+            'Vega Unit Ladder': tables['vega_unit_ladder'],
+            'Theta Ladder': tables['theta_ladder'],
+            'Theta Unit Ladder': tables['theta_unit_ladder'],
+            'Correlation Ladder': tables['correlation_ladder'],
+            'Corr Unit Ladder': tables['correlation_unit_ladder'],
+            'Raw Normalized': tables['raw'],
+        }
+        for sheet_name, table in sheet_map.items():
+            export_df = table.drop(columns=['_row_type'], errors='ignore')
+            export_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+
+    output.seek(0)
+    return dcc.send_bytes(output.getvalue(), f'current_greeks_monitor_{cob_date}.xlsx')

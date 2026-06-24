@@ -1,123 +1,90 @@
 import dash
-from dash import html, dcc
+import dash_ag_grid as dag
+from dash import html, dcc, Input, Output, State
+import json
+import threading
 import pandas as pd
 import numpy as np
-from pandas.tseries.offsets import MonthEnd
-from dash import Dash, html, dcc, callback, Input, Output, dash_table, State, callback_context
-import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import datetime
-import configparser # Import the built-in configparser
-# Trino
-from trino.dbapi import connect
-from trino.auth import JWTAuthentication
-import os
-# Define read_and_prepare_data function locally to avoid import execution issues
-def parse_maturity_date(s):
-    """Parse maturity date from string to datetime."""
-    try:
-        if len(s) > 5:
-            return pd.to_datetime(s, format='%m/%d/%Y', errors='coerce')
-        else:
-            return pd.to_datetime(s, format='%b%y', errors='coerce')
-    except Exception:
-        return pd.NaT
+from sqlalchemy import text
 
-def read_and_prepare_data(query, conn):
-    """Read data from database and prepare it."""
-    df = read_table_conn(conn, query)
-    df['maturity_date'] = df['maturity_date'].apply(parse_maturity_date)
-    df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
-    df['expiration_date'] = pd.to_datetime(df['expiration_date'], errors='coerce')
-    return df
-
-#------ code to be able to access config.ini, even having the path in the .virtualenvs is not working without it ------#
-try:
-    # Get the directory where your script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Navigate to the directory containing config.ini
-    # Adjust the number of '..' as needed to reach the correct directory
-    config_dir = os.path.abspath(os.path.join(script_dir, '..','..'))  # Go up one level
-    CONFIG_FILE_PATH = os.path.join(config_dir, 'config.ini')
-except:
-    CONFIG_FILE_PATH = 'config.ini'  # Assumes it's in the same directory or the path it is detected
-
-# --- Load Configuration from INI File ---
-config_reader = configparser.ConfigParser(interpolation=None)
-config_reader.read(CONFIG_FILE_PATH)
-
-# Read values from the ini file sections
-TRINOS_HOST = config_reader.get('TRINOS', 'HOST', fallback=None)
-TRINOS_USERNAME = config_reader.get('TRINOS', 'USERNAME', fallback=None)
-TRINOS_TOKEN = config_reader.get('TRINOS', 'TOKEN', fallback=None)
-TRINOS_PORT = config_reader.get('TRINOS', 'PORT', fallback=None)
+from db_fallback import DB_SCHEMA, fq_table, read_with_fallback, sql_literal
 
 
+ENVERUS_UNDERLYING_SOURCES = {
+    'HH': {'code': 'ICE_HH', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
+    'NBP': {'code': 'ICE_UKD', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
+    'TFM': {'code': 'ICE_TTF', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
+    'TFU': {'code': 'ICE_TFU_MO', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
+    'Brent': {'code': 'ICE_BRENT_FUTURES', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
+    'JKM': {'code': 'ICE_JKM_MO', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
+}
+ENVERUS_CODE_TO_PRODUCT = {
+    source['code']: product
+    for product, source in ENVERUS_UNDERLYING_SOURCES.items()
+}
 
-# Function to retrieve data from trinos in a df
-def read_table_conn(conn,query):
-    cur = conn.cursor()
-    cur.execute(query)
-    rows = cur.fetchall()
-    num_fields = len(cur.description)
-    field_names = [i[0] for i in cur.description]
-    df_data = pd.DataFrame(rows, columns=field_names)
-    cur.close()
-    return df_data
 
-# trinos connection gas
-try:
-    conn_gas = connect(
-        host= TRINOS_HOST,
-        port= TRINOS_PORT,
-        user= TRINOS_USERNAME,
-        auth= JWTAuthentication(TRINOS_TOKEN),
-        http_scheme= "https",
-        verify= False,
-        catalog= "raw",
-        schema= "ice_gas",
+def _sql_in_literal(values):
+    return ', '.join(sql_literal(value) for value in values)
+
+
+def _normalize_enverus_prices(df):
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                'trade_date',
+                'hub',
+                'product',
+                'maturity_date',
+                'expiration_date',
+                'contract',
+                'contract_type',
+                'settlement_price',
+                'code',
+            ]
+        )
+
+    normalized = df.copy()
+    normalized['trade_date'] = pd.to_datetime(normalized['COB'], errors='coerce')
+    normalized['maturity_date'] = np.where(
+        normalized['contract'].eq('SPOT'),
+        normalized['trade_date'],
+        pd.to_datetime(normalized['contract'], format='%YM%m', errors='coerce'),
     )
-except Exception as e:
-    print(f"Warning: Failed to create gas connection: {e}")
-    conn_gas = None
+    normalized['expiration_date'] = pd.to_datetime(normalized['expiry'], errors='coerce')
+    normalized['settlement_price'] = pd.to_numeric(normalized['value'], errors='coerce')
+    normalized['product'] = normalized['code'].map(ENVERUS_CODE_TO_PRODUCT).fillna(normalized['code'])
+    normalized['contract_type'] = None
+    normalized['hub'] = None
+    normalized['contract'] = normalized['product']
 
-# trinos connection oil
-try:
-    conn_oil = connect(
-        host= TRINOS_HOST,
-        port= TRINOS_PORT,
-        user= TRINOS_USERNAME,
-        auth= JWTAuthentication(TRINOS_TOKEN),
-        http_scheme= "https",
-        verify= False,
-        catalog= "raw",
-        schema= "ice_oil",
-    )
-except Exception as e:
-    print(f"Warning: Failed to create oil connection: {e}")
-    conn_oil = None
-
-# trinos connection enverus (for JKM data)
-try:
-    conn_enverus = connect(
-        host= TRINOS_HOST,
-        port= TRINOS_PORT,
-        user= TRINOS_USERNAME,
-        auth= JWTAuthentication(TRINOS_TOKEN),
-        http_scheme= "https",
-        verify= False,
-        catalog= "transformed",
-        schema= "enverus",
-    )
-except Exception as e:
-    print(f"Warning: Failed to create enverus connection: {e}")
-    conn_enverus = None
+    normalized = normalized.dropna(subset=['trade_date', 'maturity_date', 'settlement_price'])
+    return normalized[
+        [
+            'trade_date',
+            'hub',
+            'product',
+            'maturity_date',
+            'expiration_date',
+            'contract',
+            'contract_type',
+            'settlement_price',
+            'code',
+        ]
+    ].reset_index(drop=True)
 
 
-# Function to get prices from enverus, inputs: conn, code, category, version_name, from_COB, to_COB
-def get_enverus_prices(conn, code, category, version_name, from_COB, to_COB):
-    # Get prices from enverus
-    query = '''SELECT   code,
+def get_enverus_underlying_prices(from_COB, to_COB):
+    """Load all underlying prices from transformed.enverus.curve only."""
+    postgres_from_cob = datetime.datetime.strptime(str(from_COB), "%Y%m%d").date()
+    postgres_to_cob = datetime.datetime.strptime(str(to_COB), "%Y%m%d").date()
+    codes = [source['code'] for source in ENVERUS_UNDERLYING_SOURCES.values()]
+    categories = sorted({source['category'] for source in ENVERUS_UNDERLYING_SOURCES.values()})
+    versions = sorted({source['version_name'] for source in ENVERUS_UNDERLYING_SOURCES.values()})
+
+    trino_query = '''SELECT   code,
                         ondate AS COB,
                         currency,
                         units,
@@ -125,214 +92,489 @@ def get_enverus_prices(conn, code, category, version_name, from_COB, to_COB):
                         forward_curve_tenors_absolute AS contract,
                         forward_curve_tenors_value AS value
                         FROM enverus.curve
-                        WHERE code='{}'
-                            AND category='{}'
-                            AND version_name='{}'
+                        WHERE code IN ({})
+                            AND category IN ({})
+                            AND version_name IN ({})
                             AND ondate_index >= {}
                             AND ondate_index <= {}
                             AND forward_curve_tenors_absolute NOT IN ('M-1','M-2','M-3')
                             AND forward_curve_tenors_value is not null
                         ORDER BY ondate, forward_curve_tenors_tenor
-                            '''.format(code,
-                                       category,
-                                       version_name,
-                                       from_COB,
-                                       to_COB)
-    # Get enverus prices from data lake
-    df_enverus = read_table_conn(conn, query)
+                            '''.format(
+                                _sql_in_literal(codes),
+                                _sql_in_literal(categories),
+                                _sql_in_literal(versions),
+                                int(from_COB),
+                                int(to_COB),
+                            )
+    postgres_query = text(
+        f'''
+        SELECT  code,
+                cob AS "COB",
+                currency,
+                units,
+                expiry,
+                contract,
+                value::double precision AS value
+        FROM {fq_table(DB_SCHEMA, 'curve')}
+        WHERE code = ANY(:codes)
+          AND cob >= :from_cob
+          AND cob <= :to_cob
+          AND contract NOT IN ('M-1','M-2','M-3')
+          AND value IS NOT NULL
+        ORDER BY cob, expiry
+        '''
+    )
+    df_enverus = read_with_fallback(
+        trino_query,
+        postgres_query,
+        catalog='transformed',
+        schema='enverus',
+        postgres_params={
+            'codes': codes,
+            'from_cob': postgres_from_cob,
+            'to_cob': postgres_to_cob,
+        },
+        context_label='Underlying prices Enverus load',
+    )
 
-    # Convert COB to date
-    df_enverus['COB'] = pd.to_datetime(df_enverus.COB, format='%Y-%m-%d')
-
-    df_enverus['contract_date'] = np.where(df_enverus['contract']=='SPOT',
-                                         df_enverus['COB'],
-                                         pd.to_datetime(df_enverus.contract, format='%YM%m', errors='coerce')
-                                          )
-    # Convert contract to date (setting it at the end of the month)
-    df_enverus['expiry'] = pd.to_datetime(df_enverus.expiry, format='%Y-%m-%d')
-
-    return df_enverus
-
-
-query_gas = '''
-SELECT
-  trade_date, hub, product, strip as maturity_date, expiration_date, contract, contract_type, settlement_price
-FROM
-  raw."ice_gas"."cleared_gas"
-WHERE
-  contract in ('H')
-  OR contract = 'PEG'
-  OR (contract = 'M' AND product = 'UK NBP Natural Gas Futures')
-  OR (product = 'Dutch TTF Natural Gas Futures' AND contract = 'TFM')
-  AND ("contract_type" != 'P' AND "contract_type" != 'C')
-  AND product NOT LIKE '%daily%'
-  AND strike IS NULL
-'''
-
-query_oil = '''
-SELECT
-  trade_date, hub, product, strip as maturity_date, expiration_date, contract, contract_type, settlement_price
-FROM
-  raw."ice_oil"."cleared_oil"
-WHERE
-  (product = 'Brent Crude Futures' AND contract = 'B')
-  AND strike IS NULL
-'''
-# Main gas data
-# Get underlying prices from data lake
-try:
-    if conn_gas is not None:
-        df_options_gas = read_and_prepare_data(query_gas, conn_gas)
-        
-        # Updating the 'product' column
-        df_options_gas .loc[df_options_gas ['contract'] == 'H', 'product'] = 'HH'
-        df_options_gas .loc[df_options_gas ['contract'] == 'PEG', 'product'] = 'PEG'
-        df_options_gas .loc[df_options_gas ['contract'] == 'M', 'product'] = 'NBP'
-        df_options_gas .loc[df_options_gas ['contract'] == 'M', 'contract'] = 'NBP'
-        df_options_gas .loc[df_options_gas ['contract'] == 'TFM', 'product'] = 'TFM'
-    else:
-        print("Warning: Gas connection is None, skipping gas data")
-        df_options_gas = pd.DataFrame()
-except Exception as e:
-    print(f"Warning: Failed to load gas data: {e}")
-    df_options_gas = pd.DataFrame()
-
-# Main oil data
-# Get underlying prices from data lake
-try:
-    if conn_oil is not None:
-        df_options_oil = read_and_prepare_data(query_oil, conn_oil)
-        
-        # Updating the 'product' columns where 'contract' is 'Brent Crude Futures'
-        df_options_oil .loc[df_options_oil ['contract'] == 'B', 'product'] = 'Brent'
-        df_options_oil .loc[df_options_oil ['contract'] == 'B', 'contract'] = 'Brent'
-    else:
-        print("Warning: Oil connection is None, skipping oil data")
-        df_options_oil = pd.DataFrame()
-except Exception as e:
-    print(f"Warning: Failed to load oil data: {e}")
-    df_options_oil = pd.DataFrame()
-
-# Get JKM data from Enverus
-try:
-    if conn_enverus is not None:
-        # Get recent dates for data fetching (last 30 days to match ICE data availability)
-        import datetime
-        end_date = datetime.datetime.now()
-        start_date = end_date - datetime.timedelta(days=30)
-        
-        df_enverus_jkm = get_enverus_prices(conn=conn_enverus,
-                                           code='ICE_JKM_MO',
-                                           category='FINANCIAL',
-                                           version_name='FINAL',
-                                           from_COB=start_date.strftime("%Y%m%d"),
-                                           to_COB=end_date.strftime("%Y%m%d"))
-        
-        # Rename columns to match the ICE data structure
-        df_enverus_jkm.rename(columns={"COB":'trade_date',
-                                      "contract_date":'maturity_date',
-                                      "expiry":'expiration_date',
-                                      "value":'settlement_price'}, inplace=True)
-        
-        # Drop unnecessary columns and add required ones
-        df_enverus_jkm.drop(columns=['currency','units','contract'], inplace=True)
-        df_enverus_jkm['hub'] = None
-        df_enverus_jkm['product'] = 'JKM'
-        df_enverus_jkm['contract'] = 'JKM'
-        df_enverus_jkm['contract_type'] = None
-        
-        # Remap the code column to match trades_options_valuation.py
-        df_enverus_jkm['code'] = df_enverus_jkm['code'].map({'ICE_JKM_MO': 'JKM'}).fillna(df_enverus_jkm['code'])
-        
-    else:
-        print("Warning: Enverus connection is None, skipping JKM data")
-        df_enverus_jkm = pd.DataFrame()
-except Exception as e:
-    print(f"Warning: Failed to load Enverus JKM data: {e}")
-    df_enverus_jkm = pd.DataFrame()
-
-# Combining the DataFrames
-df_options = pd.concat([df_options_gas, df_options_oil, df_enverus_jkm], ignore_index=True)
+    return _normalize_enverus_prices(df_enverus)
 
 
-# Styles removed - using CSS classes from assets/styles.css
+df_options = _normalize_enverus_prices(pd.DataFrame())
+_prices_data_loaded = False
+_prices_data_refresh_key = None
+_prices_data_lock = threading.Lock()
 
-layout = html.Div([
-    # Download components for table exports
-    dcc.Download(id="download-prices-table"),
-    
-    # Top section with controls following greeks.py pattern
-    html.Div([
-        # Controls section - matching greeks.py inline layout
-        html.Div([
-            # First row - Main controls
-            html.Div([
-                html.Label('Products:', className="inline-filter-label"),
-                dcc.Dropdown(
-                    id='prices-unified-product-dropdown',
-                    options=[],  # Will be populated in callback
-                    value=[],
-                    multi=True,
-                    placeholder='Select products...',
-                    className="inline-dropdown-multi"
-                ),
-                html.Label('Current Date:', className="inline-filter-label"),
-                dcc.DatePickerSingle(
-                    id='prices-unified-date-picker',
-                    display_format='YYYY-MM-DD',
-                    with_portal=True,
-                    className="inline-date-picker"
-                ),
-                html.Label('Previous Date:', className="inline-filter-label"),
-                dcc.DatePickerSingle(
-                    id='prices-table-prev-date-picker',
-                    display_format='YYYY-MM-DD',
-                    with_portal=True,
-                    className="inline-date-picker"
+
+def _ensure_prices_data(force=False, refresh_key=None):
+    global df_options, _prices_data_loaded, _prices_data_refresh_key
+    with _prices_data_lock:
+        should_reload = not _prices_data_loaded
+        if force:
+            should_reload = refresh_key is None or refresh_key != _prices_data_refresh_key
+
+        if should_reload:
+            try:
+                # Get recent dates for current underlying price monitoring.
+                end_date = datetime.datetime.now()
+                start_date = end_date - datetime.timedelta(days=30)
+                df_options = get_enverus_underlying_prices(
+                    from_COB=start_date.strftime("%Y%m%d"),
+                    to_COB=end_date.strftime("%Y%m%d"),
                 )
-            ], style={'display': 'flex', 'align-items': 'center', 'gap': '16px', 'flex-wrap': 'nowrap', 'margin-bottom': '8px'}),
-            
-            # Second row - Grouping only
-            html.Div([
-                html.Label('Group By:', className="inline-filter-label"),
-                dcc.Dropdown(
-                    id='prices-unified-grouping-dropdown',
-                    options=[
-                        {'label': 'Monthly', 'value': 'monthly'},
-                        {'label': 'Quarterly', 'value': 'quarterly'},
-                        {'label': 'Season', 'value': 'season'},
-                        {'label': 'Calendar', 'value': 'calendar'}
-                    ],
-                    value='monthly',  # Default selection
-                    clearable=False,
-                    className="inline-dropdown-aggregation"
-                )
-            ], style={'display': 'flex', 'align-items': 'center', 'gap': '16px', 'flex-wrap': 'nowrap'})
-        ], className="inline-section-header")
-    ], style={'margin-bottom': '24px'}),
-    # Graphs section with Enterprise Standard header
-    html.H3('Prices Charts', className='greeks-title'),
-    html.Div(
-        id='prices-graphs-container',
-        style={'margin-bottom': '24px'}
-    ),
-    
-    # Tables section with Enterprise Standard headers
-    html.Div([
-        html.Div([
-            html.H3('Current Prices', className='greeks-title', style={'display': 'inline-block', 'margin-right': '15px'}),
-            html.Button(
-                'Export',
-                id='export-prices-table-btn',
-                className='custom-export-btn',
-                style={'display': 'inline-block'}
-            )
-        ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '12px'}),
+            except Exception:
+                df_options = _normalize_enverus_prices(pd.DataFrame())
+            _prices_data_loaded = True
+            if force:
+                _prices_data_refresh_key = refresh_key
+    return df_options
+
+
+PRICE_GROUPING_OPTIONS = [
+    {'label': 'Monthly', 'value': 'monthly'},
+    {'label': 'Quarterly', 'value': 'quarterly'},
+    {'label': 'Season', 'value': 'season'},
+    {'label': 'Calendar', 'value': 'calendar'},
+]
+
+PRICES_CHART_FONT = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+PRICES_CHART_TEXT = '#0f172a'
+PRICES_CHART_MUTED = '#64748b'
+PRICES_CHART_GRID = 'rgba(148, 163, 184, 0.18)'
+PRICES_CHART_AXIS = '#94a3b8'
+PRICES_GRAPH_CONFIG = {
+    'displayModeBar': 'hover',
+    'displaylogo': False,
+    'responsive': True,
+    'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+}
+
+
+def _price_axis(title='', tickformat=None, **overrides):
+    axis = {
+        'title': dict(text=title, font=dict(size=11, color=PRICES_CHART_MUTED)),
+        'showgrid': True,
+        'gridcolor': PRICES_CHART_GRID,
+        'gridwidth': 1,
+        'zeroline': False,
+        'linecolor': PRICES_CHART_AXIS,
+        'linewidth': 1,
+        'tickfont': dict(size=10, color=PRICES_CHART_MUTED),
+        'ticks': 'outside',
+        'ticklen': 3,
+        'automargin': True,
+    }
+    if tickformat:
+        axis['tickformat'] = tickformat
+    axis.update(overrides)
+    return axis
+
+
+def _price_legend():
+    return {
+        'orientation': 'h',
+        'yanchor': 'top',
+        'y': -0.18,
+        'xanchor': 'center',
+        'x': 0.5,
+        'bgcolor': 'rgba(255, 255, 255, 0)',
+        'bordercolor': 'rgba(255, 255, 255, 0)',
+        'font': dict(size=9, color=PRICES_CHART_MUTED),
+        'itemsizing': 'constant',
+        'itemwidth': 44,
+        'tracegroupgap': 4,
+    }
+
+
+def _apply_price_chart_theme(fig, margin=None, height=None):
+    fig.update_layout(
+        title=dict(text=''),
+        font=dict(family=PRICES_CHART_FONT, size=11, color=PRICES_CHART_TEXT),
+        plot_bgcolor='#f8fafc',
+        paper_bgcolor='white',
+        margin=margin or dict(l=48, r=18, t=18, b=88),
+        hovermode='x unified',
+        hoverlabel=dict(
+            bgcolor='rgba(255, 255, 255, 0.96)',
+            bordercolor='rgba(148, 163, 184, 0.45)',
+            font=dict(size=11, color=PRICES_CHART_TEXT, family=PRICES_CHART_FONT),
+            align='left',
+        ),
+        legend=_price_legend(),
+        showlegend=True,
+        transition=dict(duration=180, easing='cubic-in-out'),
+    )
+    if height is not None:
+        fig.update_layout(height=height)
+    return fig
+
+
+def _build_prices_section_header(title, actions=None):
+    return html.Div(
+        [
+            html.Div(
+                [html.H3(title, className='section-title-inline prices-section-title')],
+                className='prices-section-title-row',
+            ),
+            html.Div(actions or [], className='prices-section-actions'),
+        ],
+        className='prices-section-header',
+    )
+
+
+def _build_prices_chip(label, value=None, tone='neutral'):
+    if value is None or value == '':
+        return None
+    return html.Span(
+        [
+            html.Span(label, className='prices-chip-label'),
+            html.Span(str(value), className='prices-chip-value'),
+        ],
+        className=f'prices-chip prices-chip-{tone}',
+    )
+
+
+def _build_prices_chart_header(title, chips=None):
+    chip_nodes = [chip for chip in (chips or []) if chip is not None]
+    return html.Div(
+        [
+            html.Div(
+                [html.H5(title, className='prices-chart-card-title')],
+                className='prices-chart-card-title-group',
+            ),
+            html.Div(chip_nodes, className='prices-chart-card-chips'),
+        ],
+        className='prices-chart-card-header',
+    )
+
+
+def _build_prices_chart_card(graph, title, chips=None, className=None):
+    classes = ['prices-chart-card']
+    if className:
+        classes.append(className)
+    return html.Div(
+        [_build_prices_chart_header(title, chips=chips), graph],
+        className=' '.join(classes),
+    )
+
+
+def _build_prices_message(message, tone='neutral'):
+    return html.Div(message, className=f'prices-empty-state prices-empty-state-{tone}')
+
+
+def _price_period_label(date_value, grouping_mode):
+    date_value = pd.Timestamp(date_value)
+    if grouping_mode == 'monthly':
+        return date_value.strftime("%b'%y")
+    if grouping_mode == 'quarterly':
+        return f"Q{date_value.quarter}'{str(date_value.year)[-2:]}"
+    if grouping_mode == 'season':
+        season = 'Sum' if 5 <= date_value.month <= 9 else 'Win'
+        return f"{season}'{str(date_value.year)[-2:]}"
+    if grouping_mode == 'calendar':
+        return str(date_value.year)
+    return date_value.strftime("%b'%y")
+
+
+def _price_period_sort_key(label, grouping_mode):
+    label = str(label)
+    try:
+        if grouping_mode == 'monthly':
+            parsed = pd.to_datetime(label, format="%b'%y")
+            return (parsed.year, parsed.month, 0)
+        if grouping_mode == 'quarterly':
+            quarter_part, year_part = label.split("'")
+            return (2000 + int(year_part), int(quarter_part.replace('Q', '')), 0)
+        if grouping_mode == 'season':
+            season_part, year_part = label.split("'")
+            season_order = {'Win': 0, 'Sum': 1}.get(season_part, 9)
+            return (2000 + int(year_part), season_order, 0)
+        if grouping_mode == 'calendar':
+            return (int(label), 0, 0)
+    except Exception:
+        pass
+    return (9999, 99, label)
+
+
+def _sort_price_period_columns(columns, grouping_mode):
+    return sorted(columns, key=lambda col: _price_period_sort_key(col, grouping_mode))
+
+
+def _clean_price_grid_records(df, numeric_fields):
+    if df is None or df.empty:
+        return []
+
+    numeric_fields = set(numeric_fields or [])
+    records = []
+    for row in df.to_dict('records'):
+        clean_row = {}
+        for key, value in row.items():
+            if pd.isna(value):
+                clean_row[key] = None
+            elif key in numeric_fields:
+                numeric_value = float(value)
+                clean_row[key] = f"{numeric_value:,.2f}"
+                clean_row[f'__{key}_raw'] = numeric_value
+            else:
+                clean_row[key] = value
+        records.append(clean_row)
+    return records
+
+
+def _price_raw_number_expression(field):
+    raw_key = json.dumps(f'__{field}_raw')
+    return f"Number(params.data && params.data[{raw_key}])"
+
+
+def _build_price_column_defs(columns, numeric_fields=None, sign_fields=None):
+    numeric_fields = set(numeric_fields or [])
+    sign_fields = set(sign_fields or [])
+    column_defs = []
+
+    for col in columns:
+        field = col['id']
+        header = col['name']
+        is_numeric = field in numeric_fields or col.get('type') == 'numeric'
+        width = 94 if field == 'product' else max(72, min(122, 28 + len(str(header)) * 7))
+        column_def = {
+            'headerName': header,
+            'field': field,
+            'sortable': True,
+            'filter': False,
+            'resizable': True,
+            'width': width,
+            'minWidth': 78 if field == 'product' else 64,
+            'maxWidth': 150 if field == 'product' else 150,
+            'tooltipField': field,
+            'headerTooltip': header,
+            'cellClass': 'prices-table-text-cell',
+            'headerClass': 'prices-table-text-header',
+        }
+
+        if field == 'product':
+            column_def.update({'pinned': 'left', 'lockPinned': True})
+
+        if is_numeric:
+            raw_value = _price_raw_number_expression(field)
+            class_rules = {
+                'prices-negative-cell': f"{raw_value} < 0",
+                'prices-missing-cell': (
+                    f"params.data === null || params.data === undefined "
+                    f"|| params.data[{json.dumps(f'__{field}_raw')}] === null "
+                    f"|| params.data[{json.dumps(f'__{field}_raw')}] === undefined "
+                    f"|| isNaN(Number(params.data[{json.dumps(f'__{field}_raw')}]))"
+                ),
+            }
+            if field in sign_fields:
+                class_rules['prices-positive-cell'] = f"{raw_value} > 0"
+
+            column_def.update({
+                'type': 'rightAligned',
+                'cellClass': 'prices-table-number-cell',
+                'headerClass': 'prices-table-number-header',
+                'cellClassRules': class_rules,
+            })
+        column_defs.append(column_def)
+
+    return column_defs
+
+
+def _build_price_grid(grid_id, columns, data, numeric_fields=None, sign_fields=None, className=None):
+    classes = ['ag-theme-alpine', 'mckinsey-ag-grid', 'prices-data-grid']
+    if className:
+        classes.append(className)
+    return dag.AgGrid(
+        id=grid_id,
+        rowData=data,
+        columnDefs=_build_price_column_defs(columns, numeric_fields=numeric_fields, sign_fields=sign_fields),
+        defaultColDef={
+            'sortable': True,
+            'filter': False,
+            'resizable': True,
+            'suppressHeaderMenuButton': True,
+            'suppressHeaderFilterButton': True,
+            'wrapHeaderText': False,
+            'autoHeaderHeight': False,
+        },
+        dashGridOptions={
+            'domLayout': 'autoHeight',
+            'rowHeight': 30,
+            'headerHeight': 34,
+            'pagination': False,
+            'suppressPaginationPanel': True,
+            'enableCellTextSelection': True,
+            'ensureDomOrder': True,
+            'animateRows': False,
+            'rowSelection': {
+                'mode': 'singleRow',
+                'checkboxes': False,
+                'enableClickSelection': True,
+            },
+        },
+        className=' '.join(classes),
+        style={'width': '100%'},
+        dangerously_allow_code=True,
+    )
+
+
+def _build_price_table_panel(title, grid, chips=None, className=None):
+    classes = ['prices-table-panel']
+    if className:
+        classes.append(className)
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.H4(title, className='prices-table-panel-title'),
+                    html.Div([chip for chip in (chips or []) if chip is not None], className='prices-table-panel-chips'),
+                ],
+                className='prices-table-panel-header',
+            ),
+            grid,
+        ],
+        className=' '.join(classes),
+    )
+
+
+def _build_prices_filter_bar():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span('Products', className='filter-group-header'),
+                    dcc.Dropdown(
+                        id='prices-unified-product-dropdown',
+                        options=[],
+                        value=[],
+                        multi=True,
+                        placeholder='Select products...',
+                        className='prices-filter-dropdown prices-product-dropdown',
+                    ),
+                ],
+                className='filter-group prices-sticky-filter-group prices-products-group',
+            ),
+            html.Div(
+                [
+                    html.Span('Current', className='filter-group-header'),
+                    html.Div(
+                        dcc.DatePickerSingle(
+                            id='prices-unified-date-picker',
+                            display_format='YYYY-MM-DD',
+                            with_portal=True,
+                            className='prices-date-picker',
+                        ),
+                        className='prices-date-control',
+                    ),
+                ],
+                className='filter-group prices-sticky-filter-group prices-date-group',
+            ),
+            html.Div(
+                [
+                    html.Span('Previous', className='filter-group-header'),
+                    html.Div(
+                        dcc.DatePickerSingle(
+                            id='prices-table-prev-date-picker',
+                            display_format='YYYY-MM-DD',
+                            with_portal=True,
+                            className='prices-date-picker',
+                        ),
+                        className='prices-date-control',
+                    ),
+                ],
+                className='filter-group prices-sticky-filter-group prices-date-group',
+            ),
+            html.Div(
+                [
+                    html.Span('Group By', className='filter-group-header'),
+                    dcc.RadioItems(
+                        id='prices-unified-grouping-dropdown',
+                        options=PRICE_GROUPING_OPTIONS,
+                        value='monthly',
+                        inline=True,
+                        className='prices-segmented-selector prices-grouping-selector',
+                        inputStyle={'display': 'none'},
+                        labelStyle={'marginRight': '0'},
+                    ),
+                ],
+                className='filter-group prices-sticky-filter-group prices-grouping-group',
+            ),
+        ],
+        className='professional-section-header prices-sticky-filter-bar',
+    )
+
+
+layout = html.Div(
+    [
+        dcc.Download(id='download-prices-table'),
+
+        _build_prices_filter_bar(),
+
         html.Div(
-            id='prices-tables-container'
-        )
-    ])
-    ]
+            [
+                _build_prices_section_header('Price Charts'),
+                html.Div(id='prices-graphs-container', className='prices-section-body prices-chart-body'),
+            ],
+            className='prices-section prices-chart-section',
+        ),
+        html.Div(
+            [
+                _build_prices_section_header(
+                    'Current Prices',
+                    actions=[
+                        html.Button(
+                            'Export',
+                            id='export-prices-table-btn',
+                            className='custom-export-btn prices-export-button',
+                        )
+                    ],
+                ),
+                html.Div(id='prices-tables-container', className='prices-section-body prices-table-body'),
+            ],
+            className='prices-section prices-data-section',
+        ),
+    ],
+    className='options-dashboard-container prices-page',
 )
 
 
@@ -348,15 +590,16 @@ def init_date_pickers(n_clicks):
         # Create a new default date (today)
         default_date = pd.Timestamp.now().strftime('%Y-%m-%d')
         default_prev_date = (pd.Timestamp.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+        price_data = _ensure_prices_data(force=bool(n_clicks), refresh_key=n_clicks)
 
         # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
+        if price_data is None or not isinstance(price_data, pd.DataFrame):
             return default_date, default_prev_date
 
         # Check if required columns exist
-        if 'trade_date' in df_options.columns:
+        if 'trade_date' in price_data.columns:
             # Convert date column safely
-            temp_df = df_options.copy()
+            temp_df = price_data.copy()
             temp_df['trade_date'] = pd.to_datetime(temp_df['trade_date'], errors='coerce')
 
             # Get clean unique dates
@@ -379,8 +622,7 @@ def init_date_pickers(n_clicks):
 
         return default_date, default_prev_date
 
-    except Exception as e:
-        print(f"Error in init_date_pickers: {e}")
+    except Exception:
         return pd.Timestamp.now().strftime('%Y-%m-%d'), (pd.Timestamp.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
 
 
@@ -415,8 +657,7 @@ def find_closest_date(df, date_column, target_date):
         if min_diff_idx < len(dates):
             return dates.iloc[min_diff_idx]
         return None
-    except Exception as e:
-        print(f"Error finding closest date: {e}")
+    except Exception:
         return None
 
 
@@ -430,16 +671,18 @@ def find_closest_date(df, date_column, target_date):
 )
 def init_unified_products(n_clicks):
     try:
+        price_data = _ensure_prices_data(force=bool(n_clicks), refresh_key=n_clicks)
+
         # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
+        if price_data is None or not isinstance(price_data, pd.DataFrame):
             return [], []
 
         # Check if required columns exist
-        if 'contract' not in df_options.columns:
+        if 'contract' not in price_data.columns:
             return [], []
 
         # Get unique, non-null products
-        product_codes = df_options['contract'].dropna().unique()
+        product_codes = price_data['contract'].dropna().unique()
 
         if len(product_codes) == 0:
             return [], []
@@ -448,12 +691,9 @@ def init_unified_products(n_clicks):
         product_codes = sorted(product_codes)
 
         dropdown_options = [{'label': code, 'value': code} for code in product_codes]
-        dropdown_values = product_codes[:5] if len(
-            product_codes) > 5 else product_codes  # Limit to 5 products initially
-        return dropdown_options, dropdown_values
+        return dropdown_options, product_codes
 
-    except Exception as e:
-        print(f"Error in init_unified_products: {e}")
+    except Exception:
         return [], []
 
 
@@ -469,19 +709,21 @@ def set_prev_date(n_clicks, current_date):
     try:
         if n_clicks is None or current_date is None:
             raise dash.exceptions.PreventUpdate
+        price_data = _ensure_prices_data(force=bool(n_clicks), refresh_key=n_clicks)
 
         # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
+        if price_data is None or not isinstance(price_data, pd.DataFrame):
             raise dash.exceptions.PreventUpdate
 
         # Convert current date
         current_date_dt = pd.to_datetime(current_date)
 
         # Convert dataframe date column
-        df_options['trade_date'] = pd.to_datetime(df_options['trade_date'], errors='coerce')
+        price_data = price_data.copy()
+        price_data['trade_date'] = pd.to_datetime(price_data['trade_date'], errors='coerce')
 
         # Drop NaT values and get unique dates
-        valid_dates = df_options['trade_date'].dropna().unique()
+        valid_dates = price_data['trade_date'].dropna().unique()
 
         if len(valid_dates) == 0:
             raise dash.exceptions.PreventUpdate
@@ -498,45 +740,8 @@ def set_prev_date(n_clicks, current_date):
         # If no previous date found, just return the current date
         return prev_date if prev_date else current_date
 
-    except Exception as e:
-        print(f"Error in set_prev_date: {e}")
+    except Exception:
         raise dash.exceptions.PreventUpdate
-
-# Initialize product dropdown
-@dash.callback(
-    [Output('prices-table-product-dropdown', 'options'),
-     Output('prices-table-product-dropdown', 'value')],
-    Input('refresh-options-data', 'n_clicks'),
-    prevent_initial_call=False
-)
-def init_products(n_clicks):
-    try:
-        # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
-            return [], []
-
-        # Check if required columns exist
-        if 'contract' not in df_options.columns:
-            return [], []
-
-        # Get unique, non-null products
-        product_codes = df_options['contract'].dropna().unique()
-
-        if len(product_codes) == 0:
-            return [], []
-
-        # Sort product codes
-        product_codes = sorted(product_codes)
-
-        dropdown_options = [{'label': code, 'value': code} for code in product_codes]
-        dropdown_values = product_codes[:5] if len(
-            product_codes) > 5 else product_codes  # Limit to 5 products initially
-        return dropdown_options, dropdown_values
-
-    except Exception as e:
-        print(f"Error in init_products: {e}")
-        return [], []
-
 
 # ============== CONTENT UPDATE CALLBACKS =================
 
@@ -550,273 +755,125 @@ def init_products(n_clicks):
 )
 
 
-def update_graphs(selected_date, grouping_mode, selected_products):  # Added grouping_mode parameter
+def update_graphs(selected_date, grouping_mode, selected_products):
     try:
-        ctx = callback_context
-        if not ctx.triggered:
-            raise dash.exceptions.PreventUpdate
-
-        if selected_date is None or not selected_products:  # Check if products are selected
+        if selected_date is None or not selected_products:
             return html.Div()
-
-        # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
-            return html.Div(html.H4("Error: DataFrame not available", style={'color': 'red'}))
-
-        # Check if required columns exist
-        required_columns = ['trade_date', 'contract', 'maturity_date', 'settlement_price']
-        missing_columns = [col for col in required_columns if col not in df_options.columns]
-
-        if missing_columns:
-            return html.Div(html.H4(f"Error: Missing columns: {', '.join(missing_columns)}", style={'color': 'red'}))
-
-        # Make a copy to avoid modifying the original
-        df = df_options.copy()
-
-        # Convert date columns safely
-        df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
-        df['maturity_date'] = pd.to_datetime(df['maturity_date'], errors='coerce')
 
         # Convert the selected date
         selected_date = pd.to_datetime(selected_date)
 
-        # Drop rows with NaT in date columns
-        df = df.dropna(subset=['trade_date', 'maturity_date'])
+        df, data_error = _prepare_price_dataset(selected_products)
+        if data_error:
+            tone = 'danger' if data_error.startswith(('DataFrame', 'Missing')) else 'warning'
+            message = 'No data available for selected products.' if data_error == 'No data for selected products.' else data_error
+            return _build_prices_message(message, tone=tone)
 
-        # Ensure settlement_price is numeric
-        df['settlement_price'] = pd.to_numeric(df['settlement_price'], errors='coerce')
-        df = df.dropna(subset=['settlement_price'])
-
-        if df.empty:
-            return html.Div(html.H4("No valid data available after cleaning", style={'color': 'red'}))
-
-        # Filter by selected products
-        df = df[df['contract'].isin(selected_products)]
-
-        if df.empty:
-            return html.Div(html.H4("No data available for selected products", style={'color': 'red'}))
-
-        graphs = []
-        row = []
-
-        product_codes = sorted(df['product'].unique())
+        cards = []
+        product_codes = sorted(df['contract'].dropna().unique())
 
         if not product_codes:
-            return html.Div(html.H4("No products found in data", style={'color': 'red'}))
+            return _build_prices_message('No products found in data.', tone='warning')
+
+        palette = ['#2E86C1', '#64748b', '#94a3b8', '#7c8da1', '#a8b3c4']
+
+        def prepare_curve(cob_data):
+            if grouping_mode != 'monthly':
+                cob_data = group_data_by_period(cob_data, grouping_mode)
+                if 'period' in cob_data.columns:
+                    period_cols = _sort_price_period_columns(cob_data['period'].dropna().unique().tolist(), grouping_mode)
+                    period_order = {period: idx for idx, period in enumerate(period_cols)}
+                    cob_data = cob_data.assign(_period_order=cob_data['period'].map(period_order).fillna(9999))
+                    cob_data = cob_data.sort_values('_period_order')
+                    return cob_data, cob_data['period'], 'settlement_price'
+
+            cob_data = cob_data.sort_values('maturity_date')
+            return cob_data, cob_data['maturity_date'], 'settlement_price'
 
         for i, code in enumerate(product_codes):
             try:
                 fig = go.Figure()
-                code_df = df[df['product'] == code]
+                code_df = df[df['contract'] == code]
 
                 if code_df.empty:
                     continue
 
                 # Get the 5 most recent dates safely
-                recent_dates = code_df['trade_date'].drop_duplicates().sort_values(ascending=False).head(5).values
-                has_selected_or_closest = False
+                recent_dates = [
+                    pd.Timestamp(date_value)
+                    for date_value in code_df['trade_date'].drop_duplicates().sort_values(ascending=False).head(5).values
+                ]
+                selected_date_available = False
 
-                for cob_date in recent_dates:
+                for trace_index, cob_date in enumerate(recent_dates):
                     cob_date = pd.Timestamp(cob_date)
                     cob_data = code_df[code_df['trade_date'] == cob_date]
 
                     if cob_data.empty:
                         continue
 
-                    # Apply grouping to the data
-                    if grouping_mode != 'monthly':
-                        try:
-                            cob_data = group_data_by_period(cob_data, grouping_mode)
-                            # After grouping, we need to ensure we have maturity_date and settlement_price
-                            if 'maturity_date' not in cob_data.columns and 'period' in cob_data.columns:
-                                # For grouped data, use period as x-axis
-                                x_values = cob_data['period']
-
-                                # Sort periods based on grouping_mode
-                                if grouping_mode == 'quarterly':
-                                    def quarter_key(q_str):
-                                        try:
-                                            year, quarter = q_str.split('-')
-                                            return (int(year), int(quarter[1]))
-                                        except:
-                                            return (9999, 0)
-
-                                    sorted_indices = sorted(range(len(x_values)),
-                                                            key=lambda i: quarter_key(x_values.iloc[i]))
-                                    x_values = x_values.iloc[sorted_indices]
-                                    cob_data = cob_data.iloc[sorted_indices]
-
-                                elif grouping_mode == 'season':
-                                    def season_key(s_str):
-                                        try:
-                                            year, season = s_str.split('-')
-                                            season_val = 0 if season == 'Winter' else 1
-                                            return (int(year), season_val)
-                                        except:
-                                            return (9999, 0)
-
-                                    sorted_indices = sorted(range(len(x_values)),
-                                                            key=lambda i: season_key(x_values.iloc[i]))
-                                    x_values = x_values.iloc[sorted_indices]
-                                    cob_data = cob_data.iloc[sorted_indices]
-
-                                elif grouping_mode == 'calendar':
-                                    sorted_indices = sorted(range(len(x_values)),
-                                                            key=lambda i: int(x_values.iloc[i]) if x_values.iloc[
-                                                                i].isdigit() else 9999)
-                                    x_values = x_values.iloc[sorted_indices]
-                                    cob_data = cob_data.iloc[sorted_indices]
-                            else:
-                                # Sort by maturity date to ensure line connects points properly
-                                cob_data = cob_data.sort_values('maturity_date')
-                                x_values = cob_data['maturity_date']
-                        except Exception as e:
-                            print(f"Error grouping data for graphs: {e}")
-                            # Fall back to ungrouped data
-                            cob_data = cob_data.sort_values('maturity_date')
-                            x_values = cob_data['maturity_date']
-                    else:
-                        # Sort by maturity date to ensure line connects points properly
+                    try:
+                        cob_data, x_values, y_column = prepare_curve(cob_data)
+                    except Exception:
                         cob_data = cob_data.sort_values('maturity_date')
                         x_values = cob_data['maturity_date']
+                        y_column = 'settlement_price'
 
                     is_selected_date = cob_date.date() == selected_date.date()
                     if is_selected_date:
-                        has_selected_or_closest = True
+                        selected_date_available = True
 
-                    line_style = dict(
-                        width=1.5,
-                        color='blue',
-                        dash='dash'
-                    ) if is_selected_date else dict(width=1)
-
+                    line_style = (
+                        dict(width=2.4, color='#2E86C1')
+                        if is_selected_date
+                        else dict(width=1.25, color=palette[min(trace_index, len(palette) - 1)], dash='dot')
+                    )
+                    marker_style = dict(size=4.5 if is_selected_date else 3.5)
                     legend_name = f"{cob_date.strftime('%Y-%m-%d')}"
                     if is_selected_date:
-                        legend_name = f"★ {legend_name} (SELECTED) ★"
+                        legend_name = f"{legend_name} Current"
 
                     # Only add trace if we have data
                     if not cob_data.empty and len(cob_data) > 0:
-                        # Use the appropriate column based on grouping
-                        y_column = 'settlement_price'
-                        if 'settlement_price' not in cob_data.columns and grouping_mode != 'monthly':
-                            # For grouped data where the column name might have changed
-                            y_column = cob_data.columns[-1]  # Assuming last column is the value
-
                         fig.add_trace(go.Scatter(
                             x=x_values,
                             y=cob_data[y_column],
                             mode='lines+markers',
                             name=legend_name,
-                            line=line_style
+                            line=line_style,
+                            marker=marker_style,
                         ))
 
-                # If not has_selected_or_closest:
-                if not has_selected_or_closest:
-                    # Simple and safe approach - find closest date
+                if not selected_date_available and not code_df.empty:
                     try:
-                        # Create a new dataframe with just the dates and their differences
-                        date_df = pd.DataFrame({
-                            'trade_date': code_df['trade_date'].unique(),
-                            'diff': [abs((d - selected_date).total_seconds()) for d in code_df['trade_date'].unique()]
-                        })
-                        # Sort by difference
-                        date_df = date_df.sort_values('diff')
-                        # If we have any dates
-                        if not date_df.empty:
-                            # Get closest date
-                            closest_date = date_df.iloc[0]['trade_date']
-                            # Get data for this date
+                        closest_date = find_closest_date(code_df, 'trade_date', selected_date)
+                        recent_normalized = {pd.Timestamp(date_value).normalize() for date_value in recent_dates}
+
+                        if closest_date is not None and pd.Timestamp(closest_date).normalize() not in recent_normalized:
+                            closest_date = pd.Timestamp(closest_date)
                             cob_data = code_df[code_df['trade_date'] == closest_date]
 
-                           # Apply grouping to the data
-                            if grouping_mode != 'monthly':
+                            if not cob_data.empty:
                                 try:
-                                    cob_data = group_data_by_period(cob_data, grouping_mode)
-                                    # After grouping, use period as x-axis if needed
-                                    if 'maturity_date' not in cob_data.columns and 'period' in cob_data.columns:
-                                        x_values = cob_data['period']
-                                    else:
-                                        cob_data = cob_data.sort_values('maturity_date')
-                                        x_values = cob_data['maturity_date']
-                                except Exception as e:
-                                    print(f"Error grouping closest date data: {e}")
+                                    cob_data, x_values, y_column = prepare_curve(cob_data)
+                                except Exception:
                                     cob_data = cob_data.sort_values('maturity_date')
                                     x_values = cob_data['maturity_date']
-                            else:
-                                cob_data = cob_data.sort_values('maturity_date')
-                                x_values = cob_data['maturity_date']
-
-                            # Add to plot if we have data
-                            if not cob_data.empty:
-                                # Use the appropriate column based on grouping
-                                y_column = 'settlement_price'
-                                if 'settlement_price' not in cob_data.columns and grouping_mode != 'monthly':
-                                    # For grouped data where the column name might have changed
-                                    y_column = cob_data.columns[-1]  # Assuming last column is the value
+                                    y_column = 'settlement_price'
 
                                 fig.add_trace(go.Scatter(
                                     x=x_values,
                                     y=cob_data[y_column],
                                     mode='lines+markers',
-                                    name=f"⚠ {closest_date.strftime('%Y-%m-%d')} - CLOSEST AVAILABLE",
-                                    line=dict(width=1, color='orange', dash='dot')
+                                    name=f"{closest_date.strftime('%Y-%m-%d')} Closest",
+                                    line=dict(width=1.4, color='#f59e0b', dash='dot'),
+                                    marker=dict(size=4),
                                 ))
-                    except Exception as e:
-                        print(f"Error finding closest date: {e}")
-
-                # If still no match, try finding any closest date
-                if not has_selected_or_closest and not code_df.empty:
-                    try:
-                        # Use the safe helper function to find any closest date
-                        any_closest_date = find_closest_date(code_df, 'trade_date', selected_date)
-
-                        if any_closest_date is not None and any_closest_date not in recent_dates:
-                            cob_data = code_df[code_df['trade_date'] == any_closest_date]
-
-                            if not cob_data.empty:
-                                # Apply grouping to the data
-                                if grouping_mode != 'monthly':
-                                    try:
-                                        cob_data = group_data_by_period(cob_data, grouping_mode)
-                                        # After grouping, use period as x-axis if needed
-                                        if 'maturity_date' not in cob_data.columns and 'period' in cob_data.columns:
-                                            x_values = cob_data['period']
-                                        else:
-                                            cob_data = cob_data.sort_values('maturity_date')
-                                            x_values = cob_data['maturity_date']
-                                    except Exception as e:
-                                        print(f"Error grouping any closest date data: {e}")
-                                        cob_data = cob_data.sort_values('maturity_date')
-                                        x_values = cob_data['maturity_date']
-                                else:
-                                    # Sort by maturity date for proper line
-                                    cob_data = cob_data.sort_values('maturity_date')
-                                    x_values = cob_data['maturity_date']
-
-                                line_style = dict(
-                                    width=1,
-                                    color='orange',
-                                    dash='dot'
-                                )
-
-                                # Use the appropriate column based on grouping
-                                y_column = 'settlement_price'
-                                if 'settlement_price' not in cob_data.columns and grouping_mode != 'monthly':
-                                    # For grouped data where the column name might have changed
-                                    y_column = cob_data.columns[-1]  # Assuming last column is the value
-
-                                fig.add_trace(go.Scatter(
-                                    x=x_values,
-                                    y=cob_data[y_column],
-                                    mode='lines+markers',
-                                    name=f"⚠ {any_closest_date.strftime('%Y-%m-%d')} - CLOSEST AVAILABLE",
-                                    line=line_style
-                                ))
-                    except Exception as e:
-                        print(f"Error finding any closest date: {e}")
+                    except Exception:
+                        pass
 
                 # Determine x-axis title based on grouping mode
-                x_axis_title = "Maturity Date"
+                x_axis_title = "Maturity"
                 if grouping_mode == 'quarterly':
                     x_axis_title = "Quarter"
                 elif grouping_mode == 'season':
@@ -826,87 +883,49 @@ def update_graphs(selected_date, grouping_mode, selected_products):  # Added gro
                 elif grouping_mode == 'monthly':
                     x_axis_title = "Month"
 
+                xaxis_kwargs = {}
+                if grouping_mode != 'monthly':
+                    xaxis_kwargs['type'] = 'category'
+                xaxis = _price_axis(
+                    x_axis_title,
+                    tickformat="%b'%y" if grouping_mode == 'monthly' else None,
+                    **xaxis_kwargs,
+                )
                 fig.update_layout(
-                    # Professional Title Styling
-                    title=dict(
-                        text=f"{code} Price ({grouping_mode.capitalize()})",
-                        font=dict(size=18, color='#1f2937', family='Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif'),
-                        x=0.5,
-                        y=0.96,
-                        xanchor='center',
-                        yanchor='top'
-                    ),
-                    
-                    # X-Axis Professional Styling  
-                    xaxis=dict(
-                        title=dict(text='', font=dict(size=12, color='#374151')),
-                        showgrid=True,
-                        gridcolor='rgba(200, 200, 200, 0.3)',
-                        gridwidth=0.5,
-                        linecolor='#d1d5db',
-                        linewidth=1,
-                        tickfont=dict(size=10, color='#6b7280')
-                    ),
-                    
-                    # Y-Axis Professional Styling
-                    yaxis=dict(
-                        title=dict(text='Settlement Price', font=dict(size=12, color='#374151')),
-                        showgrid=True,
-                        gridcolor='rgba(200, 200, 200, 0.3)',
-                        gridwidth=0.5,
-                        linecolor='#d1d5db',
-                        linewidth=1,
-                        tickfont=dict(size=10, color='#6b7280'),
-                        zeroline=True,
-                        zerolinecolor='rgba(150, 150, 150, 0.4)',
-                        zerolinewidth=1
-                    ),
-                    
-                    # Professional Legend
-                    legend=dict(
-                        orientation='h',
-                        yanchor='top',
-                        y=-0.15,
-                        xanchor='center',
-                        x=0.5,
-                        font=dict(size=10, color='#374151'),
-                        itemsizing='constant'
-                    ),
-                    
-                    # Professional Background
-                    plot_bgcolor='rgba(248, 249, 250, 0.5)',
-                    paper_bgcolor='white',
-                    margin=dict(l=70, r=70, t=80, b=100),
-                    
-                    # Enhanced Interactivity
-                    hovermode='x unified',
-                    hoverlabel=dict(
-                        bgcolor='rgba(255, 255, 255, 0.95)',
-                        bordercolor='rgba(200, 200, 200, 0.8)',
-                        font=dict(size=11, color='#1f2937')
+                    xaxis=xaxis,
+                    yaxis=_price_axis('Settlement Price', zeroline=True, zerolinecolor='rgba(148, 163, 184, 0.38)'),
+                )
+                _apply_price_chart_theme(fig, height=316)
+
+                graph = dcc.Graph(
+                    figure=fig,
+                    config=PRICES_GRAPH_CONFIG,
+                    className='prices-chart-graph',
+                    style={'height': '100%'},
+                )
+                cards.append(
+                    _build_prices_chart_card(
+                        graph,
+                        f'{code} Forward Curve',
+                        chips=[
+                            _build_prices_chip('COB', selected_date.strftime('%Y-%m-%d'), tone='primary'),
+                            _build_prices_chip('Group', grouping_mode.capitalize()),
+                            _build_prices_chip('Curves', len(fig.data)),
+                        ],
+                        className='prices-main-chart-card',
                     )
                 )
 
-                row.append(html.Div(dcc.Graph(figure=fig, config={'displayModeBar': False}),
-                                    style={'display': 'inline-block', 'width': '33%', 'padding': '0',
-                                           'marginBottom': '10px'}))
-
-                if (i + 1) % 3 == 0:
-                    graphs.append(html.Div(row, style={'display': 'flex'}))
-                    row = []
-
-            except Exception as e:
-                print(f"Error creating graph for product {code}: {e}")
+            except Exception:
                 continue
 
-        if row:
-            graphs.append(html.Div(row, style={'display': 'flex'}))
-
-        return graphs if graphs else html.Div(html.H4("No graphs could be generated", style={'color': 'red'}))
+        return html.Div(cards, className='prices-chart-grid') if cards else _build_prices_message(
+            'No graphs could be generated.',
+            tone='warning',
+        )
 
     except Exception as e:
-        print(f"Error in update_graphs: {e}")
-        return html.Div(html.H4(f"Error generating graphs: {str(e)}", style={'color': 'red'}))
+        return _build_prices_message(f"Error generating graphs: {str(e)}", tone='danger')
 
 
 def group_data_by_period(data, grouping_mode):
@@ -917,13 +936,11 @@ def group_data_by_period(data, grouping_mode):
         data = data.dropna(subset=['maturity_date'])
 
         if grouping_mode == 'monthly':
-            data['period'] = data['maturity_date'].dt.strftime('%m-%y')
+            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'monthly'))
             return data
 
         elif grouping_mode == 'quarterly':
-            data['quarter'] = data['maturity_date'].dt.quarter
-            data['year'] = data['maturity_date'].dt.year
-            data['period'] = data.apply(lambda x: f"{x['year']}-Q{x['quarter']}", axis=1)
+            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'quarterly'))
 
             grouped = data.groupby(['contract', 'trade_date', 'period']).agg({
                 'settlement_price': 'mean'
@@ -931,17 +948,7 @@ def group_data_by_period(data, grouping_mode):
             return grouped
 
         elif grouping_mode == 'season':
-            def get_season(date):
-                if pd.isna(date):
-                    return None
-                month = date.month
-                year = date.year
-                if 5 <= month <= 9:
-                    return f"{year}-Summer"
-                else:
-                    return f"{year}-Winter"
-
-            data['period'] = data['maturity_date'].apply(get_season)
+            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'season'))
             data = data.dropna(subset=['period'])
 
             grouped = data.groupby(['contract', 'trade_date', 'period']).agg({
@@ -950,23 +957,70 @@ def group_data_by_period(data, grouping_mode):
             return grouped
 
         elif grouping_mode == 'calendar':
-            data['period'] = data['maturity_date'].dt.year.astype(str)
+            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'calendar'))
 
             grouped = data.groupby(['contract', 'trade_date', 'period']).agg({
                 'settlement_price': 'mean'
             }).reset_index()
             return grouped
 
-        data['period'] = data['maturity_date'].dt.strftime('%m-%y')
+        data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'monthly'))
         return data
 
-    except Exception as e:
-        print(f"Error in group_data_by_period: {e}")
+    except Exception:
         # Return original data in case of error
         if 'period' not in data.columns:
             data['period'] = 'unknown'
         return data
 
+
+
+def _prepare_price_dataset(selected_products):
+    price_data = _ensure_prices_data()
+
+    if price_data is None or not isinstance(price_data, pd.DataFrame):
+        return None, 'DataFrame not available.'
+
+    required_columns = ['trade_date', 'contract', 'maturity_date', 'settlement_price']
+    missing_columns = [col for col in required_columns if col not in price_data.columns]
+    if missing_columns:
+        return None, f"Missing columns: {', '.join(missing_columns)}."
+
+    df = price_data.copy()
+    df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
+    df['maturity_date'] = pd.to_datetime(df['maturity_date'], errors='coerce')
+    df['settlement_price'] = pd.to_numeric(df['settlement_price'], errors='coerce')
+    df = df.dropna(subset=['trade_date', 'maturity_date', 'settlement_price'])
+
+    if df.empty:
+        return None, 'No valid data available after cleaning.'
+
+    product_df = df[df['contract'].isin(selected_products)]
+    if product_df.empty:
+        return None, 'No data for selected products.'
+
+    return product_df, None
+
+
+def _build_current_price_pivot(product_df, selected_date, grouping_mode):
+    selected_date = pd.to_datetime(selected_date)
+    current_data = product_df[product_df['trade_date'].dt.normalize() == selected_date.normalize()]
+    if current_data.empty:
+        return pd.DataFrame(), [], current_data
+
+    current_data = group_data_by_period(current_data, grouping_mode)
+    current_data['product'] = current_data['contract']
+    current_pivot = current_data.pivot_table(
+        values='settlement_price',
+        index=['product'],
+        columns=['period'],
+        aggfunc='first'
+    ).reset_index()
+    period_cols = [col for col in current_pivot.columns if col != 'product']
+    sorted_period_cols = _sort_price_period_columns(period_cols, grouping_mode)
+    if sorted_period_cols:
+        current_pivot = current_pivot[['product'] + sorted_period_cols]
+    return current_pivot, sorted_period_cols, current_data
 
 
 # Update tables callback
@@ -985,129 +1039,36 @@ def update_tables(selected_date, prev_selected_date, selected_products, grouping
         if selected_date is None or not selected_products:
             return html.Div()
 
-        # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
-            return html.Div(html.H4("Error: DataFrame not available", style={'color': 'red'}))
+        product_df, data_error = _prepare_price_dataset(selected_products)
+        if data_error:
+            tone = 'danger' if data_error.startswith(('DataFrame', 'Missing')) else 'warning'
+            return _build_prices_message(data_error, tone=tone)
 
-        # Check if required columns exist
-        required_columns = ['trade_date', 'contract', 'maturity_date', 'settlement_price']
-        missing_columns = [col for col in required_columns if col not in df_options.columns]
-
-        if missing_columns:
-            return html.Div(html.H4(f"Error: Missing columns: {', '.join(missing_columns)}", style={'color': 'red'}))
-
-        # Make a copy to avoid modifying the original
-        df = df_options.copy()
-
-        # Convert date columns safely
-        df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
-        df['maturity_date'] = pd.to_datetime(df['maturity_date'], errors='coerce')
-
-        # Convert the selected dates
         selected_date = pd.to_datetime(selected_date)
         prev_date = pd.to_datetime(prev_selected_date) if prev_selected_date else None
-
-        # Drop rows with NaT in date columns
-        df = df.dropna(subset=['trade_date', 'maturity_date'])
-
-        # Ensure settlement_price is numeric
-        df['settlement_price'] = pd.to_numeric(df['settlement_price'], errors='coerce')
-        df = df.dropna(subset=['settlement_price'])
-
-        if df.empty:
-            return html.Div(html.H4("No valid data available after cleaning", style={'color': 'red'}))
-
-        product_df = df[df['contract'].isin(selected_products)]
-
-        if product_df.empty:
-            return html.Div(html.H4("No data for selected products", style={'color': 'red'}))
-
-        # Get current data
-        current_data = product_df[product_df['trade_date'].dt.normalize() == selected_date.normalize()]
 
         # Get previous data if available
         prev_data = pd.DataFrame()
         if prev_date is not None:
             prev_data = product_df[product_df['trade_date'].dt.normalize() == prev_date.normalize()]
 
+        try:
+            current_pivot, sorted_date_cols, current_data = _build_current_price_pivot(
+                product_df,
+                selected_date,
+                grouping_mode,
+            )
+        except Exception as e:
+            return _build_prices_message(f"Error grouping data: {str(e)}", tone='danger')
+
         if current_data.empty:
-            return html.Div(html.H4(f"No data found for selected date: {selected_date.strftime('%Y-%m-%d')}",
-                                    style={'color': 'red'}))
+            return _build_prices_message(
+                f"No data found for selected date: {selected_date.strftime('%Y-%m-%d')}.",
+                tone='warning',
+            )
 
-        # Group data by period
-        try:
-            current_data = group_data_by_period(current_data, grouping_mode)
-            current_data['product'] = current_data['contract']
-        except Exception as e:
-            print(f"Error grouping current data: {e}")
-            return html.Div(html.H4(f"Error grouping data: {str(e)}", style={'color': 'red'}))
-
-        # Create pivot table for current data
-        try:
-            current_pivot = current_data.pivot_table(
-                values='settlement_price',
-                index=['product'],
-                columns=['period'],
-                aggfunc='first'
-            ).reset_index()
-        except Exception as e:
-            print(f"Error creating pivot table: {e}")
-            return html.Div(html.H4(f"Error creating data table: {str(e)}", style={'color': 'red'}))
-
-        # Get date columns
-        date_cols = [col for col in current_pivot.columns if col != 'product']
-
-        if not date_cols:
-            return html.Div(html.H4("No period data available for selected parameters", style={'color': 'red'}))
-
-        # Sort date columns based on grouping mode
-        try:
-            if grouping_mode == 'monthly':
-                def month_year_to_date(month_year):
-                    try:
-                        month, year = month_year.split('-')
-                        return pd.to_datetime(f"20{year}-{month}-01")
-                    except:
-                        return pd.to_datetime('2100-01-01')
-
-                sorted_date_cols = sorted(date_cols, key=month_year_to_date)
-
-            elif grouping_mode == 'quarterly':
-                def quarter_key(q_str):
-                    try:
-                        year, quarter = q_str.split('-')
-                        return (int(year), int(quarter[1]))
-                    except:
-                        return (9999, 0)
-
-                sorted_date_cols = sorted(date_cols, key=quarter_key)
-
-            elif grouping_mode == 'season':
-                def season_key(s_str):
-                    try:
-                        year, season = s_str.split('-')
-                        season_val = 0 if season == 'Winter' else 1
-                        return (int(year), season_val)
-                    except:
-                        return (9999, 0)
-
-                sorted_date_cols = sorted(date_cols, key=season_key)
-
-            elif grouping_mode == 'calendar':
-                sorted_date_cols = sorted(date_cols, key=lambda x: int(x) if x.isdigit() else 9999)
-            else:
-                # Default sorting
-                sorted_date_cols = date_cols
-        except Exception as e:
-            print(f"Error sorting date columns: {e}")
-            sorted_date_cols = date_cols  # Fall back to unsorted columns
-
-        # Reorder columns
-        try:
-            current_pivot = current_pivot[['product'] + sorted_date_cols]
-        except Exception as e:
-            print(f"Error reordering columns: {e}")
-            # Continue with original order if error
+        if not sorted_date_cols:
+            return _build_prices_message('No period data available for selected parameters.', tone='warning')
 
         # Initialize changes pivot
         changes_pivot = pd.DataFrame()
@@ -1129,169 +1090,67 @@ def update_tables(selected_date, prev_selected_date, selected_products, grouping
                 all_products = sorted(set(current_pivot['product'].tolist() +
                                           ([] if prev_pivot.empty else prev_pivot['product'].tolist())))
 
-                changes_pivot = pd.DataFrame({'product': all_products})
-
-                # Calculate changes for each period
-                for col in sorted_date_cols:
-                    if col in prev_pivot.columns:
-                        changes_pivot[col] = None
-
-                        for product in all_products:
-                            current_row = current_pivot[current_pivot['product'] == product]
-                            current_val = current_row[col].iloc[
-                                0] if not current_row.empty and col in current_row.columns and len(
-                                current_row) > 0 else None
-
-                            prev_row = prev_pivot[prev_pivot['product'] == product]
-                            prev_val = prev_row[col].iloc[0] if not prev_row.empty and col in prev_row.columns and len(
-                                prev_row) > 0 else None
-
-                            if current_val is not None and prev_val is not None:
-                                idx = changes_pivot[changes_pivot['product'] == product].index[0]
-                                changes_pivot.at[idx, col] = current_val - prev_val
-            except Exception as e:
-                print(f"Error calculating changes: {e}")
+                change_cols = [col for col in sorted_date_cols if col in current_pivot.columns and col in prev_pivot.columns]
+                if change_cols:
+                    current_values = current_pivot.set_index('product').reindex(all_products)[change_cols]
+                    prev_values = prev_pivot.set_index('product').reindex(all_products)[change_cols]
+                    current_values = current_values.apply(pd.to_numeric, errors='coerce')
+                    prev_values = prev_values.apply(pd.to_numeric, errors='coerce')
+                    changes_pivot = (current_values - prev_values).reset_index()
+            except Exception:
                 # Continue without changes table if there's an error
                 changes_pivot = pd.DataFrame()
 
-        # Prepare tables for display
-        current_display = current_pivot
-        columns = [{"name": "Product", "id": "product"}]
+        columns = [{'name': 'Product', 'id': 'product'}]
         for col in sorted_date_cols:
-            columns.append({"name": col, "id": col, "type": "numeric", "format": {"specifier": ".2f"}})
+            columns.append({'name': col, 'id': col, 'type': 'numeric'})
 
-        current_table_data = current_display.replace({float('nan'): None}).to_dict('records')
-
-        current_table = html.Div([
-            dash_table.DataTable(
-                id='prices-volatility-table',
-                columns=columns,
-                data=current_table_data,
-                style_table={
-                    'overflowX': 'auto'
-                },
-                style_cell={
-                    'textAlign': 'center',
-                    'padding': '4px',
-                    'fontSize': 12,
-                    'minWidth': '40px',
-                    'maxWidth': '100px',
-                    'color': 'black'
-                },
-                style_cell_conditional=[
-                    {'if': {'column_id': 'product'},
-                     'textAlign': 'left',
-                     'fontWeight': 'bold',
-                     'width': '80px',
-                     'color': 'black'
-                     }
+        product_count = len(current_pivot['product'].dropna().unique()) if 'product' in current_pivot.columns else 0
+        current_grid = _build_price_grid(
+            'prices-volatility-table',
+            columns,
+            _clean_price_grid_records(current_pivot, sorted_date_cols),
+            numeric_fields=sorted_date_cols,
+            sign_fields=[],
+            className='prices-current-grid',
+        )
+        panels = [
+            _build_price_table_panel(
+                'Current Forward Prices',
+                current_grid,
+                chips=[
+                    _build_prices_chip('COB', selected_date.strftime('%Y-%m-%d'), tone='primary'),
+                    _build_prices_chip('Group', grouping_mode.capitalize()),
+                    _build_prices_chip('Products', product_count),
                 ],
-                style_header={
-                    'backgroundColor': 'rgb(230, 230, 230)',
-                    'fontWeight': 'bold',
-                    'textAlign': 'center',
-                    'padding': '4px',
-                    'fontSize': 12,
-                    'whiteSpace': 'normal',
-                    'height': 'auto',
-                    'color': 'black'
-                },
-                style_data_conditional=[
-                    {
-                        'if': {'row_index': 'odd'},
-                        'backgroundColor': 'rgb(248, 248, 248)'
-                    }
-                ],
-                fixed_rows={'headers': True},
-                page_action='none',
-                tooltip_delay=0,
-                tooltip_duration=None
             )
-        ], style={'marginBottom': '15px', 'width': '100%'})
+        ]
 
-        changes_table = None
         if not changes_pivot.empty:
-            changes_table_data = changes_pivot.replace({float('nan'): None}).to_dict('records')
-
-            conditional_styling = [
-                {
-                    'if': {'row_index': 'odd'},
-                    'backgroundColor': 'rgb(248, 248, 248)'
-                }
-            ]
-
-            for col in sorted_date_cols:
-                if col in changes_pivot.columns:
-                    conditional_styling.extend([
-                        {
-                            'if': {
-                                'column_id': col,
-                                'filter_query': f'{{{col}}} > 0'
-                            },
-                            'color': 'green',
-                            'fontWeight': 'bold'
-                        },
-                        {
-                            'if': {
-                                'column_id': col,
-                                'filter_query': f'{{{col}}} < 0'
-                            },
-                            'color': 'red',
-                            'fontWeight': 'bold'
-                        }
-                    ])
-
-            changes_table = html.Div([
-                dash_table.DataTable(
-                    id='prices-changes-table',
-                    columns=columns,
-                    data=changes_table_data,
-                    style_table={
-                        'overflowX': 'auto'
-                    },
-                    style_cell={
-                        'textAlign': 'center',
-                        'padding': '4px',
-                        'fontSize': 12,
-                        'minWidth': '40px',
-                        'maxWidth': '100px',
-                        'color': 'black'
-                    },
-                    style_cell_conditional=[
-                        {'if': {'column_id': 'product'},
-                         'textAlign': 'left',
-                         'fontWeight': 'bold',
-                         'width': '80px',
-                         'color': 'black'
-                         }
+            change_cols = [col for col in sorted_date_cols if col in changes_pivot.columns]
+            changes_grid = _build_price_grid(
+                'prices-changes-table',
+                columns,
+                _clean_price_grid_records(changes_pivot, change_cols),
+                numeric_fields=sorted_date_cols,
+                sign_fields=change_cols,
+                className='prices-change-grid',
+            )
+            panels.append(
+                _build_price_table_panel(
+                    'Change vs Previous COB',
+                    changes_grid,
+                    chips=[
+                        _build_prices_chip('Current', selected_date.strftime('%Y-%m-%d'), tone='primary'),
+                        _build_prices_chip('Previous', prev_date.strftime('%Y-%m-%d') if prev_date is not None else None),
                     ],
-                    style_header={
-                        'backgroundColor': 'rgb(230, 230, 230)',
-                        'fontWeight': 'bold',
-                        'textAlign': 'center',
-                        'padding': '4px',
-                        'fontSize': 12,
-                        'whiteSpace': 'normal',
-                        'height': 'auto',
-                        'color': 'black'
-                    },
-                    style_data_conditional=conditional_styling,
-                    fixed_rows={'headers': True},
-                    page_action='none',
-                    tooltip_delay=0,
-                    tooltip_duration=None
                 )
-            ], style={'width': '100%'})
-        else:
-            changes_table = html.Div()
+            )
 
-        # Empty div instead of a title
-        grouping_title = html.Div()
-        return html.Div([grouping_title, current_table, changes_table])
+        return html.Div(panels, className='prices-table-stack')
 
     except Exception as e:
-        print(f"Error in update_tables: {e}")
-        return html.Div(html.H4(f"Error generating tables: {str(e)}", style={'color': 'red'}))
+        return _build_prices_message(f"Error generating tables: {str(e)}", tone='danger')
 
 
 # Export prices table callback
@@ -1308,53 +1167,19 @@ def export_prices_table(n_clicks, selected_date, selected_products, grouping_mod
         raise dash.exceptions.PreventUpdate
     
     try:
-        # Check if df_options exists and is accessible
-        if 'df_options' not in globals() or df_options is None or not isinstance(df_options, pd.DataFrame):
+        product_df, data_error = _prepare_price_dataset(selected_products)
+        if data_error:
             raise dash.exceptions.PreventUpdate
-        
-        # Make a copy to avoid modifying the original
-        df = df_options.copy()
-        
-        # Convert date columns safely
-        df['trade_date'] = pd.to_datetime(df['trade_date'], errors='coerce')
-        df['maturity_date'] = pd.to_datetime(df['maturity_date'], errors='coerce')
-        
-        # Convert the selected date
+
         selected_date = pd.to_datetime(selected_date)
-        
-        # Drop rows with NaT in date columns
-        df = df.dropna(subset=['trade_date', 'maturity_date'])
-        
-        # Ensure settlement_price is numeric
-        df['settlement_price'] = pd.to_numeric(df['settlement_price'], errors='coerce')
-        df = df.dropna(subset=['settlement_price'])
-        
-        if df.empty:
-            raise dash.exceptions.PreventUpdate
-        
-        product_df = df[df['contract'].isin(selected_products)]
-        
-        if product_df.empty:
-            raise dash.exceptions.PreventUpdate
-        
-        # Get current data
-        current_data = product_df[product_df['trade_date'].dt.normalize() == selected_date.normalize()]
-        
+        current_pivot, sorted_period_cols, current_data = _build_current_price_pivot(
+            product_df,
+            selected_date,
+            grouping_mode,
+        )
         if current_data.empty:
             raise dash.exceptions.PreventUpdate
-        
-        # Group data by period
-        current_data = group_data_by_period(current_data, grouping_mode)
-        current_data['product'] = current_data['contract']
-        
-        # Create pivot table for current data
-        current_pivot = current_data.pivot_table(
-            values='settlement_price',
-            index=['product'],
-            columns=['period'],
-            aggfunc='first'
-        ).reset_index()
-        
+
         # Format the data for export
         export_df = current_pivot.copy()
         
@@ -1369,28 +1194,9 @@ def export_prices_table(n_clicks, selected_date, selected_products, grouping_mod
             index=False
         )
         
-    except Exception as e:
-        print(f"Error in export_prices_table: {e}")
+    except Exception:
         raise dash.exceptions.PreventUpdate
 
-
-# # Reset grouping dropdown
-# @dash.callback(
-#     Output('prices-table-grouping-dropdown', 'value'),
-#     Input('prices-table-refresh-button', 'n_clicks'),
-#     prevent_initial_call=True
-# )
-# def reset_grouping(n_clicks):
-#     return 'monthly'
-#
-# # New callback to reset the graph grouping dropdown
-# @dash.callback(
-#     Output('prices-graph-grouping-dropdown', 'value'),
-#     Input('prices-graph-refresh-button', 'n_clicks'),
-#     prevent_initial_call=True
-# )
-# def reset_graph_grouping(n_clicks):
-#     return 'daily'
 
 @dash.callback(
     Output('prices-unified-grouping-dropdown', 'value'),
@@ -1400,5 +1206,3 @@ def export_prices_table(n_clicks, selected_date, selected_products, grouping_mod
 def reset_unified_grouping(n_clicks):
     # This function will be triggered by the main refresh button
     return 'monthly'
-
- 

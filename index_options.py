@@ -1,9 +1,10 @@
 # index.py
-from dash import html, dcc, clientside_callback, ClientsideFunction
+import os
+
+from dash import html, dcc, clientside_callback
 from dash.dependencies import Input, Output
 from app import app
 
-# import pages.price_shocks
 import pages.greeks
 import pages.valuation
 import pages.trades
@@ -11,7 +12,6 @@ import pages.vol_surface
 import pages.prices
 import pages.slopes
 import pages.spreads
-# import pages.underlying_correlations
 import pages.pricer
 
 # Professional Navigation Bar - Options Dashboard
@@ -31,7 +31,6 @@ nav_links = html.Header([
                 dcc.Link('Underlying Prices', href='/prices', className='nav-link-secondary'),
                 dcc.Link('Slopes', href='/slopes', className='nav-link-secondary'),
                 dcc.Link('Spreads', href='/spreads', className='nav-link-secondary'),
-                # dcc.Link('Correlations', href='/underlying_correlations', className='nav-link-secondary'),
                 dcc.Link('Pricer', href='/pricer', className='nav-link-secondary'),
             ], className='nav-group-secondary')
         ], className='main-navigation'),
@@ -55,8 +54,6 @@ app.layout = html.Div([
 def display_page(pathname):
     if pathname == '/':
         return pages.greeks.layout
-    # elif pathname == '/greeks':
-    #     return pages.price_shocks.layout
     elif pathname == '/greeks':
         return pages.greeks.layout
     elif pathname == '/valuation':
@@ -71,8 +68,6 @@ def display_page(pathname):
         return pages.slopes.layout
     elif pathname == '/spreads':
         return pages.spreads.layout
-    # elif pathname == '/underlying_correlations':
-    #     return pages.underlying_correlations.layout
     elif pathname == '/pricer':
         return pages.pricer.layout
     else:
@@ -100,7 +95,6 @@ clientside_callback(
                 '/prices': 'Underlying Prices',
                 '/slopes': 'Slopes',
                 '/spreads': 'Spreads',
-                // '/underlying_correlations': 'Correlations',
                 '/pricer': 'Pricer'
             };
             
@@ -125,4 +119,5 @@ clientside_callback(
 )
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8071)
+    debug_enabled = os.getenv('DASH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}
+    app.run(debug=debug_enabled, port=int(os.getenv('DASH_PORT', '8071')))

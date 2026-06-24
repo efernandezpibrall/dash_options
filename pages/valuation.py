@@ -1,10 +1,15 @@
 import dash
-from dash import Dash, html, dcc, dash_table, callback, Input, Output, State
+import dash_ag_grid as dag
+from dash import html, dcc, Input, Output, State
 import pandas as pd
 import numpy as np
 import configparser
 from sqlalchemy import create_engine
 import os
+from functools import lru_cache
+
+from dataframe_utils import concat_dataframes
+
 
 #------ code to be able to access config.ini, even having the path in the .virtualenvs is not working without it ------#
 try:
@@ -14,7 +19,7 @@ try:
     # Adjust the number of '..' as needed to reach the correct directory
     config_dir = os.path.abspath(os.path.join(script_dir, '..','..'))  # Go up one level
     CONFIG_FILE_PATH = os.path.join(config_dir, 'config.ini')
-except:
+except Exception:
     CONFIG_FILE_PATH = 'config.ini'  # Assumes it's in the same directory or the path it is detected
 
 # --- Load Configuration from INI File ---
@@ -24,12 +29,17 @@ config_reader.read(CONFIG_FILE_PATH)
 # Read values from the ini file sections
 DB_CONNECTION_STRING = config_reader.get('DATABASE', 'CONNECTION_STRING', fallback=None)
 DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng')
+MO_CONNECTION_STRING = (
+    config_reader.get('DATABASE', 'MIDDLE_OFFICE_CONNECTION_STRING', fallback=None)
+    or DB_CONNECTION_STRING
+)
 
 # ---------------------- Configuration ----------------------
 #Default DBAPI (should use psycopg2 as default, pg8000 it's an alternative but we don't have the library installed)
 # create engine
 engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
-engine_mo = create_engine("postgresql://at_bigdata_middle-officer:aGt%40midOfficer_pg@api.lakehouse.adnoc.ae:30080/postgres")
+engine_mo = engine if MO_CONNECTION_STRING == DB_CONNECTION_STRING else create_engine(MO_CONNECTION_STRING, pool_pre_ping=True)
+_valuation_refresh_key = None
 
 
 
@@ -50,8 +60,7 @@ def get_available_dates(engine):
         dates_df = pd.read_sql(query, engine)
         # Convert each date to string, e.g. '2023-01-01'
         return [d.strftime('%Y-%m-%d') for d in dates_df['cob_date']]
-    except Exception as e:
-        print(f"Failed to fetch available dates: {e}")
+    except Exception:
         return []
 
 
@@ -68,12 +77,43 @@ def get_strategies(engine, selected_date):
         """
         df_strats = pd.read_sql(query, engine)
         return sorted(df_strats['substrategy'].dropna().unique().tolist())
-    except Exception as e:
-        print(f"Failed to fetch strategies for date={selected_date}: {e}")
+    except Exception:
         return []
 
 
-def fetch_pnl_data(engine, selected_date, selected_strategies):
+def _read_pnl_sources_for_date(selected_date, db_engine):
+    try:
+        query = f"""
+                SELECT
+                    substrategy, ytd as ytd_hedging, 'All' as year
+                FROM {DB_SCHEMA}.pnl_aspect
+                WHERE "COB" = '{selected_date}'
+                """
+        df_aspect_pnl = pd.read_sql(query, engine_mo)
+    except Exception:
+        df_aspect_pnl = pd.DataFrame()
+
+    query = f"""
+    SELECT
+        unit_quantity,
+        substrategy,
+        maturity_date_a,
+        price,intrinsic_value,time_value,
+        qty_value,qty_intrinsic_value,qty_time_value,qty_premium,qty_pnl,
+        quantity
+    FROM at_lng.trades_options_valuation
+    WHERE cob_date = '{selected_date}'
+    """
+    df = pd.read_sql(query, db_engine)
+    return df, df_aspect_pnl
+
+
+@lru_cache(maxsize=8)
+def _fetch_pnl_sources_for_date(selected_date):
+    return _read_pnl_sources_for_date(selected_date, engine)
+
+
+def fetch_pnl_data(db_engine, selected_date, selected_strategies):
     """
     Query 'at_lng.trades_options_valuation' for the given COB date
     and filter to only the specified substrategies.
@@ -83,32 +123,12 @@ def fetch_pnl_data(engine, selected_date, selected_strategies):
     - Sums for: qty_value, qty_intrinsic_value, qty_time_value
     """
     try:
-        # Try to get PnL data from Trino, but don't fail if it's unavailable
-        try:
-            query = f"""
-                    SELECT
-                        substrategy, ytd as ytd_hedging, 'All' as year
-                    FROM {DB_SCHEMA}.pnl_aspect
-                    WHERE "COB" = '{selected_date}'
-                    """
-            df_aspect_pnl = pd.read_sql(query, engine_mo)
-        except Exception as e:
-            print(f"Warning: Could not fetch PnL aspect data from Trino: {e}")
-            df_aspect_pnl = pd.DataFrame()
-
-        # Base query for the date (main data)
-        query = f"""
-        SELECT
-            unit_quantity,
-            substrategy,
-            maturity_date_a,
-            price,intrinsic_value,time_value,
-            qty_value,qty_intrinsic_value,qty_time_value,qty_premium,qty_pnl,
-            quantity
-        FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{selected_date}'
-        """
-        df = pd.read_sql(query, engine)
+        if db_engine is engine:
+            df, df_aspect_pnl = _fetch_pnl_sources_for_date(selected_date)
+        else:
+            df, df_aspect_pnl = _read_pnl_sources_for_date(selected_date, db_engine)
+        df = df.copy()
+        df_aspect_pnl = df_aspect_pnl.copy()
         if df.empty:
             return pd.DataFrame()
 
@@ -187,7 +207,7 @@ def fetch_pnl_data(engine, selected_date, selected_strategies):
         }
 
         # Concatenate all dataframes together
-        grouped = pd.concat([grouped, substrategy_totals, unit_totals, pd.DataFrame([grand_total])], ignore_index=True)
+        grouped = concat_dataframes([grouped, substrategy_totals, unit_totals, pd.DataFrame([grand_total])], ignore_index=True)
 
         # Only merge PnL data if it's available
         if not df_aspect_pnl.empty:
@@ -204,8 +224,7 @@ def fetch_pnl_data(engine, selected_date, selected_strategies):
                                                 9999 if x == 'All' else
                                                 (9998 if x is None else x))
             df['_sort_substrategy'] = df['substrategy'].apply(lambda x:
-                                                              'zzz2' if x == 'All' else
-                                                              ('zzz3' if x == 'All' else x))
+                                                              'zzz2' if x == 'All' else x)
 
             # Sort by unit_quantity, substrategy, then year
             df_sorted = df.sort_values(['unit_quantity', '_sort_substrategy', '_sort_year'])
@@ -216,8 +235,7 @@ def fetch_pnl_data(engine, selected_date, selected_strategies):
 
         grouped = custom_sort(grouped)
         return grouped
-    except Exception as e:
-        print(f"Failed to fetch or process PnL data for {selected_date}: {e}")
+    except Exception:
         return pd.DataFrame()
 
 
@@ -237,263 +255,302 @@ COLUMN_NAME_MAPPING = {
     'ytd_hedging': 'Aspect YTD P&L'
 }
 
+COLUMN_GRID_HEADER_MAPPING = {
+    'intrinsic_value': 'Intrinsic',
+    'time_value': 'Time',
+    'qty_value': 'Value Total',
+    'qty_intrinsic_value': 'Intrinsic Total',
+    'qty_time_value': 'Time Total',
+    'qty_premium': 'Premium',
+    'qty_pnl': 'Total P&L',
+    'ytd_hedging': 'Aspect YTD',
+}
 
-def build_columns_with_numeric_format(df):
-    """
-    Dynamically create a columns definition for dash_table.
-    For each numeric column, apply thousands separators and keep numeric type.
-    For non-numeric columns, just treat them as text.
-    Use friendly column names from COLUMN_NAME_MAPPING.
-    For columns with "Total" in the name, remove decimal places.
-    """
-    from dash.dash_table.Format import Format, Group, Scheme
-    table_columns = []
+
+VALUATION_COLUMN_WIDTHS = {
+    'substrategy': 154,
+    'year': 56,
+    'unit_quantity': 64,
+    'price': 74,
+    'intrinsic_value': 92,
+    'time_value': 86,
+    'qty_value': 96,
+    'qty_intrinsic_value': 108,
+    'qty_time_value': 108,
+    'qty_premium': 100,
+    'qty_pnl': 94,
+    'ytd_hedging': 108,
+}
+
+VALUATION_DECIMAL_COLUMNS = {'price', 'intrinsic_value', 'time_value'}
+VALUATION_TOTAL_COLUMNS = {
+    'qty_value',
+    'qty_intrinsic_value',
+    'qty_time_value',
+    'qty_premium',
+    'qty_pnl',
+    'ytd_hedging',
+}
+
+
+def _parse_display_number_expression():
+    return "Number(params.data && params.data['__{field}_raw'])"
+
+
+def build_valuation_column_defs(df):
+    """Create compact AG Grid column definitions for the valuation table."""
+    column_defs = []
 
     for col in df.columns:
-        # Use friendly column name if available, otherwise use the original
-        friendly_name = COLUMN_NAME_MAPPING.get(col, col)
+        full_name = COLUMN_NAME_MAPPING.get(col, col)
+        friendly_name = COLUMN_GRID_HEADER_MAPPING.get(col, full_name)
+        width = VALUATION_COLUMN_WIDTHS.get(col, 98)
+        is_numeric = pd.api.types.is_numeric_dtype(df[col]) or col in VALUATION_DECIMAL_COLUMNS | VALUATION_TOTAL_COLUMNS
+        is_text_column = col in {'substrategy', 'year', 'unit_quantity'}
 
-        if pd.api.types.is_numeric_dtype(df[col]):
-            # Determine precision based on column name
-            # If the friendly name starts with "Total", use 0 decimal places
-            precision = 0 if friendly_name.startswith('Total') or friendly_name.startswith('Aspect') else 2
+        column_def = {
+            'headerName': friendly_name,
+            'field': col,
+            'sortable': True,
+            'filter': False,
+            'resizable': True,
+            'width': width,
+            'minWidth': min(width, 76),
+            'maxWidth': max(width + 20, 104),
+            'tooltipField': col,
+            'headerTooltip': full_name,
+            'suppressMovable': col in {'substrategy', 'year', 'unit_quantity'},
+            'cellClass': (
+                'mckinsey-ag-grid-cell mckinsey-ag-grid-text-cell valuation-text-cell'
+                if is_text_column else
+                'mckinsey-ag-grid-cell mckinsey-ag-grid-number-cell valuation-number-cell'
+            ),
+            'headerClass': (
+                'mckinsey-ag-grid-header valuation-text-header'
+                if is_text_column else
+                'mckinsey-ag-grid-header valuation-number-header'
+            ),
+        }
 
-            # Numeric column with thousand separators
-            col_def = {
-                "name": friendly_name,
-                "id": col,
-                "type": "numeric",
-                "format": Format(
-                    group=Group.yes,  # enable thousand separators
-                    groups=3,
-                    precision=precision,
-                    scheme=Scheme.fixed
-                )
-            }
-        else:
-            # Non-numeric column
-            col_def = {
-                "name": friendly_name,
-                "id": col
-            }
-        table_columns.append(col_def)
-    return table_columns
+        if col == 'substrategy':
+            column_def.update({'pinned': 'left', 'lockPinned': True})
+        elif col in {'year', 'unit_quantity'}:
+            column_def.update({'pinned': 'left', 'lockPinned': True})
+
+        if is_numeric:
+            raw_value = _parse_display_number_expression().format(field=col)
+            column_def.update({
+                'type': 'rightAligned',
+                'cellClassRules': {
+                    'valuation-positive-cell': (
+                        f"['qty_pnl', 'ytd_hedging'].includes('{col}') && {raw_value} > 0"
+                    ),
+                    'valuation-negative-cell': f"{raw_value} < 0",
+                    'valuation-missing-cell': (
+                        f"params.data === null || params.data === undefined "
+                        f"|| params.data['__{col}_raw'] === null || params.data['__{col}_raw'] === undefined "
+                        f"|| isNaN(Number(params.data['__{col}_raw']))"
+                    ),
+                },
+            })
+
+        column_defs.append(column_def)
+
+    return column_defs
+
+
+def _format_valuation_display_value(key, value):
+    if pd.isna(value):
+        return None
+    if key in VALUATION_DECIMAL_COLUMNS:
+        return f"{float(value):,.2f}"
+    if key in VALUATION_TOTAL_COLUMNS:
+        return f"{float(value):,.0f}"
+    return value
+
+
+def _raw_valuation_numeric_value(key, value):
+    if key not in VALUATION_DECIMAL_COLUMNS | VALUATION_TOTAL_COLUMNS or pd.isna(value):
+        return None
+    return float(value)
+
+
+def _clean_valuation_records(df):
+    records = []
+    for row in df.to_dict('records'):
+        clean_row = {}
+        for key, value in row.items():
+            clean_row[key] = _format_valuation_display_value(key, value)
+            raw_value = _raw_valuation_numeric_value(key, value)
+            if key in VALUATION_DECIMAL_COLUMNS | VALUATION_TOTAL_COLUMNS:
+                clean_row[f'__{key}_raw'] = raw_value
+        records.append(clean_row)
+    return records
+
+
+def _export_df_from_grid_records(row_data, column_defs):
+    if not row_data or not column_defs:
+        return pd.DataFrame()
+
+    fields = [
+        column.get('field')
+        for column in column_defs
+        if isinstance(column, dict) and column.get('field') and not str(column.get('field')).startswith('__')
+    ]
+    if not fields:
+        return pd.DataFrame()
+
+    export_records = []
+    for row in row_data:
+        export_row = {}
+        for field in fields:
+            raw_key = f'__{field}_raw'
+            export_row[field] = row.get(raw_key) if raw_key in row and row.get(raw_key) is not None else row.get(field)
+        export_records.append(export_row)
+
+    return pd.DataFrame(export_records, columns=fields)
 
 
 # ------------------------------------------------------------------
 # 3) BUILD THE DASH LAYOUT
 # ------------------------------------------------------------------
-# 3.1) Get list of available COB dates for the date dropdown
-available_dates = get_available_dates(engine)
+ERROR_STYLE_HIDDEN = {'display': 'none'}
+ERROR_STYLE_VISIBLE = {'display': 'block'}
 
-# Define global styles
-styles = {
-    'page': {
-        'backgroundColor': '#f5f7fa',
-        'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
-        'padding': '20px',
-    },
-    'header': {
-        'backgroundColor': '#1e3a8a',
-        'color': '#ffffff',
-        'padding': '20px',
-        'borderRadius': '8px',
-        'marginBottom': '20px',
-        'boxShadow': '0 2px 4px rgba(0,0,0,0.1)'
-    },
-    'panel': {
-        'backgroundColor': '#ffffff',
-        'padding': '20px',
-        'borderRadius': '8px',
-        'boxShadow': '0 1px 3px rgba(0,0,0,0.1)',
-        'marginBottom': '20px'
-    },
-    'sectionTitle': {
-        'color': '#1e3a8a',
-        'fontWeight': 'bold',
-        'marginBottom': '15px',
-        'textAlign': 'left'
-    },
-    'label': {
-        'color': '#1e3a8a',
-        'fontWeight': 'bold',
-        'marginBottom': '5px',
-        'display': 'block'
-    },
-    'button': {
-        'backgroundColor': '#3b82f6',
-        'color': '#ffffff',
-        'border': 'none',
-        'borderRadius': '4px',
-        'padding': '8px 16px',
-        'cursor': 'pointer',
-        'fontWeight': 'bold',
-        'marginLeft': '10px',
-        'verticalAlign': 'middle'
-    },
-    'refreshButton': {
-        'backgroundColor': '#10b981',
-        'color': '#ffffff',
-        'border': 'none',
-        'borderRadius': '4px',
-        'padding': '8px 16px',
-        'cursor': 'pointer',
-        'fontWeight': 'bold',
-        'marginLeft': '10px',
-        'verticalAlign': 'middle'
-    },
-    'filterRow': {
-        'marginBottom': '20px'
-    },
-    'dataTable': {
-        'overflowX': 'auto'
-    },
-    'tableHeader': {
-        'backgroundColor': '#e5e7eb',
-        'fontWeight': 'bold',
-        'textAlign': 'center',
-        'padding': '10px',
-        'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'
-    },
-    'tableCell': {
-        'textAlign': 'center',
-        'padding': '10px',
-        'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'
-    }
-}
 
-# The enhanced layout preserving original functionality
-layout = html.Div([
-        # Store for Aspect data - preserved exactly as original
-        dcc.Store(id='aspect-pnl-store', storage_type='memory'),
-        # Download component for table export
-        dcc.Download(id="download-pnl-table"),
-        # Main content panel
+def _build_valuation_filter_bar():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span('COB', className='filter-group-header'),
+                    dcc.Dropdown(
+                        id='pnl-date-dropdown',
+                        options=[],
+                        value=None,
+                        clearable=False,
+                        className='inline-dropdown-date valuation-filter-dropdown valuation-date-dropdown',
+                    ),
+                ],
+                className='filter-group valuation-sticky-filter-group valuation-date-filter-group',
+            ),
+            html.Div(
+                [
+                    html.Span('Strategies', className='filter-group-header'),
+                    dcc.Dropdown(
+                        id='pnl-strategy-dropdown',
+                        options=[],
+                        value=[],
+                        multi=True,
+                        placeholder='Select strategies...',
+                        className='inline-dropdown-multi-strategies valuation-filter-dropdown valuation-strategy-dropdown',
+                    ),
+                ],
+                className='filter-group valuation-sticky-filter-group valuation-strategy-filter-group',
+            ),
+        ],
+        className='professional-section-header valuation-sticky-filter-bar',
+    )
+
+
+def _build_valuation_section_header(title, actions=None):
+    return html.Div(
+        [
+            html.Div(
+                [html.H3(title, className='section-title-inline')],
+                className='valuation-section-title-row',
+            ),
+            html.Div(actions or [], className='valuation-section-actions'),
+        ],
+        className='valuation-section-header',
+    )
+
+
+layout = html.Div(
+    [
+        dcc.Download(id='download-pnl-table'),
+        _build_valuation_filter_bar(),
         html.Div(
-            style=styles['panel'],
-            children=[
-                # Filters section with title
-                html.Div(
-                    className="inline-section-header",
-                    style={'marginBottom': '20px', 'paddingBottom': '15px'},
-                    children=[
-                        # ~~~~~ ROW 1: Date dropdown ~~~~~
-                        html.Div([
-                            html.Label('Trade Date:', className="inline-filter-label"),
-                            dcc.Dropdown(
-                                id='pnl-date-dropdown',
-                                options=[{'label': d, 'value': d} for d in available_dates],
-                                value=available_dates[0] if available_dates else None,
-                                clearable=False,
-                                className="inline-dropdown-date"
-                            )
-                        ], style={'display': 'flex', 'align-items': 'center', 'gap': '16px', 'flex-wrap': 'nowrap', 'margin-bottom': '8px'}),
-                        
-                        # ~~~~~ ROW 2: Strategy dropdown ~~~~~
-                        html.Div([
-                            html.Label('Strategies:', className="inline-filter-label"),
-                            dcc.Dropdown(
-                                id='pnl-strategy-dropdown',
-                                options=[],  # will be set by callback
-                                value=[],  # default to empty or all
-                                multi=True,
-                                placeholder="Select strategies...",
-                                className="inline-dropdown-multi-strategies",
-                                style={'width': '800px'}
-                            )
-                        ], style={'display': 'flex', 'align-items': 'center', 'gap': '16px', 'flex-wrap': 'nowrap', 'width': '100%'}),
-                    ]
-                ),
-                # Spinner + DataTable section
-                dcc.Loading(
-                    id="pnl-loading",
-                    type="circle",
-                    children=[
-                        html.Div([
-                            html.H4(
-                                "P&L and Option Values Table",
-                                style={
-                                    'color': '#1e3a8a',
-                                    'fontWeight': 'bold',
-                                    'margin': '0',
-                                    'display': 'inline-block'
-                                }
-                            ),
-                            html.Button(
-                                'Export',
-                                id='export-pnl-table-btn',
-                                className='custom-export-btn',
-                                style={
-                                    'margin-left': '12px',
-                                    'font-size': '11px',
-                                    'padding': '4px 8px',
-                                    'background-color': '#2E86C1',
-                                    'color': 'white',
-                                    'border': 'none',
-                                    'border-radius': '3px',
-                                    'cursor': 'pointer',
-                                    'font-weight': '500'
-                                }
-                            )
-                        ], style={'display': 'flex', 'align-items': 'center', 'margin-bottom': '15px'}),
-                        html.Div(
-                            id='pnl-error-message',
-                            style={
-                                'textAlign': 'center',
-                                'color': '#dc2626',
-                                'backgroundColor': '#fef2f2',
-                                'border': '1px solid #fecaca',
-                                'borderRadius': '8px',
-                                'padding': '15px',
-                                'margin': '10px 0',
-                                'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
-                                'display': 'none'
-                            }
+            [
+                _build_valuation_section_header(
+                    'P&L and Option Values',
+                    actions=[
+                        html.Button(
+                            'Export',
+                            id='export-pnl-table-btn',
+                            className='custom-export-btn valuation-export-button',
                         ),
-                        dash_table.DataTable(
-                            id='pnl-table',
-                            style_table={'overflowX': 'auto'},
-                            style_cell={
-                                'textAlign': 'center',
-                                'padding': '10px',
-                                'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'
-                            },
-                            style_header={
-                                'backgroundColor': '#e5e7eb',
-                                'fontWeight': 'bold',
-                                'textAlign': 'center'
-                            },
-                            style_data_conditional=[
-                                {
-                                    'if': {'filter_query': '{year} = "All"'},
-                                    'backgroundColor': 'rgb(245, 245, 245)',
-                                    'fontWeight': 'bold',
-                                    'fontStyle': 'italic'
+                    ],
+                ),
+                dcc.Loading(
+                    id='pnl-loading',
+                    type='circle',
+                    children=[
+                        html.Div(id='pnl-error-message', className='valuation-error-message', style=ERROR_STYLE_HIDDEN),
+                        html.Div(
+                            dag.AgGrid(
+                                id='pnl-table',
+                                rowData=[],
+                                columnDefs=[],
+                                defaultColDef={
+                                    'sortable': True,
+                                    'filter': False,
+                                    'resizable': True,
+                                    'suppressHeaderMenuButton': True,
+                                    'suppressHeaderFilterButton': True,
+                                    'wrapHeaderText': False,
+                                    'autoHeaderHeight': False,
                                 },
-                                {
-                                    'if': {'filter_query': '{substrategy} = "All"'},
-                                    'backgroundColor': 'rgb(240, 240, 240)',
-                                    'fontWeight': 'bold'
+                                dashGridOptions={
+                                    'domLayout': 'normal',
+                                    'rowHeight': 24,
+                                    'headerHeight': 30,
+                                    'pagination': False,
+                                    'suppressPaginationPanel': True,
+                                    'enableCellTextSelection': True,
+                                    'ensureDomOrder': True,
+                                    'animateRows': False,
+                                    'rowSelection': {
+                                        'mode': 'singleRow',
+                                        'checkboxes': False,
+                                        'enableClickSelection': True,
+                                    },
                                 },
-                                {
-                                    'if': {'filter_query': '{substrategy} = "All"'},
-                                    'backgroundColor': 'rgb(230, 230, 230)',
-                                    'fontWeight': 'bold'
-                                }
-                            ],
-                            fill_width=False,
-                            export_format='xlsx'
-                        )
-                    ]
-                )
-            ]
-        )
-    ]
+                                rowClassRules={
+                                    'valuation-grand-total-row': "params.data && params.data.substrategy === 'All'",
+                                    'valuation-subtotal-row': "params.data && params.data.year === 'All'",
+                                },
+                                className='ag-theme-alpine mckinsey-ag-grid supply-dest-summary-grid valuation-ag-grid',
+                                style={'width': '100%', 'height': 'calc(100vh - 250px)', 'minHeight': '320px'},
+                                dangerously_allow_code=True,
+                            ),
+                            className='valuation-table-container',
+                        ),
+                    ],
+                ),
+            ],
+            className='valuation-section',
+        ),
+    ],
+    className='options-dashboard-container valuation-page',
 )
 
 # ------------------------------------------------------------------
 # 4) CALLBACKS
 # ------------------------------------------------------------------
+
+@dash.callback(
+    Output('pnl-date-dropdown', 'options'),
+    Output('pnl-date-dropdown', 'value'),
+    Input('refresh-options-data', 'n_clicks'),
+    State('pnl-date-dropdown', 'value'),
+)
+def update_pnl_date_options(n_clicks, current_date):
+    del n_clicks
+    dates = get_available_dates(engine)
+    options = [{'label': date, 'value': date} for date in dates]
+    selected_date = current_date if current_date in dates else (dates[0] if dates else None)
+    return options, selected_date
 
 # 4.1) Populate the strategy dropdown based on the selected date
 @dash.callback(
@@ -521,10 +578,10 @@ def update_strategy_options(selected_date, n_clicks):
     return options, strategies
 
 
-# 4.2) Update the DataTable when date or strategy selection changes
+# 4.2) Update the AG Grid when date or strategy selection changes
 @dash.callback(
-    Output('pnl-table', 'data'),
-    Output('pnl-table', 'columns'),
+    Output('pnl-table', 'rowData'),
+    Output('pnl-table', 'columnDefs'),
     Output('pnl-error-message', 'children'),
     Output('pnl-error-message', 'style'),
     Input('pnl-date-dropdown', 'value'),
@@ -537,48 +594,24 @@ def update_pnl_table(selected_date, selected_strategies, n_clicks):
     then filters to the selected strategies, and returns the data to the table
     with thousands separators for numeric columns.
     """
-    # Define error message style (hidden by default)
-    error_style_hidden = {
-        'textAlign': 'center',
-        'color': '#dc2626',
-        'backgroundColor': '#fef2f2',
-        'border': '1px solid #fecaca',
-        'borderRadius': '8px',
-        'padding': '15px',
-        'margin': '10px 0',
-        'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
-        'display': 'none'
-    }
-    
-    # Define error message style (visible)
-    error_style_visible = {
-        'textAlign': 'center',
-        'color': '#dc2626',
-        'backgroundColor': '#fef2f2',
-        'border': '1px solid #fecaca',
-        'borderRadius': '8px',
-        'padding': '15px',
-        'margin': '10px 0',
-        'fontFamily': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
-        'display': 'block'
-    }
-    
+    global _valuation_refresh_key
+    if n_clicks != _valuation_refresh_key:
+        _fetch_pnl_sources_for_date.cache_clear()
+        _valuation_refresh_key = n_clicks
+
     if not selected_date:
-        return [], [], "", error_style_hidden
+        return [], [], "", ERROR_STYLE_HIDDEN
 
     df = fetch_pnl_data(engine, selected_date, selected_strategies)
     if df.empty:
-        error_message = "⚠️ Unable to retrieve PnL data for the selected date. This may be due to database connectivity issues or missing data for this date."
-        return [], [], error_message, error_style_visible
+        error_message = "Unable to retrieve P&L data for the selected date. This may be due to database connectivity issues or missing data for this date."
+        return [], [], error_message, ERROR_STYLE_VISIBLE
 
-    # Convert DataFrame to dash_table-friendly format
-    data_records = df.to_dict('records')
+    data_records = _clean_valuation_records(df)
 
-    # Build columns dynamically, formatting numeric columns with thousand separators
-    # and using friendly column names
-    columns = build_columns_with_numeric_format(df)
+    columns = build_valuation_column_defs(df)
 
-    return data_records, columns, "", error_style_hidden
+    return data_records, columns, "", ERROR_STYLE_HIDDEN
 
 
 # 4.3) Export callback for P&L table
@@ -586,30 +619,29 @@ def update_pnl_table(selected_date, selected_strategies, n_clicks):
     Output("download-pnl-table", "data"),
     Input("export-pnl-table-btn", "n_clicks"),
     [State('pnl-date-dropdown', 'value'),
-     State('pnl-strategy-dropdown', 'value')],
+     State('pnl-table', 'rowData'),
+     State('pnl-table', 'columnDefs')],
     prevent_initial_call=True
 )
-def export_pnl_table(n_clicks, selected_date, selected_strategies):
+def export_pnl_table(n_clicks, selected_date, row_data, column_defs):
     """Export P&L and Option Values Table to Excel"""
     if n_clicks is None or selected_date is None:
         raise dash.exceptions.PreventUpdate
-    
+
     try:
-        # Get the same data as displayed in the table
-        df = fetch_pnl_data(engine, selected_date, selected_strategies)
+        # Export the current AG Grid state to avoid a duplicate DB read.
+        df = _export_df_from_grid_records(row_data, column_defs)
         if df.empty:
             raise dash.exceptions.PreventUpdate
 
         # Rename columns to user-friendly names
         df_renamed = df.rename(columns=COLUMN_NAME_MAPPING)
-        
+
         # Generate filename with timestamp
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
         filename = f"pnl_option_values_table_{selected_date}_{timestamp}.xlsx"
-        
+
         return dcc.send_data_frame(df_renamed.to_excel, filename, sheet_name="P&L and Option Values", index=False)
-        
-    except Exception as e:
-        print(f"Export error: {e}")
+
+    except Exception:
         raise dash.exceptions.PreventUpdate
- 
