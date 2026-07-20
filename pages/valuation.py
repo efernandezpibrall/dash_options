@@ -4,7 +4,7 @@ from dash import html, dcc, Input, Output, State
 import pandas as pd
 import numpy as np
 import configparser
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import os
 from functools import lru_cache
 
@@ -40,6 +40,7 @@ MO_CONNECTION_STRING = (
 engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
 engine_mo = engine if MO_CONNECTION_STRING == DB_CONNECTION_STRING else create_engine(MO_CONNECTION_STRING, pool_pre_ping=True)
 _valuation_refresh_key = None
+_valuation_data_error = None
 
 
 
@@ -69,13 +70,13 @@ def get_strategies(engine, selected_date):
     Return a sorted list of distinct substrategies for the given COB date.
     """
     try:
-        query = f"""
+        query = text("""
         SELECT DISTINCT substrategy
         FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{selected_date}'
+        WHERE cob_date = :selected_date
         ORDER BY substrategy
-        """
-        df_strats = pd.read_sql(query, engine)
+        """)
+        df_strats = pd.read_sql(query, engine, params={'selected_date': selected_date})
         return sorted(df_strats['substrategy'].dropna().unique().tolist())
     except Exception:
         return []
@@ -83,17 +84,17 @@ def get_strategies(engine, selected_date):
 
 def _read_pnl_sources_for_date(selected_date, db_engine):
     try:
-        query = f"""
+        query = text(f"""
                 SELECT
                     substrategy, ytd as ytd_hedging, 'All' as year
                 FROM {DB_SCHEMA}.pnl_aspect
-                WHERE "COB" = '{selected_date}'
-                """
-        df_aspect_pnl = pd.read_sql(query, engine_mo)
+                WHERE "COB" = :selected_date
+                """)
+        df_aspect_pnl = pd.read_sql(query, engine_mo, params={'selected_date': selected_date})
     except Exception:
         df_aspect_pnl = pd.DataFrame()
 
-    query = f"""
+    query = text("""
     SELECT
         unit_quantity,
         substrategy,
@@ -102,9 +103,9 @@ def _read_pnl_sources_for_date(selected_date, db_engine):
         qty_value,qty_intrinsic_value,qty_time_value,qty_premium,qty_pnl,
         quantity
     FROM at_lng.trades_options_valuation
-    WHERE cob_date = '{selected_date}'
-    """
-    df = pd.read_sql(query, db_engine)
+    WHERE cob_date = :selected_date
+    """)
+    df = pd.read_sql(query, db_engine, params={'selected_date': selected_date})
     return df, df_aspect_pnl
 
 
@@ -122,6 +123,8 @@ def fetch_pnl_data(db_engine, selected_date, selected_strategies):
     - Averages for: price, intrinsic_value, time_value
     - Sums for: qty_value, qty_intrinsic_value, qty_time_value
     """
+    global _valuation_data_error
+    _valuation_data_error = None
     try:
         if db_engine is engine:
             df, df_aspect_pnl = _fetch_pnl_sources_for_date(selected_date)
@@ -235,7 +238,8 @@ def fetch_pnl_data(db_engine, selected_date, selected_strategies):
 
         grouped = custom_sort(grouped)
         return grouped
-    except Exception:
+    except Exception as exc:
+        _valuation_data_error = f'P&L query or aggregation failed: {type(exc).__name__}: {exc}'
         return pd.DataFrame()
 
 
@@ -604,7 +608,7 @@ def update_pnl_table(selected_date, selected_strategies, n_clicks):
 
     df = fetch_pnl_data(engine, selected_date, selected_strategies)
     if df.empty:
-        error_message = "Unable to retrieve P&L data for the selected date. This may be due to database connectivity issues or missing data for this date."
+        error_message = _valuation_data_error or "No P&L rows are available for the selected date and strategies."
         return [], [], error_message, ERROR_STYLE_VISIBLE
 
     data_records = _clean_valuation_records(df)

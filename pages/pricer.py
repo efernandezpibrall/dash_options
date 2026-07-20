@@ -1755,7 +1755,7 @@ def update_volatility_chart(n_clicks, option_type, call_put, all_params, all_dat
 
             # Update layout
             fig.update_layout(
-                title=f"Black-76 Option Price vs Volatility",
+                title="Black-76 Option Price vs Volatility",
                 xaxis_title="Volatility (σ)",
                 yaxis_title="Option Price",
                 height=400,
@@ -1855,7 +1855,7 @@ def update_volatility_chart(n_clicks, option_type, call_put, all_params, all_dat
 
             # Update layout
             fig.update_layout(
-                title=f"Kirk Spread Option Price vs Equivalent Volatility",
+                title="Kirk Spread Option Price vs Equivalent Volatility",
                 xaxis_title="Equivalent Volatility (σ_eq)",
                 yaxis_title="Option Price",
                 height=400,
@@ -1966,7 +1966,7 @@ def update_rate_chart(n_clicks, option_type, call_put, all_params, all_dates, al
 
             # Update layout
             fig.update_layout(
-                title=f"Black-76 Option Price vs Risk-Free Rate",
+                title="Black-76 Option Price vs Risk-Free Rate",
                 xaxis_title="Risk-Free Rate (r)",
                 yaxis_title="Option Price",
                 height=400,
@@ -2039,7 +2039,7 @@ def update_rate_chart(n_clicks, option_type, call_put, all_params, all_dates, al
 
             # Update layout
             fig.update_layout(
-                title=f"Kirk Spread Option Price vs Risk-Free Rate",
+                title="Kirk Spread Option Price vs Risk-Free Rate",
                 xaxis_title="Risk-Free Rate (r)",
                 yaxis_title="Option Price",
                 height=400,
@@ -2171,7 +2171,7 @@ def update_time_chart(n_clicks, option_type, call_put, all_params, all_dates, al
                         try:
                             option_results = black_76(call_put, S, K, T, r, v)
                             value = option_results[0]  # First return value is option price
-                        except Exception as e:
+                        except Exception:
                             # Fallback to intrinsic value
                             if call_put == "C":
                                 value = max(0, S - K)
@@ -2316,7 +2316,7 @@ def update_time_chart(n_clicks, option_type, call_put, all_params, all_dates, al
                             value = kirk_model_with_substitution(
                                 S1, S2, K_spread, v1, v2, rho, T, call_put_expanded
                             )
-                        except Exception as e:
+                        except Exception:
                             # Fallback to intrinsic value
                             if call_put == "C":
                                 value = max(0, S1 - S2 - K_spread)
@@ -2514,7 +2514,7 @@ def update_extension_chart(n_clicks, option_type, call_put, all_params, all_date
             # Format dates for x-axis
             dates_formatted = [d.strftime('%Y-%m-%d') for d in expiration_dates]
 
-        except Exception as e:
+        except Exception:
             # Fallback to basic date range
             expiration_dates = [
                 today + timedelta(days=7),  # 1 week
@@ -2563,7 +2563,7 @@ def update_extension_chart(n_clicks, option_type, call_put, all_params, all_date
                         try:
                             option_results = black_76(call_put, S, K, T, r, v)
                             value = option_results[0]  # First return value is option price
-                        except Exception as e:
+                        except Exception:
                             # Fallback to intrinsic value
                             if call_put == "C":
                                 value = max(0, S - K)
@@ -2713,7 +2713,7 @@ def update_extension_chart(n_clicks, option_type, call_put, all_params, all_date
                             value = kirk_model_with_substitution(
                                 S1, S2, K_spread, v1, v2, rho, T, call_put_expanded
                             )
-                        except Exception as e:
+                        except Exception:
                             # Fallback to intrinsic value
                             if call_put == "C":
                                 value = max(0, S1 - S2 - K_spread)
@@ -2923,7 +2923,7 @@ def update_correlation_chart(n_clicks, option_type, call_put, all_params, all_da
                     )
                     option_values.append(value)
                     valid_correlations.append(rho)
-                except Exception as e:
+                except Exception:
                     # Skip this correlation value if calculation fails
                     continue
 

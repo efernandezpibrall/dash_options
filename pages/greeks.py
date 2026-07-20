@@ -1,7 +1,11 @@
 # pages/greeks.py
 import configparser
+import hashlib
 import io
+import json
 import os
+import threading
+from collections import OrderedDict
 from functools import lru_cache
 
 import dash
@@ -32,6 +36,10 @@ if not DB_CONNECTION_STRING:
 engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
 
 VALUATION_TABLE = f'{DB_SCHEMA}.trades_options_valuation'
+_GREEKS_SERVER_CACHE = OrderedDict()
+_GREEKS_SERVER_CACHE_LOCK = threading.Lock()
+_GREEKS_SERVER_CACHE_MAX_ENTRIES = 32
+_GREEKS_SERVER_CACHE_GENERATION = 0
 
 GREEK_DEFINITIONS = {
     'delta': {
@@ -137,6 +145,50 @@ def _empty_store(message='No data available'):
         },
         'rows': [],
     }
+
+
+def _greeks_cache_key(namespace, parts):
+    payload = json.dumps(
+        {
+            'namespace': namespace,
+            'generation': _GREEKS_SERVER_CACHE_GENERATION,
+            'parts': parts,
+        },
+        sort_keys=True,
+        default=str,
+        separators=(',', ':'),
+    )
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _cache_greeks_payload(payload, namespace, parts):
+    cache_key = _greeks_cache_key(namespace, parts)
+    with _GREEKS_SERVER_CACHE_LOCK:
+        _GREEKS_SERVER_CACHE[cache_key] = payload
+        _GREEKS_SERVER_CACHE.move_to_end(cache_key)
+        while len(_GREEKS_SERVER_CACHE) > _GREEKS_SERVER_CACHE_MAX_ENTRIES:
+            _GREEKS_SERVER_CACHE.popitem(last=False)
+    return {'cache_key': cache_key, 'meta': payload.get('meta', {})}
+
+
+def _resolve_greeks_payload(reference):
+    if not reference:
+        return _empty_store('No data available')
+    if 'rows' in reference:
+        return reference
+    cache_key = reference.get('cache_key')
+    with _GREEKS_SERVER_CACHE_LOCK:
+        payload = _GREEKS_SERVER_CACHE.get(cache_key)
+        if payload is not None:
+            _GREEKS_SERVER_CACHE.move_to_end(cache_key)
+    return payload if payload is not None else _empty_store('Server snapshot expired; refresh the page')
+
+
+def _clear_greeks_server_cache():
+    global _GREEKS_SERVER_CACHE_GENERATION
+    with _GREEKS_SERVER_CACHE_LOCK:
+        _GREEKS_SERVER_CACHE_GENERATION += 1
+        _GREEKS_SERVER_CACHE.clear()
 
 
 def _safe_number(value, default=0.0):
@@ -1560,6 +1612,7 @@ def trigger_data_refresh(n_clicks):
     if n_clicks:
         _fetch_options_data_cached.cache_clear()
         fetch_instrument_unit_map.cache_clear()
+        _clear_greeks_server_cache()
         return {'timestamp': pd.Timestamp.now().isoformat(), 'refresh_count': n_clicks}
     return dash.no_update
 
@@ -1764,28 +1817,6 @@ def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, 
     return {'meta': meta, 'rows': normalized.to_dict('records')}
 
 
-def process_current_greeks(
-    selected_date,
-    selected_strategies,
-    selected_trade_types,
-    selected_buckets,
-    aggregation,
-    month_through,
-    quarter_through,
-    unit_mode,
-    refresh_trigger=None,
-):
-    del refresh_trigger
-    base_store = _build_unfiltered_greeks_store(
-        selected_date,
-        aggregation,
-        month_through,
-        quarter_through,
-        unit_mode,
-    )
-    return _filter_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets)
-
-
 @callback(
     Output('greeks-unfiltered-normalized-store', 'data'),
     Input('date-selector', 'value'),
@@ -1804,12 +1835,17 @@ def update_unfiltered_greeks_store(
     refresh_trigger,
 ):
     del refresh_trigger
-    return _build_unfiltered_greeks_store(
+    payload = _build_unfiltered_greeks_store(
         selected_date,
         aggregation,
         month_through,
         quarter_through,
         unit_mode,
+    )
+    return _cache_greeks_payload(
+        payload,
+        'unfiltered',
+        [selected_date, aggregation, month_through, quarter_through, unit_mode],
     )
 
 
@@ -1821,7 +1857,23 @@ def update_unfiltered_greeks_store(
     Input('risk-bucket-selector', 'value'),
 )
 def update_filtered_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets):
-    return _filter_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets)
+    base_payload = _resolve_greeks_payload(base_store)
+    filtered_payload = _filter_greeks_store(
+        base_payload,
+        selected_strategies,
+        selected_trade_types,
+        selected_buckets,
+    )
+    return _cache_greeks_payload(
+        filtered_payload,
+        'filtered',
+        [
+            (base_store or {}).get('cache_key'),
+            sorted(selected_strategies or []),
+            sorted(selected_trade_types or []),
+            sorted(selected_buckets or []),
+        ],
+    )
 
 
 @callback(
@@ -1832,12 +1884,13 @@ def update_filtered_greeks_store(base_store, selected_strategies, selected_trade
     Input('greeks-normalized-store', 'data'),
 )
 def update_monitor_tables(store_data):
-    if not store_data or not store_data.get('rows'):
+    payload = _resolve_greeks_payload(store_data)
+    if not payload.get('rows'):
         empty = html.Div('No data for the current selection.', className='greeks-empty-state')
         return empty, empty, empty, []
 
-    rows = pd.DataFrame(store_data['rows'])
-    meta = store_data.get('meta', {})
+    rows = pd.DataFrame(payload['rows'])
+    meta = payload.get('meta', {})
     tables = build_display_tables(rows)
 
     return (
@@ -1855,12 +1908,13 @@ def update_monitor_tables(store_data):
     prevent_initial_call=True,
 )
 def export_greeks_workbook(n_clicks, store_data):
-    if not n_clicks or not store_data or not store_data.get('rows'):
+    payload = _resolve_greeks_payload(store_data)
+    if not n_clicks or not payload.get('rows'):
         return dash.no_update
 
-    rows = pd.DataFrame(store_data['rows'])
+    rows = pd.DataFrame(payload['rows'])
     tables = build_output_tables(rows)
-    cob_date = store_data.get('meta', {}).get('cob_date') or pd.Timestamp.now().strftime('%Y-%m-%d')
+    cob_date = payload.get('meta', {}).get('cob_date') or pd.Timestamp.now().strftime('%Y-%m-%d')
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:

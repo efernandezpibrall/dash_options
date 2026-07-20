@@ -5,7 +5,7 @@ import io
 import pandas as pd
 import numpy as np
 import configparser
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import os
 
 #------ code to be able to access config.ini, even having the path in the .virtualenvs is not working without it ------#
@@ -31,6 +31,7 @@ DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng')
 #Default DBAPI (should use psycopg2 as default, pg8000 it's an alternative but we don't have the library installed)
 # create engine
 engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
+_trades_data_error = None
 
 
 # ------------------------------------------------------------------
@@ -59,13 +60,13 @@ def get_strategies(engine, selected_date):
     Return a sorted list of distinct substrategies for the given COB date.
     """
     try:
-        query = f"""
+        query = text("""
         SELECT DISTINCT substrategy
         FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{selected_date}'
+        WHERE cob_date = :selected_date
         ORDER BY substrategy
-        """
-        df_strats = pd.read_sql(query, engine)
+        """)
+        df_strats = pd.read_sql(query, engine, params={'selected_date': selected_date})
         return sorted(df_strats['substrategy'].dropna().unique().tolist())
     except Exception:
         return []
@@ -85,9 +86,11 @@ def fetch_trades_data(engine, selected_date, selected_strategies):
     - qty_time_value: sum
     - qty_pnl: sum
     """
+    global _trades_data_error
+    _trades_data_error = None
     try:
         # Base query for the date (main data)
-        query = f"""
+        query = text("""
         SELECT
             substrategy,
             type_option,
@@ -113,9 +116,9 @@ def fetch_trades_data(engine, selected_date, selected_strategies):
             qty_time_value,
             qty_pnl
         FROM at_lng.trades_options_valuation
-        WHERE cob_date = '{selected_date}'
-        """
-        df = pd.read_sql(query, engine)
+        WHERE cob_date = :selected_date
+        """)
+        df = pd.read_sql(query, engine, params={'selected_date': selected_date})
         if df.empty:
             return pd.DataFrame()
 
@@ -155,7 +158,8 @@ def fetch_trades_data(engine, selected_date, selected_strategies):
         grouped = grouped.sort_values(['substrategy', 'type_option', 'put_call', 'asset_a', 'asset_b', 'strike', 'expiration_date'])
         
         return grouped
-    except Exception:
+    except Exception as exc:
+        _trades_data_error = f'Trades query or aggregation failed: {type(exc).__name__}: {exc}'
         return pd.DataFrame()
 
 
@@ -609,7 +613,7 @@ def update_trades_data_store(selected_date, selected_strategies, n_clicks):
 
     df = fetch_trades_data(engine, selected_date, selected_strategies)
     if df.empty:
-        error_message = "Unable to retrieve trades data for the selected date. This may be due to database connectivity issues or missing data for this date."
+        error_message = _trades_data_error or "No trades are available for the selected date and strategies."
         return {'data': None, 'error': error_message, 'error_visible': True}
 
     # Format expiration_date to show only date part (remove time)

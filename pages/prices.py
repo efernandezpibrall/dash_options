@@ -77,14 +77,25 @@ def _normalize_enverus_prices(df):
 
 
 def get_enverus_underlying_prices(from_COB, to_COB):
-    """Load all underlying prices from transformed.enverus.curve only."""
+    """Load only the five most recent curve COBs in the requested window."""
     postgres_from_cob = datetime.datetime.strptime(str(from_COB), "%Y%m%d").date()
     postgres_to_cob = datetime.datetime.strptime(str(to_COB), "%Y%m%d").date()
     codes = [source['code'] for source in ENVERUS_UNDERLYING_SOURCES.values()]
     categories = sorted({source['category'] for source in ENVERUS_UNDERLYING_SOURCES.values()})
     versions = sorted({source['version_name'] for source in ENVERUS_UNDERLYING_SOURCES.values()})
 
-    trino_query = '''SELECT   code,
+    trino_query = '''WITH selected_dates AS (
+                        SELECT DISTINCT ondate_index
+                        FROM enverus.curve
+                        WHERE code IN ({})
+                            AND category IN ({})
+                            AND version_name IN ({})
+                            AND ondate_index >= {}
+                            AND ondate_index <= {}
+                        ORDER BY ondate_index DESC
+                        LIMIT 5
+                    )
+                    SELECT   code,
                         ondate AS COB,
                         currency,
                         units,
@@ -97,6 +108,7 @@ def get_enverus_underlying_prices(from_COB, to_COB):
                             AND version_name IN ({})
                             AND ondate_index >= {}
                             AND ondate_index <= {}
+                            AND ondate_index IN (SELECT ondate_index FROM selected_dates)
                             AND forward_curve_tenors_absolute NOT IN ('M-1','M-2','M-3')
                             AND forward_curve_tenors_value is not null
                         ORDER BY ondate, forward_curve_tenors_tenor
@@ -106,9 +118,23 @@ def get_enverus_underlying_prices(from_COB, to_COB):
                                 _sql_in_literal(versions),
                                 int(from_COB),
                                 int(to_COB),
+                                _sql_in_literal(codes),
+                                _sql_in_literal(categories),
+                                _sql_in_literal(versions),
+                                int(from_COB),
+                                int(to_COB),
                             )
     postgres_query = text(
         f'''
+        WITH selected_dates AS (
+            SELECT DISTINCT cob
+            FROM {fq_table(DB_SCHEMA, 'curve')}
+            WHERE code = ANY(:codes)
+              AND cob >= :from_cob
+              AND cob <= :to_cob
+            ORDER BY cob DESC
+            LIMIT 5
+        )
         SELECT  code,
                 cob AS "COB",
                 currency,
@@ -120,6 +146,7 @@ def get_enverus_underlying_prices(from_COB, to_COB):
         WHERE code = ANY(:codes)
           AND cob >= :from_cob
           AND cob <= :to_cob
+          AND cob IN (SELECT cob FROM selected_dates)
           AND contract NOT IN ('M-1','M-2','M-3')
           AND value IS NOT NULL
         ORDER BY cob, expiry

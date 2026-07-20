@@ -4,6 +4,7 @@ import os
 from dash import html, dcc, clientside_callback
 from dash.dependencies import Input, Output
 from app import app
+from source_status import load_dashboard_source_statuses, summarize_alignment
 
 import pages.greeks
 import pages.valuation
@@ -13,6 +14,9 @@ import pages.prices
 import pages.slopes
 import pages.spreads
 import pages.pricer
+import pages.correlations
+import pages.scenarios
+import pages.pnl_explain
 
 # Professional Navigation Bar - Options Dashboard
 nav_links = html.Header([
@@ -32,6 +36,9 @@ nav_links = html.Header([
                 dcc.Link('Slopes', href='/slopes', className='nav-link-secondary'),
                 dcc.Link('Spreads', href='/spreads', className='nav-link-secondary'),
                 dcc.Link('Pricer', href='/pricer', className='nav-link-secondary'),
+                dcc.Link('Correlations', href='/correlations', className='nav-link-secondary'),
+                dcc.Link('Scenarios', href='/scenarios', className='nav-link-secondary'),
+                dcc.Link('P&L Explain', href='/pnl_explain', className='nav-link-secondary'),
             ], className='nav-group-secondary')
         ], className='main-navigation'),
         
@@ -45,8 +52,49 @@ nav_links = html.Header([
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
     nav_links,
+    html.Div(id='dashboard-source-status-banner', className='dashboard-source-status-banner'),
     html.Div(id='page-content')
 ])
+
+
+@app.callback(
+    Output('dashboard-source-status-banner', 'children'),
+    Input('url', 'pathname'),
+    Input('refresh-options-data', 'n_clicks'),
+)
+def update_dashboard_source_status(pathname, refresh_clicks):
+    del pathname, refresh_clicks
+    statuses = load_dashboard_source_statuses()
+    alignment = summarize_alignment(statuses)
+    chips = []
+    for status in statuses:
+        if status.get('error'):
+            detail = 'unavailable'
+        elif status.get('latest_cob'):
+            age = status.get('business_day_age')
+            detail = f"{status['latest_cob']} · {age}bd old"
+        else:
+            detail = 'no COB'
+        chips.append(
+            html.Span(
+                [html.Strong(f"{status['label']}: "), detail],
+                className='dashboard-source-status-chip',
+                title=status.get('source'),
+            )
+        )
+
+    if alignment['error_labels']:
+        headline = 'Source unavailable'
+    elif alignment['misaligned']:
+        headline = 'COB mismatch — comparisons may mix market dates'
+    elif alignment['stale_labels']:
+        headline = 'Stale market data'
+    else:
+        headline = 'Sources aligned'
+    return html.Div(
+        [html.Span(headline, className='dashboard-source-status-headline'), *chips],
+        className=f"dashboard-source-status-content dashboard-source-status-{alignment['tone']}",
+    )
 
 # Callback to handle page routing
 @app.callback(Output('page-content', 'children'),
@@ -70,6 +118,12 @@ def display_page(pathname):
         return pages.spreads.layout
     elif pathname == '/pricer':
         return pages.pricer.layout
+    elif pathname == '/correlations':
+        return pages.correlations.layout
+    elif pathname == '/scenarios':
+        return pages.scenarios.layout
+    elif pathname == '/pnl_explain':
+        return pages.pnl_explain.layout
     else:
         return '404 - Page not found'
 
@@ -95,7 +149,10 @@ clientside_callback(
                 '/prices': 'Underlying Prices',
                 '/slopes': 'Slopes',
                 '/spreads': 'Spreads',
-                '/pricer': 'Pricer'
+                '/pricer': 'Pricer',
+                '/correlations': 'Correlations',
+                '/scenarios': 'Scenarios',
+                '/pnl_explain': 'P&L Explain'
             };
             
             if (linkMap[pathname]) {

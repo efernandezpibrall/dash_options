@@ -1,4 +1,5 @@
 import json
+import threading
 
 import dash_ag_grid as dag
 from dash import html, dcc
@@ -23,6 +24,9 @@ ENVERUS_CODE_TO_SPREAD_CONTRACT = {
     source['code']: source['contract']
     for source in ENVERUS_SPREAD_SOURCES.values()
 }
+_SPREADS_DATA_LOCK = threading.Lock()
+_spreads_data_cache = {}
+_spreads_refresh_generation = 0
 
 
 def _sql_in_literal(values):
@@ -70,11 +74,21 @@ def _normalize_enverus_spreads(df):
 
 
 # Function to load and process data
-def load_and_process_data():
+def _spread_history_query_start(end_date, history_range):
+    offsets = {
+        '3M': pd.DateOffset(months=3),
+        '6M': pd.DateOffset(months=6),
+        '1Y': pd.DateOffset(years=1),
+        'ALL': pd.DateOffset(years=4),
+    }
+    return pd.Timestamp(end_date) - offsets.get(history_range or '3M', offsets['3M'])
+
+
+def load_and_process_data(history_range='3M'):
     """Load TFU and HH spread inputs from transformed.enverus.curve."""
     try:
         end_date = datetime.datetime.now()
-        start_date = end_date - datetime.timedelta(days=365 * 4)
+        start_date = _spread_history_query_start(end_date, history_range).to_pydatetime()
         from_cob = int(start_date.strftime('%Y%m%d'))
         to_cob = int(end_date.strftime('%Y%m%d'))
         postgres_from_cob = start_date.date()
@@ -148,21 +162,25 @@ def load_and_process_data():
 df_spreads = pd.DataFrame()
 
 
-def get_previous_business_date():
-    """Get the previous business date (excluding weekends)"""
-    today = pd.Timestamp.now()
+def _invalidate_spreads_data():
+    global df_spreads, _spreads_refresh_generation
+    with _SPREADS_DATA_LOCK:
+        _spreads_refresh_generation += 1
+        _spreads_data_cache.clear()
+        df_spreads = pd.DataFrame()
 
-    # If today is Monday, go back to Friday
-    if today.weekday() == 0:  # Monday
-        prev_date = today - pd.Timedelta(days=3)
-    # If today is Sunday, go back to Friday
-    elif today.weekday() == 6:  # Sunday
-        prev_date = today - pd.Timedelta(days=2)
-    # Otherwise, go back one day
-    else:
-        prev_date = today - pd.Timedelta(days=1)
 
-    return prev_date.strftime('%Y-%m-%d')
+def _ensure_spreads_data(history_range='3M'):
+    global df_spreads
+    history_range = history_range or '3M'
+    with _SPREADS_DATA_LOCK:
+        cache_key = (history_range, _spreads_refresh_generation)
+        cached = _spreads_data_cache.get(cache_key)
+        if cached is None:
+            cached = load_and_process_data(history_range=history_range)
+            _spreads_data_cache[cache_key] = cached
+        df_spreads = cached
+        return cached
 
 
 def _ensure_spread_delivery_strip(data):
@@ -517,7 +535,7 @@ def _previous_available_trade_date(df):
         return pd.Timestamp(dates[-2]).strftime('%Y-%m-%d')
     if len(dates) == 1:
         return pd.Timestamp(dates[0]).strftime('%Y-%m-%d')
-    return get_previous_business_date()
+    return None
 
 
 def _resolve_comparison_date(spread_data, comparison_date, latest_date):
@@ -847,8 +865,8 @@ layout = html.Div(
 )
 def refresh_spread_data(n_clicks):
     """Reload spread data from database"""
-    global df_spreads
-    df_spreads = load_and_process_data()
+    if n_clicks:
+        _invalidate_spreads_data()
     return n_clicks if n_clicks else 0
 
 
@@ -860,12 +878,8 @@ def refresh_spread_data(n_clicks):
 )
 def init_spread_comparison_date(trigger):
     """Initialize comparison date to the previous available spread COB."""
-    global df_spreads
-
-    if df_spreads.empty:
-        df_spreads = load_and_process_data()
-
-    return _previous_available_trade_date(df_spreads)
+    del trigger
+    return _previous_available_trade_date(_ensure_spreads_data('3M'))
 
 
 def _build_spread_chart_from_store(spread_store, history_range, grouping_mode):
@@ -974,24 +988,29 @@ def _build_spread_chart_from_store(spread_store, history_range, grouping_mode):
      Input('hh-multiplier-input', 'value'),
      Input('hh-premium-input', 'value'),
      Input('tfu-discount-input', 'value'),
+     Input('spread-history-range-selector', 'value'),
      Input('spread-refresh-trigger', 'data')],
     prevent_initial_call=False
 )
-def update_spread_data_store(grouping_mode, hh_multiplier, hh_premium, tfu_discount, refresh_trigger):
+def update_spread_data_store(
+    grouping_mode,
+    hh_multiplier,
+    hh_premium,
+    tfu_discount,
+    history_range,
+    refresh_trigger,
+):
     """Update calculated spread data based on parameters."""
-    global df_spreads
-
     # Handle None values
     grouping_mode = grouping_mode or 'calendar'
     hh_multiplier = hh_multiplier if hh_multiplier is not None else 1.0
     hh_premium = hh_premium if hh_premium is not None else 0
     tfu_discount = tfu_discount if tfu_discount is not None else 0
 
-    # Load data if not already loaded
-    if df_spreads.empty:
-        df_spreads = load_and_process_data()
+    del refresh_trigger
+    spread_source_data = _ensure_spreads_data(history_range or '3M')
 
-    if df_spreads.empty:
+    if spread_source_data.empty:
         return {
             'error': 'No data available. Please refresh data.',
             'tone': 'danger',
@@ -999,7 +1018,7 @@ def update_spread_data_store(grouping_mode, hh_multiplier, hh_premium, tfu_disco
 
     # Calculate spread data
     spread_data = calculate_spread_data(
-        df_spreads,
+        spread_source_data,
         grouping_mode,
         hh_multiplier,
         hh_premium,

@@ -12,8 +12,8 @@ from db_fallback import DB_SCHEMA, fq_table, read_with_fallback, sql_literal
 
 
 _SLOPES_DATA_LOCK = threading.Lock()
-_slopes_data_loaded = False
-_slopes_data_refresh_key = None
+_slopes_data_cache = {}
+_slopes_refresh_generation = 0
 
 ENVERUS_SLOPE_SOURCES = {
     'JKM': {'code': 'ICE_JKM_MO', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
@@ -71,11 +71,21 @@ def _normalize_enverus_slopes(df):
 
 
 # Function to load and process data
-def load_and_process_data():
+def _history_query_start(end_date, history_range):
+    offsets = {
+        '3M': pd.DateOffset(months=3),
+        '6M': pd.DateOffset(months=6),
+        '1Y': pd.DateOffset(years=1),
+        'ALL': pd.DateOffset(years=4),
+    }
+    return pd.Timestamp(end_date) - offsets.get(history_range or '3M', offsets['3M'])
+
+
+def load_and_process_data(history_range='3M'):
     """Load JKM and Brent slope inputs from transformed.enverus.curve only."""
     try:
         end_date = datetime.datetime.now()
-        start_date = end_date - datetime.timedelta(days=365 * 4)
+        start_date = _history_query_start(end_date, history_range).to_pydatetime()
         from_cob = int(start_date.strftime('%Y%m%d'))
         to_cob = int(end_date.strftime('%Y%m%d'))
         postgres_from_cob = start_date.date()
@@ -144,7 +154,7 @@ def load_and_process_data():
 
         return df_options
 
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()  # Return empty DataFrame on error
 
 
@@ -152,34 +162,54 @@ def load_and_process_data():
 df_options = pd.DataFrame()
 
 
-def _ensure_slopes_data(force=False, refresh_key=None):
-    global df_options, _slopes_data_loaded, _slopes_data_refresh_key
+def _invalidate_slopes_data():
+    global df_options, _slopes_refresh_generation
     with _SLOPES_DATA_LOCK:
-        should_reload = not _slopes_data_loaded or df_options.empty
-        if force:
-            should_reload = refresh_key is None or refresh_key != _slopes_data_refresh_key
-
-        if should_reload:
-            df_options = load_and_process_data()
-            _slopes_data_loaded = True
-            if force:
-                _slopes_data_refresh_key = refresh_key
-
-    return df_options
+        _slopes_refresh_generation += 1
+        _slopes_data_cache.clear()
+        df_options = pd.DataFrame()
 
 
-def get_previous_business_date():
-    """Get the previous business date (excluding weekends)"""
-    today = pd.Timestamp.now()
+def _ensure_slopes_data(history_range='3M'):
+    global df_options
+    history_range = history_range or '3M'
+    with _SLOPES_DATA_LOCK:
+        cache_key = (history_range, _slopes_refresh_generation)
+        cached = _slopes_data_cache.get(cache_key)
+        if cached is None:
+            cached = load_and_process_data(history_range=history_range)
+            _slopes_data_cache[cache_key] = cached
+        df_options = cached
+        return cached
 
-    # If today is Monday, go back to Friday
-    if today.weekday() == 0:  # Monday
-        prev_date = today - pd.Timedelta(days=4)
-    # Otherwise, go back one day
-    else:
-        prev_date = today - pd.Timedelta(days=2)
 
-    return prev_date.strftime('%Y-%m-%d')
+def _normalize_slope_trade_dates(df):
+    if df is None or df.empty or 'trade_date' not in df.columns:
+        return pd.Series(dtype='datetime64[ns]')
+    return pd.to_datetime(df['trade_date'], errors='coerce').dt.normalize().dropna()
+
+
+def get_previous_available_date(df):
+    dates = sorted(_normalize_slope_trade_dates(df).drop_duplicates())
+    if len(dates) >= 2:
+        return pd.Timestamp(dates[-2]).strftime('%Y-%m-%d')
+    if len(dates) == 1:
+        return pd.Timestamp(dates[0]).strftime('%Y-%m-%d')
+    return None
+
+
+def _resolve_slope_comparison_date(slope_data, comparison_date, latest_date):
+    target = pd.to_datetime(comparison_date, errors='coerce')
+    latest = pd.to_datetime(latest_date, errors='coerce')
+    if pd.isna(target) or pd.isna(latest):
+        return None
+    dates = sorted(_normalize_slope_trade_dates(slope_data).drop_duplicates())
+    candidates = [
+        pd.Timestamp(value)
+        for value in dates
+        if pd.Timestamp(value) <= target.normalize() and pd.Timestamp(value) < latest.normalize()
+    ]
+    return max(candidates) if candidates else None
 
 
 SLOPES_CHART_FONT = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
@@ -690,12 +720,9 @@ layout = html.Div(
 )
 def refresh_data_and_ui(n_clicks):
     """Refresh data and update UI elements"""
-    try:
-        _ensure_slopes_data(force=bool(n_clicks), refresh_key=n_clicks)
-        return n_clicks or 0
-
-    except Exception as e:
-        return n_clicks or 0
+    if n_clicks:
+        _invalidate_slopes_data()
+    return n_clicks or 0
 
 
 # Initialize comparison date picker (previous business date)
@@ -705,7 +732,8 @@ def refresh_data_and_ui(n_clicks):
     prevent_initial_call=False
 )
 def init_slope_comparison_date(refresh_trigger):
-    return get_previous_business_date()
+    del refresh_trigger
+    return get_previous_available_date(_ensure_slopes_data('3M'))
 
 
 # Toggle custom Brent inputs visibility
@@ -1015,7 +1043,7 @@ def calculate_rolling_contracts(slope_data, grouping_mode, num_periods=5):
 
         return df
 
-    except Exception as e:
+    except Exception:
         return slope_data  # Return original data on error
 
 # ============================================================================
@@ -1074,7 +1102,7 @@ def slope_group_data_by_period(data, grouping_mode):
         data['period'] = data['maturity_date'].dt.strftime('%b-%y')
         return data
 
-    except Exception as e:
+    except Exception:
         if 'period' not in data.columns:
             data['period'] = 'unknown'
         return data
@@ -1293,7 +1321,7 @@ def generate_brent_index_on_demand(df_combined, brent_contract, df_grouped_jkm):
 
         return result[['trade_date', 'product', 'contract', 'strip', 'maturity_date', 'settlement_price', 'contract_type', 'expiration_date']]
 
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 def slope_calculate_slope_data(df, grouping_mode, jkm_discount=0, brent_contract='Brent'):
@@ -1379,7 +1407,7 @@ def slope_calculate_slope_data(df, grouping_mode, jkm_discount=0, brent_contract
 
         return merged[['trade_date', 'strip', 'slope_percentage', 'slope_name', 'jkm_price', 'brent_price']]
 
-    except Exception as e:
+    except Exception:
         return pd.DataFrame()
 
 
@@ -1505,6 +1533,7 @@ def _build_slope_graphs_from_store(data_store, selected_slopes, history_range):
      Input('selected-brent-config', 'data'),
      Input('view-mode-dropdown', 'value'),
      Input('rolling-periods-input', 'value'),
+     Input('slope-history-range-selector', 'value'),
      Input('refresh-trigger', 'data')],
     prevent_initial_call=True
 )
@@ -1515,13 +1544,14 @@ def update_slope_data_store(
     brent_contract,
     view_mode,
     num_rolling_periods,
+    history_range,
     refresh_trigger,
 ):
     try:
         if not selected_slopes:
             return None
 
-        slope_source_data = _ensure_slopes_data()
+        slope_source_data = _ensure_slopes_data(history_range or '3M')
         if slope_source_data is None or slope_source_data.empty:
             return {
                 'error': "No data available. Please click Refresh to load data.",
@@ -1554,7 +1584,11 @@ def update_slope_data_store(
             'grouping_mode': grouping_mode,
             'brent_contract': brent_contract,
             'jkm_discount': jkm_discount or 0,
-            'view_mode': view_mode
+            'view_mode': view_mode,
+            'history_range': history_range or '3M',
+            'source_rows': len(slope_source_data),
+            'source_start': pd.to_datetime(slope_source_data['trade_date']).min().strftime('%Y-%m-%d'),
+            'source_end': pd.to_datetime(slope_source_data['trade_date']).max().strftime('%Y-%m-%d'),
         }
 
         return data_to_store
@@ -1615,20 +1649,18 @@ def update_slope_tables(data_store, comparison_date, selected_slopes, jkm_discou
 
             # Get comparison data if comparison date is provided
             comparison_data = pd.DataFrame()
+            resolved_comparison_date = None
             if comparison_date:
-                comparison_date_dt = pd.to_datetime(comparison_date)
-
-                # Find closest date to comparison date for each strip
-                comparison_rows = []
-                for strip in slope_data['strip'].unique():
-                    strip_data = slope_data[slope_data['strip'] == strip]
-                    # Find the closest trade date to comparison date
-                    closest_idx = (strip_data['trade_date'] - comparison_date_dt).abs().idxmin()
-                    if closest_idx in strip_data.index:
-                        comparison_rows.append(strip_data.loc[closest_idx])
-
-                if comparison_rows:
-                    comparison_data = pd.DataFrame(comparison_rows)
+                latest_trade_date = pd.Timestamp(slope_data['trade_date'].max()).normalize()
+                resolved_comparison_date = _resolve_slope_comparison_date(
+                    slope_data,
+                    comparison_date,
+                    latest_trade_date,
+                )
+                if resolved_comparison_date is not None:
+                    comparison_data = slope_data[
+                        slope_data['trade_date'].dt.normalize() == resolved_comparison_date
+                    ].copy()
 
             # Create table showing latest slopes by strip
             table_data = latest_data[['strip', 'trade_date', 'slope_percentage', 'jkm_price', 'brent_price']].copy()
@@ -1639,6 +1671,7 @@ def update_slope_tables(data_store, comparison_date, selected_slopes, jkm_discou
             if not comparison_data.empty:
                 # Merge comparison data
                 comparison_summary = comparison_data[['strip', 'slope_percentage', 'trade_date']].copy()
+                comparison_summary = comparison_summary.drop_duplicates('strip', keep='last')
                 comparison_summary.columns = ['strip', 'comparison_slope', 'comparison_date']
                 comparison_summary['comparison_date'] = pd.to_datetime(
                     comparison_summary['comparison_date']).dt.strftime('%Y-%m-%d')
@@ -1678,15 +1711,20 @@ def update_slope_tables(data_store, comparison_date, selected_slopes, jkm_discou
 
             # Build table title with view mode
             view_label = "Rolling Contract" if view_mode == 'rolling' else "Strip"
-            table_title = f"Latest Slope Data by {view_label}" + (f" (vs {comparison_date})" if comparison_date else "")
+            comparison_label = (
+                resolved_comparison_date.strftime('%Y-%m-%d')
+                if resolved_comparison_date is not None
+                else None
+            )
+            table_title = f"Latest Slope Data by {view_label}" + (f" (vs {comparison_label})" if comparison_label else "")
 
             grid = _build_slope_grid(columns, _clean_ag_grid_records(table_data), 'slopes-latest-grid')
             chips = [
                 _build_slope_chip('Rows', len(table_data), 'primary'),
                 _build_slope_chip('Mode', view_label),
             ]
-            if comparison_date:
-                chips.append(_build_slope_chip('Compare', comparison_date))
+            if comparison_label:
+                chips.append(_build_slope_chip('Compare', comparison_label))
 
             return _build_slope_table_panel(table_title, grid, [chip for chip in chips if chip])
 
@@ -1795,7 +1833,7 @@ def download_slope_data(n_clicks, data_store):
 
         return dcc.send_bytes(output.getvalue(), filename)
 
-    except Exception as e:
+    except Exception:
         return None
 
 
