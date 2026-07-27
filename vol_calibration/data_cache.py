@@ -195,8 +195,11 @@ def _date_key(trade_date, default_date_factory: Callable[[], date]) -> str:
 
 
 def _is_degraded_callback_result(value) -> bool:
-    tooltip = value[-1] if isinstance(value, (list, tuple)) and value else ""
-    return "synthetic" in str(tooltip).casefold()
+    rendered = str(value).casefold()
+    return any(
+        marker in rendered
+        for marker in ("synthetic", "unavailable", "calibration blocked", "no exact-cob")
+    )
 
 
 def _triggered_id():
@@ -214,7 +217,7 @@ def cached_workspace_callback(
     fingerprint_factory: Callable[[], str] = source_config_fingerprint,
     triggered_id_factory: Callable[[], object] = _triggered_id,
 ):
-    """Cache an existing four-output page loader by product/date/source config."""
+    """Cache an existing page loader by product/date/source configuration."""
 
     def decorator(loader):
         @wraps(loader)

@@ -34,6 +34,12 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.feature_flags import writes_enabled
+from vol_calibration.calibration_inputs import (
+    UNDISCOUNTED_CALL_DELTA,
+    calibration_eligibility_error,
+    calibration_readiness,
+    select_expiry_observations,
+)
 from vol_calibration.model_version import (
     DEFAULT_CALIBRATION_MODEL_VERSION,
     calibrate_v2 as calibrate,
@@ -57,6 +63,17 @@ from options.calibration_engine.io.storage import (
 
 COMMODITY = 'TTF'
 COMMODITY_LOWER = COMMODITY.lower()
+
+
+def _calibration_blocked_status(message):
+    return dbc.Alert(
+        [
+            html.Strong("Calibration blocked: "),
+            str(message),
+        ],
+        color="danger",
+        className="mb-0 py-1 px-2",
+    )
 
 
 def get_default_date():
@@ -224,7 +241,11 @@ layout = dbc.Container([
     [Output(f'{COMMODITY_LOWER}-market-data-store', 'data'),
      Output(f'{COMMODITY_LOWER}-params-store', 'data'),
      Output(f'{COMMODITY_LOWER}-data-status', 'children'),
-     Output(f'{COMMODITY_LOWER}-data-status-tooltip', 'children')],
+     Output(f'{COMMODITY_LOWER}-data-status-tooltip', 'children'),
+     Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'title'),
+     Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'title')],
     [Input(f'{COMMODITY_LOWER}-date-picker', 'date'),
      Input(f'{COMMODITY_LOWER}-reload-btn', 'n_clicks')],
     prevent_initial_call=False
@@ -238,11 +259,56 @@ def load_data(trade_date, reload_clicks):
         trade_date = pd.to_datetime(trade_date).date()
 
     # Load market data with metadata
-    load_result = load_market_data_with_metadata(COMMODITY, trade_date)
+    load_result = load_market_data_with_metadata(
+        COMMODITY,
+        trade_date,
+        allow_synthetic_fallback=False,
+    )
     market_data = load_result['data']
     data_source = load_result['source']
     is_synthetic = load_result['is_synthetic']
     last_update = load_result['last_update']
+
+    ready, readiness_message = calibration_readiness(market_data)
+    if market_data.empty:
+        badge, tooltip = format_data_status(
+            data_source=data_source,
+            is_synthetic=is_synthetic,
+            last_update=last_update,
+            trade_date=trade_date,
+            commodity=COMMODITY,
+            message=load_result.get('message'),
+            error=load_result.get('error'),
+        )
+        empty_market_json = pd.DataFrame(
+            columns=[
+                'expiry',
+                'option_expiration_date',
+                'dte',
+                'delta',
+                'delta_convention',
+                'iv',
+                'strike',
+                'forward',
+                'rate',
+                'source_name',
+                'quote_class',
+                'weight',
+            ]
+        ).to_json(date_format='iso', orient='split')
+        empty_params_json = pd.DataFrame(
+            columns=['expiry', *PARAM_COLUMNS, 'rmse']
+        ).to_json(date_format='iso', orient='split')
+        return (
+            empty_market_json,
+            empty_params_json,
+            badge,
+            tooltip,
+            True,
+            readiness_message,
+            True,
+            readiness_message,
+        )
 
     # Try to load historical params from database (T-1)
     historical_params = None
@@ -262,8 +328,12 @@ def load_data(trade_date, reload_clicks):
     loaded_from_db = False
 
     for expiry in sorted(expiries):
-        exp_data = market_data[market_data['expiry'] == expiry]
-        forward = exp_data['forward'].iloc[0] if 'forward' in exp_data.columns else 45.0
+        exp_data = select_expiry_observations(market_data, expiry)
+        forward = (
+            exp_data['forward'].iloc[0]
+            if not exp_data.empty and 'forward' in exp_data.columns
+            else np.nan
+        )
         expiry_date = pd.to_datetime(expiry).date()
 
         # Check if we have historical params for this expiry
@@ -278,15 +348,19 @@ def load_data(trade_date, reload_clicks):
                         params_to_use[col] = row[col]
 
         # Calculate RMSE with params
+        eligibility_error = calibration_eligibility_error(exp_data)
         try:
+            if eligibility_error:
+                raise ValueError(eligibility_error)
             result = evaluate_fit(
                 params=params_to_use,
                 market_data=exp_data,
-                forward=forward
+                forward=forward,
+                delta_convention=UNDISCOUNTED_CALL_DELTA,
             )
             rmse = result['rmse']
         except Exception:
-            rmse = 0.0
+            rmse = np.nan
 
         params_list.append({
             'expiry': expiry,
@@ -306,7 +380,9 @@ def load_data(trade_date, reload_clicks):
         is_synthetic=is_synthetic,
         last_update=last_update,
         trade_date=trade_date,
-        commodity=COMMODITY
+        commodity=COMMODITY,
+        message=load_result.get('message'),
+        error=load_result.get('error'),
     )
 
     # Add params source to tooltip
@@ -316,7 +392,17 @@ def load_data(trade_date, reload_clicks):
     else:
         tooltip_parts.append("Params: Defaults")
 
-    return market_data_json, params_json, badge, " | ".join(tooltip_parts)
+    tooltip_text = " | ".join(tooltip_parts)
+    return (
+        market_data_json,
+        params_json,
+        badge,
+        tooltip_text,
+        not ready,
+        readiness_message,
+        not ready,
+        readiness_message,
+    )
 
 
 @callback(
@@ -448,9 +534,17 @@ def handle_calibration(
                             expiry_date = date.today()
 
                         # Recalculate RMSE for final params (not candidate RMSE)
-                        exp_data = market_data[market_data['expiry'] == expiry_dates[row_idx]]
+                        exp_data = select_expiry_observations(
+                            market_data,
+                            expiry_dates[row_idx],
+                        )
                         try:
-                            final_result = evaluate_fit(final_params, exp_data, forward)
+                            final_result = evaluate_fit(
+                                final_params,
+                                exp_data,
+                                forward,
+                                delta_convention=UNDISCOUNTED_CALL_DELTA,
+                            )
                             final_rmse = final_result['rmse']
                         except Exception:
                             final_rmse = candidate_rmse
@@ -514,26 +608,34 @@ def handle_calibration(
     params_df = parse_table_data(table_data)
 
     if triggered_id == f'{COMMODITY_LOWER}-calibrate-all-btn':
-        # Calibrate first expiry (or selected expiry)
         row_idx = selected_rows[0] if selected_rows else 0
 
         if row_idx >= len(params_df):
             raise PreventUpdate
 
         expiry = params_df.iloc[row_idx]['expiry']
-        exp_data = market_data[market_data['expiry'] == pd.to_datetime(params_df.iloc[row_idx]['expiry'])]
+        try:
+            exp_data = select_expiry_observations(market_data, expiry)
+            eligibility_error = calibration_eligibility_error(exp_data)
+        except Exception as exc:
+            eligibility_error = str(exc)
+            exp_data = pd.DataFrame()
+        if eligibility_error:
+            return (
+                False,
+                None,
+                "",
+                "",
+                [],
+                empty_fig,
+                "",
+                "",
+                "",
+                _calibration_blocked_status(eligibility_error),
+                no_update,
+            )
 
-        if exp_data.empty:
-            # Try with formatted expiry
-            for exp in market_data['expiry'].unique():
-                if pd.to_datetime(exp).strftime('%b-%y') == expiry:
-                    exp_data = market_data[market_data['expiry'] == exp]
-                    break
-
-        if exp_data.empty:
-            exp_data = market_data[market_data['expiry'] == market_data['expiry'].unique()[row_idx]]
-
-        forward = exp_data['forward'].iloc[0] if not exp_data.empty else 45.0
+        forward = float(exp_data['forward'].iloc[0])
 
         # Get current params
         current_params = params_df.iloc[row_idx].to_dict()
@@ -545,20 +647,49 @@ def handle_calibration(
                 market_data=exp_data,
                 forward=forward,
                 initial_params=current_params,
-                commodity=COMMODITY
+                commodity=COMMODITY,
+                delta_convention=UNDISCOUNTED_CALL_DELTA,
             )
             candidate_params = result['params']
             candidate_rmse = result['rmse']
-        except Exception:
-            candidate_params = current_params.copy()
-            candidate_rmse = 0.0
+        except Exception as exc:
+            return (
+                False,
+                None,
+                "",
+                "",
+                [],
+                empty_fig,
+                "",
+                "",
+                "",
+                _calibration_blocked_status(str(exc)),
+                no_update,
+            )
 
         # Evaluate current RMSE
         try:
-            current_result = evaluate_fit(current_params, exp_data, forward)
+            current_result = evaluate_fit(
+                current_params,
+                exp_data,
+                forward,
+                delta_convention=UNDISCOUNTED_CALL_DELTA,
+            )
             current_rmse = current_result['rmse']
-        except Exception:
-            current_rmse = 0.0
+        except Exception as exc:
+            return (
+                False,
+                None,
+                "",
+                "",
+                [],
+                empty_fig,
+                "",
+                "",
+                "",
+                _calibration_blocked_status(str(exc)),
+                no_update,
+            )
 
         # Store comparison data
         comparison_data = {
@@ -589,7 +720,7 @@ def handle_calibration(
             True,  # Open modal
             comparison_data,
             f"Expiry: {expiry}",
-            f"${forward:.2f}",
+            f"€{forward:.2f}/MWh",
             comparison_table,
             fig,
             f"{current_rmse*100:.2f}%",
@@ -618,14 +749,31 @@ def handle_calibration(
         final_params = extract_final_params(comparison_table_data)
 
     # Get market data for this expiry
-    exp_data = market_data[market_data['expiry'] == market_data['expiry'].unique()[row_idx]]
+    exp_data = select_expiry_observations(market_data, expiry)
 
     # Calculate final RMSE
     try:
-        final_result = evaluate_fit(final_params, exp_data, forward)
+        final_result = evaluate_fit(
+            final_params,
+            exp_data,
+            forward,
+            delta_convention=UNDISCOUNTED_CALL_DELTA,
+        )
         final_rmse = final_result['rmse']
-    except Exception:
-        final_rmse = 0.0
+    except Exception as exc:
+        return (
+            False,
+            comparison_store,
+            f"Expiry: {expiry}",
+            f"€{forward:.2f}/MWh",
+            comparison_table_data,
+            empty_fig,
+            "",
+            "",
+            "",
+            _calibration_blocked_status(str(exc)),
+            no_update,
+        )
 
     # Update comparison data
     comparison_data = comparison_store.copy()
@@ -647,7 +795,7 @@ def handle_calibration(
         True,
         comparison_data,
         f"Expiry: {expiry}",
-        f"${forward:.2f}",
+        f"€{forward:.2f}/MWh",
         comparison_table,
         fig,
         f"{comparison_store.get('current_rmse', 0)*100:.2f}%",
@@ -823,8 +971,13 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     fail_count = 0
 
     for i, expiry in enumerate(expiries):
-        exp_data = market_data[market_data['expiry'] == expiry]
-        forward = exp_data['forward'].iloc[0] if not exp_data.empty else 45.0
+        exp_data = select_expiry_observations(market_data, expiry)
+        eligibility_error = calibration_eligibility_error(exp_data)
+        forward = (
+            float(exp_data['forward'].iloc[0])
+            if eligibility_error is None
+            else np.nan
+        )
         expiry_str = pd.to_datetime(expiry).strftime('%Y-%m-%d')
         expiry_date = pd.to_datetime(expiry).date()
 
@@ -835,21 +988,35 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
 
             # Get current RMSE
             try:
-                current_result = evaluate_fit(current_params, exp_data, forward)
+                if eligibility_error:
+                    raise ValueError(eligibility_error)
+                current_result = evaluate_fit(
+                    current_params,
+                    exp_data,
+                    forward,
+                    delta_convention=UNDISCOUNTED_CALL_DELTA,
+                )
                 old_rmse = current_result['rmse']
             except Exception:
-                old_rmse = 0.0
+                old_rmse = None
 
             # Skip if already well calibrated
-            if skip_good and old_rmse < 0.01:
+            if skip_good and old_rmse is not None and old_rmse < 0.01:
                 results.append(format_batch_result_row(expiry_str, 'Skipped', old_rmse, old_rmse))
                 skip_count += 1
                 continue
 
             # Run calibration
             try:
-                result = calibrate(market_data=exp_data, forward=forward,
-                                 initial_params=current_params, commodity=COMMODITY)
+                if eligibility_error:
+                    raise ValueError(eligibility_error)
+                result = calibrate(
+                    market_data=exp_data,
+                    forward=forward,
+                    initial_params=current_params,
+                    commodity=COMMODITY,
+                    delta_convention=UNDISCOUNTED_CALL_DELTA,
+                )
                 new_params = result['params']
                 new_rmse = result['rmse']
 

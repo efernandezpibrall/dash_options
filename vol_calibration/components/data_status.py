@@ -40,7 +40,11 @@ def create_data_status_badge(
     """
     commodity_lower = commodity.lower() if commodity else 'data'
 
-    if is_synthetic:
+    if data_source in {"unavailable", "failed", "error"}:
+        color = "danger"
+        icon = "fas fa-times-circle"
+        text = "Unavailable"
+    elif is_synthetic:
         color = "warning"
         icon = "fas fa-flask"
         text = "Synthetic"
@@ -131,7 +135,9 @@ def format_data_status(
     is_synthetic: bool,
     last_update: Optional[datetime],
     trade_date: Any,
-    commodity: str = ''
+    commodity: str = '',
+    message: Optional[str] = None,
+    error: Optional[str] = None,
 ) -> tuple:
     """
     Format data status for callback output.
@@ -166,7 +172,11 @@ def format_data_status(
     # Build tooltip text
     tooltip_lines = [f"Trade Date: {trade_date}"]
 
-    if is_synthetic:
+    if data_source in {"unavailable", "failed", "error"}:
+        tooltip_lines.append(message or "Market data unavailable")
+        if error:
+            tooltip_lines.append(error)
+    elif is_synthetic:
         tooltip_lines.append("Data: Synthetic (sample data)")
         tooltip_lines.append("No market data available for this date")
     else:

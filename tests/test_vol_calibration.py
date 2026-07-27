@@ -204,9 +204,24 @@ def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch,
     monkeypatch.setattr(module, "update_arb_status_in_row", lambda *args, **kwargs: "Pass")
 
     expiry = pd.Timestamp("2026-09-01")
-    market_data = pd.DataFrame(
-        [{"expiry": expiry, "forward": 1.0, "strike": 1.0, "iv": 0.25, "delta": 0.5}]
-    )
+    if module is ttf:
+        market_data = pd.DataFrame(
+            {
+                "expiry": expiry,
+                "option_expiration_date": pd.Timestamp("2026-08-27"),
+                "forward": 1.0,
+                "strike": np.nan,
+                "iv": [0.27, 0.26, 0.25, 0.26, 0.27],
+                "delta": [0.10, 0.25, 0.50, 0.75, 0.90],
+                "dte": 50.0,
+                "delta_convention": "undiscounted_call_delta",
+                "weight": 1.0,
+            }
+        )
+    else:
+        market_data = pd.DataFrame(
+            [{"expiry": expiry, "forward": 1.0, "strike": 1.0, "iv": 0.25, "delta": 0.5}]
+        )
     table_data = [{"expiry": "Sep-26", "vr": 0.20, "rmse": "2.00%", "arb_status": "Pass"}]
 
     result = module.run_batch_calibration(
