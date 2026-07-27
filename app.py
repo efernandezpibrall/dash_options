@@ -1,7 +1,13 @@
-# app.py
-from dash import Dash
 import dash_bootstrap_components as dbc
+from dash import Dash
 
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
+from health import register_health_routes
+
+
+app = Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    suppress_callback_exceptions=True,
+)
 server = app.server
- 
+register_health_routes(server)

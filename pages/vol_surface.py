@@ -1,6 +1,7 @@
 """Volatility surface dashboard page."""
 import io
 import threading
+from urllib.parse import urlencode
 
 from dash import html, dcc, callback, Output, Input, State
 import dash
@@ -31,6 +32,7 @@ SURFACE_COLUMNS = [
     'delta_pct',
 ]
 SURFACE_SOURCE_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF', 'NBP'}
+CALIBRATION_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF'}
 SURFACE_PRODUCT_DISPLAY_MAP = {'BRENT': 'Brent'}
 
 SURFACE_POSTGRES_SOURCE_LABEL = f'{DB_SCHEMA}.implied_volatility_surface_from_prices'
@@ -1566,6 +1568,13 @@ layout = html.Div([
         _build_volatility_section_header(
             'Volatility Surface',
             actions=[
+                dcc.Link(
+                    'Open in Vol Calibration',
+                    id='open-vol-calibration-link',
+                    href='/vol_calibration?product=ttf',
+                    className='custom-export-btn volatility-export-button',
+                    style={'display': 'none'},
+                ),
                 html.Button(
                     'Export Surface',
                     id='export-surface-table-btn',
@@ -2266,6 +2275,31 @@ def update_surface_expiry_dropdown(n_clicks, selected_date, active_product, curr
     valid_expiries = {option['value'] for option in expiry_options}
     selected_expiry = current_expiry if current_expiry in valid_expiries else expiry_options[0]['value']
     return expiry_options, selected_expiry, visible_style
+
+
+def build_calibration_link(active_product, selected_date, selected_expiry):
+    """Build a calibration deep link only for supported products."""
+    product = str(active_product or '').upper()
+    if product not in CALIBRATION_PRODUCTS:
+        return '/vol_calibration?product=ttf', {'display': 'none'}
+
+    query = {'product': product.lower()}
+    if selected_date:
+        query['cob_date'] = pd.to_datetime(selected_date).date().isoformat()
+    if selected_expiry:
+        query['expiry'] = pd.to_datetime(selected_expiry).strftime('%b-%y')
+    return f"/vol_calibration?{urlencode(query)}", {'display': 'inline-flex'}
+
+
+@callback(
+    Output('open-vol-calibration-link', 'href'),
+    Output('open-vol-calibration-link', 'style'),
+    Input('surface-product-tabs', 'value'),
+    Input('table-date-picker', 'date'),
+    Input('surface-expiry-dropdown', 'value'),
+)
+def update_calibration_link(active_product, selected_date, selected_expiry):
+    return build_calibration_link(active_product, selected_date, selected_expiry)
 
 
 @callback(

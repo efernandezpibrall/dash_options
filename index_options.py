@@ -19,6 +19,9 @@ import pages.correlations
 import pages.scenarios
 import pages.pnl_explain
 
+
+server = app.server
+
 # Professional Navigation Bar - Options Dashboard
 nav_links = html.Header([
     html.Div([
