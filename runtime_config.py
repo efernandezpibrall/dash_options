@@ -49,6 +49,7 @@ def load_runtime_config() -> configparser.ConfigParser:
         ("TRINOS", "USERNAME"): ("TRINOS_USERNAME",),
         ("TRINOS", "TOKEN"): ("TRINOS_TOKEN",),
         ("TRINOS", "PORT"): ("TRINOS_PORT",),
+        ("TRINOS", "VERIFY_SSL"): ("TRINOS_VERIFY_SSL",),
     }
     for (section, option), names in env_mappings.items():
         for name in names:
@@ -61,6 +62,18 @@ def load_runtime_config() -> configparser.ConfigParser:
 
 def config_value(section: str, option: str, fallback=None):
     return load_runtime_config().get(section, option, fallback=fallback)
+
+
+def config_bool(section: str, option: str, *, fallback: bool) -> bool:
+    raw_value = config_value(section, option)
+    if raw_value is None:
+        return fallback
+    normalized = str(raw_value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{section}.{option} must be a boolean value.")
 
 
 @lru_cache(maxsize=2)

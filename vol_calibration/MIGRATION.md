@@ -18,5 +18,26 @@ Database writes and publication are disabled by default through:
 - `VOL_CALIBRATION_WRITES_ENABLED=false`
 - `VOL_CALIBRATION_PUBLISH_ENABLED=false`
 
+Release 3 persistence is scaffolding only. The additive Alembic revision creates
+immutable run inputs, append-only results/audit/surface records, guarded
+publication lifecycles, a verified option-expiry calendar, and a
+PostgreSQL-backed lease queue. It does not run automatically and it does not
+enable any write callback.
+
+Keep these production defaults until authentication, migration rehearsal,
+worker, approval, and rollback gates pass:
+
+- `VOL_CALIBRATION_WRITES_ENABLED=false`
+- `VOL_CALIBRATION_PUBLISH_ENABLED=false`
+- `VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED=false`
+- `OPTIONS_TRUSTED_PROXY_AUTH_ENABLED=false`
+- `TRINOS_VERIFY_SSL=true`
+
+When trusted proxy authentication is eventually enabled, the proxy must
+provide a server-verified user, roles, and shared secret. Roles are enforced by
+server-side authorization helpers; UI visibility is not treated as
+authorization. Database credentials remain external configuration and no
+migration is applied during application import.
+
 The analytics implementation remains in the separately managed `options`
 package and is not duplicated here.

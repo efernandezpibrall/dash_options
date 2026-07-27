@@ -22,3 +22,7 @@ def writes_enabled() -> bool:
 
 def publication_enabled() -> bool:
     return writes_enabled() and _enabled("VOL_CALIBRATION_PUBLISH_ENABLED", False)
+
+
+def background_jobs_enabled() -> bool:
+    return writes_enabled() and _enabled("VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED", False)

@@ -4,7 +4,7 @@ import re
 import pandas as pd
 from sqlalchemy import text
 
-from runtime_config import config_value, get_database_engine
+from runtime_config import config_bool, config_value, get_database_engine
 
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,7 @@ TRINOS_HOST = config_value('TRINOS', 'HOST')
 TRINOS_USERNAME = config_value('TRINOS', 'USERNAME')
 TRINOS_TOKEN = config_value('TRINOS', 'TOKEN')
 TRINOS_PORT = config_value('TRINOS', 'PORT', fallback='443') or '443'
+TRINOS_VERIFY_SSL = config_bool('TRINOS', 'VERIFY_SSL', fallback=True)
 
 
 def quote_ident(identifier):
@@ -68,7 +69,7 @@ def read_trino_query(query, catalog='raw', schema='ice_gas'):
         user=TRINOS_USERNAME,
         auth=JWTAuthentication(TRINOS_TOKEN),
         http_scheme="https",
-        verify=False,
+        verify=TRINOS_VERIFY_SSL,
         catalog=catalog,
         schema=schema,
     )
