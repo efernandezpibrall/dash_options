@@ -17,6 +17,8 @@ from dash import html, dcc
 from typing import Dict, Optional, Literal
 from options.calibration_engine.converters.delta import strike_to_delta
 
+from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
+
 
 # X-axis options
 X_AXIS_OPTIONS = [
@@ -26,7 +28,17 @@ X_AXIS_OPTIONS = [
 ]
 
 
-def delta_to_strike_iv(target_delta, forward, dte, wing_params, wing_model_iv_func, is_put=True, tol=1e-6, max_iter=50):
+def delta_to_strike_iv(
+    target_delta,
+    forward,
+    dte,
+    wing_params,
+    wing_model_iv_func,
+    is_put=True,
+    tol=1e-6,
+    max_iter=50,
+    model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
+):
     """
     Solve for strike and IV given a target delta using Newton-Raphson iteration.
 
@@ -56,7 +68,12 @@ def delta_to_strike_iv(target_delta, forward, dte, wing_params, wing_model_iv_fu
     option_type = 'put' if is_put else 'call'
 
     for _ in range(max_iter):
-        iv = wing_model_iv_func(strike=np.array([strike]), forward=forward, **wing_params)[0]
+        iv = wing_model_iv_func(
+            strike=np.array([strike]),
+            forward=forward,
+            model_version=model_version,
+            **wing_params,
+        )[0]
         current_delta = strike_to_delta(strike, forward, iv, dte, option_type)
 
         # For puts, delta is negative; convert to positive for comparison
@@ -70,7 +87,12 @@ def delta_to_strike_iv(target_delta, forward, dte, wing_params, wing_model_iv_fu
 
         # Numerical derivative (finite difference)
         dk = strike * 0.001
-        iv_up = wing_model_iv_func(strike=np.array([strike + dk]), forward=forward, **wing_params)[0]
+        iv_up = wing_model_iv_func(
+            strike=np.array([strike + dk]),
+            forward=forward,
+            model_version=model_version,
+            **wing_params,
+        )[0]
         delta_up = strike_to_delta(strike + dk, forward, iv_up, dte, option_type)
         if is_put:
             delta_up = -delta_up
@@ -87,7 +109,12 @@ def delta_to_strike_iv(target_delta, forward, dte, wing_params, wing_model_iv_fu
         # Keep strike positive and within reasonable bounds
         strike = max(forward * 0.05, min(forward * 5.0, strike))
 
-    final_iv = wing_model_iv_func(strike=np.array([strike]), forward=forward, **wing_params)[0]
+    final_iv = wing_model_iv_func(
+        strike=np.array([strike]),
+        forward=forward,
+        model_version=model_version,
+        **wing_params,
+    )[0]
     return strike, final_iv
 
 
@@ -149,7 +176,8 @@ def create_smile_grid_figure(
     params_df: pd.DataFrame,
     x_axis: Literal['log_moneyness', 'moneyness', 'delta'] = 'log_moneyness',
     selected_row: Optional[int] = None,
-    num_cols: int = 3
+    num_cols: int = 3,
+    model_version: str = DEFAULT_CALIBRATION_MODEL_VERSION,
 ) -> go.Figure:
     """
     Create the smile plot grid figure.
@@ -333,7 +361,15 @@ def create_smile_grid_figure(
                     x_put = []
                     for d in x_put_grid:
                         try:
-                            strike, iv = delta_to_strike_iv(d, forward, dte, wing_params, wing_model_iv, is_put=True)
+                            strike, iv = delta_to_strike_iv(
+                                d,
+                                forward,
+                                dte,
+                                wing_params,
+                                wing_model_iv,
+                                is_put=True,
+                                model_version=model_version,
+                            )
                             iv_put.append(iv)
                             x_put.append(d)
                         except Exception:
@@ -346,7 +382,15 @@ def create_smile_grid_figure(
                     for display_x in x_call_grid:
                         call_delta = 1 - display_x  # Convert display x back to call delta
                         try:
-                            strike, iv = delta_to_strike_iv(call_delta, forward, dte, wing_params, wing_model_iv, is_put=False)
+                            strike, iv = delta_to_strike_iv(
+                                call_delta,
+                                forward,
+                                dte,
+                                wing_params,
+                                wing_model_iv,
+                                is_put=False,
+                                model_version=model_version,
+                            )
                             iv_call.append(iv)
                             x_call.append(display_x)
                         except Exception:
@@ -359,6 +403,7 @@ def create_smile_grid_figure(
                     model_iv = wing_model_iv(
                         strike=strikes_model,
                         forward=forward,
+                        model_version=model_version,
                         **wing_params
                     )
                     sort_idx = np.argsort(x_model)
@@ -444,7 +489,8 @@ def create_single_smile_plot(
     params: Dict,
     expiry_label: str,
     x_axis: Literal['log_moneyness', 'moneyness', 'delta'] = 'log_moneyness',
-    height: int = 300
+    height: int = 300,
+    model_version: str = DEFAULT_CALIBRATION_MODEL_VERSION,
 ) -> go.Figure:
     """
     Create a single smile plot for one expiry.
@@ -534,7 +580,12 @@ def create_single_smile_plot(
             strikes_model = market_data['strike'].values
 
         try:
-            model_iv = wing_model_iv(strike=strikes_model, forward=forward, **wing_params)
+            model_iv = wing_model_iv(
+                strike=strikes_model,
+                forward=forward,
+                model_version=model_version,
+                **wing_params,
+            )
             sort_idx = np.argsort(x_model)
             fig.add_trace(
                 go.Scatter(

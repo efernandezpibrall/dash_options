@@ -1,11 +1,17 @@
+import base64
+from io import BytesIO
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 from dash.exceptions import PreventUpdate
+import numpy as np
 
 from pages import vol_calibration
+from vol_calibration.components import comparison_modal, smile_grid
+from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.pages import brent, hh, jkm, ttf
+from vol_calibration.session_state import persist_product_table, restore_product_table
 
 
 PRODUCT_MODULES = (brent, hh, ttf, jkm)
@@ -53,9 +59,89 @@ def test_layout_lazily_renders_only_requested_product_and_applies_cob_date():
     assert components["vol-calibration-product-tabs"].active_tab == "brent"
     assert components["brent-date-picker"].date == "2026-07-08"
     assert components["vol-calibration-requested-expiry"].data == "Sep-26"
+    assert components["vol-calibration-session-state"].storage_type == "session"
     assert "ttf-date-picker" not in components
     assert "hh-date-picker" not in components
     assert "jkm-date-picker" not in components
+
+
+def test_product_edits_restore_only_for_the_same_session_product_and_cob():
+    rows = [{"expiry": "Sep-26", "vr": 0.31}]
+    state = persist_product_table(None, "ttf", "2026-07-08", rows)
+
+    restored = restore_product_table(state, "TTF", "2026-07-08")
+    assert restored == rows
+    assert restored is not rows
+    assert restore_product_table(state, "jkm", "2026-07-08") is None
+    assert restore_product_table(state, "ttf", "2026-07-09") is None
+    assert ttf.update_param_table(None, None, state, "2026-07-08") == rows
+
+
+def test_all_smile_visuals_pass_wing_v2_explicitly(monkeypatch):
+    from options.calibration_engine.models import wing_model
+
+    model_versions = []
+
+    def record_wing_model(*, strike, forward, model_version, **params):
+        del forward, params
+        model_versions.append(model_version)
+        return np.full_like(np.asarray(strike, dtype=float), 0.25)
+
+    monkeypatch.setattr(wing_model, "wing_model_iv", record_wing_model)
+    expiry = pd.Timestamp("2026-09-01")
+    market_data = pd.DataFrame(
+        {
+            "expiry": [expiry, expiry, expiry],
+            "forward": [100.0, 100.0, 100.0],
+            "strike": [90.0, 100.0, 110.0],
+            "iv": [0.28, 0.25, 0.27],
+            "delta": [-0.25, 0.50, 0.25],
+            "dte": [45, 45, 45],
+        }
+    )
+    params = {
+        "vr": 0.25,
+        "sr": 0.0,
+        "pc": 0.1,
+        "cc": 0.1,
+        "dc": -0.2,
+        "uc": 0.2,
+        "dsm": 0.1,
+        "usm": 0.1,
+        "vcr": 0.0,
+        "scr": 0.0,
+        "ssr": 1.0,
+        "put_wing_power": 0.5,
+        "call_wing_power": 0.5,
+    }
+    params_df = pd.DataFrame([{"expiry": expiry, **params}])
+
+    smile_grid.create_smile_grid_figure(market_data, params_df)
+    smile_grid.create_single_smile_plot(market_data, params, "Sep-26")
+    comparison_modal.create_comparison_plot(
+        market_data,
+        params,
+        params,
+        params,
+        "Sep-26",
+    )
+
+    assert model_versions
+    assert set(model_versions) == {DEFAULT_CALIBRATION_MODEL_VERSION}
+
+
+@pytest.mark.parametrize("module", PRODUCT_MODULES)
+def test_excel_summary_records_model_version(module):
+    download = module.export_to_excel(
+        1,
+        [{"expiry": "Sep-26", "vr": 0.25, "rmse": "1.00%"}],
+        None,
+        "2026-07-08",
+    )
+    workbook = BytesIO(base64.b64decode(download["content"]))
+    summary = pd.read_excel(workbook, sheet_name="Summary")
+
+    assert summary.loc[0, "Model Version"] == DEFAULT_CALIBRATION_MODEL_VERSION
 
 
 @pytest.mark.parametrize("module", PRODUCT_MODULES)

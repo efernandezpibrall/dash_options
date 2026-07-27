@@ -29,9 +29,14 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.feature_flags import writes_enabled
+from vol_calibration.model_version import (
+    DEFAULT_CALIBRATION_MODEL_VERSION,
+    calibrate_v2 as calibrate,
+    evaluate_fit_v2 as evaluate_fit,
+)
+from vol_calibration.session_state import restore_product_table
 
 from options.calibration_engine.io.loaders import load_market_data_with_metadata, create_sample_data
-from options.calibration_engine.calibration import calibrate, evaluate_fit
 from options.calibration_engine.config.defaults import get_defaults
 from options.calibration_engine.io.storage import (
     ParameterStore,
@@ -236,9 +241,14 @@ def load_data(trade_date, reload_clicks):
     Output(f'{COMMODITY_LOWER}-param-table', 'data'),
     Input(f'{COMMODITY_LOWER}-params-store', 'data'),
     State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+    State('vol-calibration-session-state', 'data'),
+    State(f'{COMMODITY_LOWER}-date-picker', 'date'),
     prevent_initial_call=True
 )
-def update_param_table(params_json, market_data_json):
+def update_param_table(params_json, market_data_json, session_state, trade_date):
+    restored = restore_product_table(session_state, COMMODITY_LOWER, trade_date)
+    if restored is not None:
+        return restored
     if params_json is None:
         return []
 
@@ -269,7 +279,13 @@ def update_smile_grid(market_data_json, table_data, x_axis, selected_rows):
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     params_df = parse_table_data(table_data)
     selected_row = selected_rows[0] if selected_rows else None
-    return create_smile_grid_figure(market_data, params_df, x_axis or 'log_moneyness', selected_row)
+    return create_smile_grid_figure(
+        market_data,
+        params_df,
+        x_axis or 'log_moneyness',
+        selected_row,
+        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
+    )
 
 
 @callback(
@@ -430,7 +446,15 @@ def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks
             'current_rmse': current_rmse, 'candidate_rmse': candidate_rmse, 'row_idx': row_idx,
         }
         comparison_table = format_comparison_data(current_params, candidate_params, current_params)
-        fig = create_comparison_plot(exp_data, current_params, candidate_params, current_params, expiry_label=expiry, x_axis=x_axis or 'log_moneyness')
+        fig = create_comparison_plot(
+            exp_data,
+            current_params,
+            candidate_params,
+            current_params,
+            expiry_label=expiry,
+            x_axis=x_axis or 'log_moneyness',
+            model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
+        )
 
         return (True, comparison_data, f"Expiry: {expiry}", f"${forward:.2f}", comparison_table, fig,
                 f"{current_rmse*100:.2f}%", f"{candidate_rmse*100:.2f}%", f"{current_rmse*100:.2f}%", no_update, no_update)
@@ -462,7 +486,15 @@ def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks
     comparison_data = comparison_store.copy()
     comparison_data['final_params'] = final_params
     comparison_table = format_comparison_data(current_params, candidate_params, final_params)
-    fig = create_comparison_plot(exp_data, current_params, candidate_params, final_params, expiry_label=expiry, x_axis=x_axis or 'log_moneyness')
+    fig = create_comparison_plot(
+        exp_data,
+        current_params,
+        candidate_params,
+        final_params,
+        expiry_label=expiry,
+        x_axis=x_axis or 'log_moneyness',
+        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
+    )
 
     return (True, comparison_data, f"Expiry: {expiry}", f"${forward:.2f}", comparison_table, fig,
             f"{comparison_store.get('current_rmse', 0)*100:.2f}%", f"{comparison_store.get('candidate_rmse', 0)*100:.2f}%", f"{final_rmse*100:.2f}%", no_update, no_update)
@@ -500,6 +532,7 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
 
         summary_data = {
             'Commodity': [COMMODITY],
+            'Model Version': [DEFAULT_CALIBRATION_MODEL_VERSION],
             'Trade Date': [str(trade_date)],
             'Export Date': [str(date.today())],
             'Number of Expiries': [len(table_data)],

@@ -11,7 +11,9 @@ from dash import Input, Output, State, callback, dcc, html
 from dash.exceptions import PreventUpdate
 
 from vol_calibration.feature_flags import calibration_enabled, publication_enabled, writes_enabled
+from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.pages import brent, hh, jkm, ttf
+from vol_calibration.session_state import persist_product_table
 
 
 PRODUCT_MODULES = {
@@ -85,7 +87,11 @@ def create_layout(search: str | None = None):
         dbc.Alert(
             [
                 html.Strong("Diagnostic release: "),
-                "calibration, comparison, and export are enabled. Database saving and publication are disabled.",
+                (
+                    "calibration, comparison, and export use "
+                    f"{DEFAULT_CALIBRATION_MODEL_VERSION}. "
+                    "Database saving and publication are disabled."
+                ),
             ],
             color="warning",
             className="vol-calibration-release-notice",
@@ -103,6 +109,10 @@ def create_layout(search: str | None = None):
     return html.Div(
         [
             dcc.Store(id="vol-calibration-requested-expiry", data=context["expiry"]),
+            dcc.Store(
+                id="vol-calibration-session-state",
+                storage_type="session",
+            ),
             *notices,
             dbc.Tabs(
                 [
@@ -176,8 +186,25 @@ def _register_expiry_selection_callback(product: str):
     return select_requested_expiry
 
 
+def _register_session_state_callback(product: str):
+    @callback(
+        Output("vol-calibration-session-state", "data", allow_duplicate=True),
+        Input(f"{product}-param-table", "data"),
+        State("vol-calibration-session-state", "data"),
+        State(f"{product}-date-picker", "date"),
+        prevent_initial_call=True,
+    )
+    def persist_table_state(table_data, state, cob_date):
+        if table_data is None:
+            raise PreventUpdate
+        return persist_product_table(state, product, cob_date, table_data)
+
+    return persist_table_state
+
+
 for _product in PRODUCT_ORDER:
     _register_expiry_selection_callback(_product)
+    _register_session_state_callback(_product)
 
 
 __all__ = [

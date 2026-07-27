@@ -15,6 +15,7 @@ from dash import html, dcc, dash_table
 from typing import Dict, Optional, List
 from options.calibration_engine.converters.delta import strike_to_delta
 from vol_calibration.feature_flags import writes_enabled
+from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 
 
 # Parameter columns for comparison table
@@ -218,7 +219,8 @@ def create_comparison_plot(
     candidate_params: Dict,
     final_params: Dict,
     expiry_label: str,
-    x_axis: str = 'log_moneyness'
+    x_axis: str = 'log_moneyness',
+    model_version: str = DEFAULT_CALIBRATION_MODEL_VERSION,
 ) -> go.Figure:
     """
     Create the overlay comparison plot.
@@ -326,7 +328,12 @@ def create_comparison_plot(
         option_type = 'put' if is_put else 'call'
 
         for _ in range(max_iter):
-            iv = wing_model_iv(strike=np.array([strike]), forward=forward, **wing_params)[0]
+            iv = wing_model_iv(
+                strike=np.array([strike]),
+                forward=forward,
+                model_version=model_version,
+                **wing_params,
+            )[0]
             current_delta = strike_to_delta(strike, forward, iv, dte, option_type)
 
             if is_put:
@@ -338,7 +345,12 @@ def create_comparison_plot(
                 break
 
             dk = strike * 0.001
-            iv_up = wing_model_iv(strike=np.array([strike + dk]), forward=forward, **wing_params)[0]
+            iv_up = wing_model_iv(
+                strike=np.array([strike + dk]),
+                forward=forward,
+                model_version=model_version,
+                **wing_params,
+            )[0]
             delta_up = strike_to_delta(strike + dk, forward, iv_up, dte, option_type)
             if is_put:
                 delta_up = -delta_up
@@ -352,7 +364,12 @@ def create_comparison_plot(
             strike = strike + 0.5 * step
             strike = max(forward * 0.05, min(forward * 5.0, strike))
 
-        final_iv = wing_model_iv(strike=np.array([strike]), forward=forward, **wing_params)[0]
+        final_iv = wing_model_iv(
+            strike=np.array([strike]),
+            forward=forward,
+            model_version=model_version,
+            **wing_params,
+        )[0]
         return strike, final_iv
 
     # Helper to compute model curve for delta axis using reverse-delta mapping
@@ -401,7 +418,12 @@ def create_comparison_plot(
             if x_axis == 'delta':
                 x_plot, iv_plot = get_delta_model_curve(wp)
             else:
-                model_iv = wing_model_iv(strike=strikes_model, forward=forward, **wp)
+                model_iv = wing_model_iv(
+                    strike=strikes_model,
+                    forward=forward,
+                    model_version=model_version,
+                    **wp,
+                )
                 x_plot, iv_plot = get_plot_x(model_iv)
             fig.add_trace(
                 go.Scatter(
@@ -422,7 +444,12 @@ def create_comparison_plot(
             if x_axis == 'delta':
                 x_plot, iv_plot = get_delta_model_curve(wp)
             else:
-                model_iv = wing_model_iv(strike=strikes_model, forward=forward, **wp)
+                model_iv = wing_model_iv(
+                    strike=strikes_model,
+                    forward=forward,
+                    model_version=model_version,
+                    **wp,
+                )
                 x_plot, iv_plot = get_plot_x(model_iv)
             fig.add_trace(
                 go.Scatter(
@@ -443,7 +470,12 @@ def create_comparison_plot(
             if x_axis == 'delta':
                 x_plot, iv_plot = get_delta_model_curve(wp)
             else:
-                model_iv = wing_model_iv(strike=strikes_model, forward=forward, **wp)
+                model_iv = wing_model_iv(
+                    strike=strikes_model,
+                    forward=forward,
+                    model_version=model_version,
+                    **wp,
+                )
                 x_plot, iv_plot = get_plot_x(model_iv)
             fig.add_trace(
                 go.Scatter(

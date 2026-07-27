@@ -6877,3 +6877,62 @@ button:hover {
 @media (max-width: 900px) {
     .analytics-filter-bar, .analytics-filter-bar-compact, .analytics-two-column { grid-template-columns: 1fr; }
 }
+
+/* Keep the expanded options navigation usable on narrow screens. */
+@media (max-width: 768px) {
+    .top-bar-header {
+        max-width: 100vw;
+        overflow-x: hidden;
+    }
+
+    .top-bar-content {
+        width: 100%;
+        max-width: 100%;
+        align-items: stretch;
+        box-sizing: border-box;
+    }
+
+    .main-navigation {
+        width: 100%;
+        min-width: 0;
+        align-items: stretch;
+        flex-direction: column;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow: hidden;
+    }
+
+    .nav-link-primary {
+        align-self: flex-start;
+    }
+
+    .nav-group-secondary {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        flex: 1 1 auto;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow-x: auto;
+        overflow-y: hidden;
+        gap: 3px;
+        padding: 0 0 5px;
+        border-left: 0;
+        overscroll-behavior-x: contain;
+        scrollbar-width: thin;
+        scroll-snap-type: x proximity;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .nav-group-secondary > .nav-link-secondary {
+        padding: 4px 6px;
+        font-size: 11px;
+        scroll-snap-align: start;
+    }
+
+    .top-bar-controls {
+        width: auto;
+        align-self: flex-start;
+        justify-content: flex-start;
+    }
+}

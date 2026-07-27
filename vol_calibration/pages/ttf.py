@@ -33,12 +33,17 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.feature_flags import writes_enabled
+from vol_calibration.model_version import (
+    DEFAULT_CALIBRATION_MODEL_VERSION,
+    calibrate_v2 as calibrate,
+    evaluate_fit_v2 as evaluate_fit,
+)
+from vol_calibration.session_state import restore_product_table
 
 # Import calibration engine modules
 from options.calibration_engine.io.loaders import (
     load_market_data_with_metadata,
 )
-from options.calibration_engine.calibration import calibrate, evaluate_fit
 from options.calibration_engine.config.defaults import get_defaults
 from options.calibration_engine.io.storage import (
     ParameterStore,
@@ -316,10 +321,15 @@ def load_data(trade_date, reload_clicks):
     Output(f'{COMMODITY_LOWER}-param-table', 'data'),
     Input(f'{COMMODITY_LOWER}-params-store', 'data'),
     State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+    State('vol-calibration-session-state', 'data'),
+    State(f'{COMMODITY_LOWER}-date-picker', 'date'),
     prevent_initial_call=True
 )
-def update_param_table(params_json, market_data_json):
+def update_param_table(params_json, market_data_json, session_state, trade_date):
     """Update parameter table when params store changes."""
+    restored = restore_product_table(session_state, COMMODITY_LOWER, trade_date)
+    if restored is not None:
+        return restored
     if params_json is None:
         return []
 
@@ -358,7 +368,8 @@ def update_smile_grid(market_data_json, table_data, x_axis, selected_rows):
         market_data=market_data,
         params_df=params_df,
         x_axis=x_axis or 'log_moneyness',
-        selected_row=selected_row
+        selected_row=selected_row,
+        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
     )
 
 
@@ -567,7 +578,9 @@ def handle_calibration(
         # Create comparison plot
         fig = create_comparison_plot(
             exp_data, current_params, candidate_params, current_params,
-            expiry_label=expiry, x_axis=x_axis or 'log_moneyness'
+            expiry_label=expiry,
+            x_axis=x_axis or 'log_moneyness',
+            model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
         )
 
         return (
@@ -623,7 +636,9 @@ def handle_calibration(
 
     fig = create_comparison_plot(
         exp_data, current_params, candidate_params, final_params,
-        expiry_label=expiry, x_axis=x_axis or 'log_moneyness'
+        expiry_label=expiry,
+        x_axis=x_axis or 'log_moneyness',
+        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
     )
 
     return (
@@ -679,6 +694,7 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
         # Sheet 3: Summary
         summary_data = {
             'Commodity': [COMMODITY],
+            'Model Version': [DEFAULT_CALIBRATION_MODEL_VERSION],
             'Trade Date': [str(trade_date)],
             'Export Date': [str(date.today())],
             'Number of Expiries': [len(table_data)],
