@@ -8,6 +8,7 @@ openpyxl>=3.1,<4
 pandas>=2.2,<3
 plotly>=6.0,<7
 psycopg2-binary>=2.9,<3
+requests>=2.32.4,<3
 scipy>=1.13,<2
 SQLAlchemy>=2.0,<3
 trino>=0.330,<1
