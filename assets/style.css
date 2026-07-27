@@ -1,0 +1,43 @@
+/* Vol Surface Calibration Dashboard Styles */
+
+/* Card shadows */
+.card {
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+/* Better spacing for form elements */
+.form-control, .Select-control {
+    margin-bottom: 8px;
+}
+
+/* Table improvements */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+    font-size: 0.85rem;
+}
+
+/* Plot container */
+.js-plotly-plot {
+    width: 100% !important;
+}
+
+/* Status alerts */
+.alert {
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
+
+/* Navigation styling */
+.navbar-brand {
+    font-weight: bold;
+}
+
+/* Button styling */
+.btn {
+    font-weight: 500;
+}
+
+/* Parameter table styling */
+.parameter-value {
+    font-family: monospace;
+}
