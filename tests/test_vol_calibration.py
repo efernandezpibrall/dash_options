@@ -163,3 +163,8 @@ def test_host_app_registers_route_callbacks_without_overwriting_url_search():
         "/vol_calibration",
         "?product=jkm",
     ).className == "vol-calibration-page"
+
+    validation_components = _components_by_id(app.validation_layout)
+    assert "vol-calibration-product-tabs" in validation_components
+    assert "vol-calibration-workspace" in validation_components
+    assert "vol-calibration-requested-expiry" in validation_components

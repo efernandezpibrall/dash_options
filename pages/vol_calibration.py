@@ -123,7 +123,14 @@ def create_layout(search: str | None = None):
 
 
 def validation_layout():
-    return html.Div([module.layout for module in PRODUCT_MODULES.values()])
+    return html.Div(
+        [
+            create_layout("?product=ttf"),
+            brent.layout,
+            hh.layout,
+            jkm.layout,
+        ]
+    )
 
 
 @callback(
