@@ -24,6 +24,14 @@ publication lifecycles, a verified option-expiry calendar, and a
 PostgreSQL-backed lease queue. It does not run automatically and it does not
 enable any write callback.
 
+Read-only product workspaces use a bounded process-local cache keyed by product,
+COB date, and a hash of source configuration. Successful snapshots live for
+five minutes by default; synthetic fallbacks live for only five seconds so
+source recovery is detected quickly. Reload bypasses the cache. The relevant
+settings are `VOL_CALIBRATION_CACHE_MAX_ENTRIES`,
+`VOL_CALIBRATION_CACHE_TTL_SECONDS`, and
+`VOL_CALIBRATION_SYNTHETIC_CACHE_TTL_SECONDS`.
+
 Keep these production defaults until authentication, migration rehearsal,
 worker, approval, and rollback gates pass:
 

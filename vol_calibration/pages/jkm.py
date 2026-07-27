@@ -21,6 +21,7 @@ from vol_calibration.components.comparison_modal import (
     extract_final_params
 )
 from vol_calibration.components.data_status import format_data_status
+from vol_calibration.data_cache import cached_workspace_callback
 from vol_calibration.components.batch_calibration_modal import (
     create_batch_calibration_confirm_modal,
     create_batch_calibration_progress_modal,
@@ -149,6 +150,7 @@ layout = dbc.Container([
      Input(f'{COMMODITY_LOWER}-reload-btn', 'n_clicks')],
     prevent_initial_call=False
 )
+@cached_workspace_callback(COMMODITY, get_default_date)
 def load_data(trade_date, reload_clicks):
     """Load market data and parameters."""
     if trade_date is None:
