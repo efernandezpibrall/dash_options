@@ -6,10 +6,20 @@ disabled unless their feature flags are explicitly enabled.
 
 ## Build
 
-Install the locked deployment environment with the packaged
-`at-options-analytics` artifact and this repository's requirements. The
-analytics distribution must be built from the same reviewed `options` commit
-used by the dashboard.
+Install the locked deployment environment with
+`at-options-analytics==1.1.0`, built from reviewed `options` commit
+`eb9f39b`, and this repository's requirements. Do not resolve an unversioned
+checkout of the analytics repository at deployment time.
+
+Build and install the analytics wheel before installing this application:
+
+```bash
+git -C /path/to/options checkout eb9f39b
+python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
+python -m pip install dist/at_options_analytics-1.1.0-py3-none-any.whl
+python -m pip install -r requirements.txt
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.1.0'"
+```
 
 Run before producing the deployment artifact:
 
