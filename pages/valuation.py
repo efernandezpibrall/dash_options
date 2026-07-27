@@ -3,42 +3,12 @@ import dash_ag_grid as dag
 from dash import html, dcc, Input, Output, State
 import pandas as pd
 import numpy as np
-import configparser
-from sqlalchemy import create_engine, text
-import os
+from sqlalchemy import text
 from functools import lru_cache
 
 from dataframe_utils import concat_dataframes
-
-
-#------ code to be able to access config.ini, even having the path in the .virtualenvs is not working without it ------#
-try:
-    # Get the directory where your script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Navigate to the directory containing config.ini
-    # Adjust the number of '..' as needed to reach the correct directory
-    config_dir = os.path.abspath(os.path.join(script_dir, '..','..'))  # Go up one level
-    CONFIG_FILE_PATH = os.path.join(config_dir, 'config.ini')
-except Exception:
-    CONFIG_FILE_PATH = 'config.ini'  # Assumes it's in the same directory or the path it is detected
-
-# --- Load Configuration from INI File ---
-config_reader = configparser.ConfigParser(interpolation=None)
-config_reader.read(CONFIG_FILE_PATH)
-
-# Read values from the ini file sections
-DB_CONNECTION_STRING = config_reader.get('DATABASE', 'CONNECTION_STRING', fallback=None)
-DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng')
-MO_CONNECTION_STRING = (
-    config_reader.get('DATABASE', 'MIDDLE_OFFICE_CONNECTION_STRING', fallback=None)
-    or DB_CONNECTION_STRING
-)
-
-# ---------------------- Configuration ----------------------
-#Default DBAPI (should use psycopg2 as default, pg8000 it's an alternative but we don't have the library installed)
-# create engine
-engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
-engine_mo = engine if MO_CONNECTION_STRING == DB_CONNECTION_STRING else create_engine(MO_CONNECTION_STRING, pool_pre_ping=True)
+from db_fallback import DB_SCHEMA
+from runtime_config import get_database_engine
 _valuation_refresh_key = None
 _valuation_data_error = None
 
@@ -90,7 +60,11 @@ def _read_pnl_sources_for_date(selected_date, db_engine):
                 FROM {DB_SCHEMA}.pnl_aspect
                 WHERE "COB" = :selected_date
                 """)
-        df_aspect_pnl = pd.read_sql(query, engine_mo, params={'selected_date': selected_date})
+        df_aspect_pnl = pd.read_sql(
+            query,
+            get_database_engine(middle_office=True),
+            params={'selected_date': selected_date},
+        )
     except Exception:
         df_aspect_pnl = pd.DataFrame()
 
@@ -111,7 +85,7 @@ def _read_pnl_sources_for_date(selected_date, db_engine):
 
 @lru_cache(maxsize=8)
 def _fetch_pnl_sources_for_date(selected_date):
-    return _read_pnl_sources_for_date(selected_date, engine)
+    return _read_pnl_sources_for_date(selected_date, get_database_engine())
 
 
 def fetch_pnl_data(db_engine, selected_date, selected_strategies):
@@ -126,7 +100,7 @@ def fetch_pnl_data(db_engine, selected_date, selected_strategies):
     global _valuation_data_error
     _valuation_data_error = None
     try:
-        if db_engine is engine:
+        if db_engine is get_database_engine(required=False):
             df, df_aspect_pnl = _fetch_pnl_sources_for_date(selected_date)
         else:
             df, df_aspect_pnl = _read_pnl_sources_for_date(selected_date, db_engine)
@@ -551,7 +525,7 @@ layout = html.Div(
 )
 def update_pnl_date_options(n_clicks, current_date):
     del n_clicks
-    dates = get_available_dates(engine)
+    dates = get_available_dates(get_database_engine(required=False))
     options = [{'label': date, 'value': date} for date in dates]
     selected_date = current_date if current_date in dates else (dates[0] if dates else None)
     return options, selected_date
@@ -573,7 +547,7 @@ def update_strategy_options(selected_date, n_clicks):
         return [], []
 
     # Get the list of available strategies
-    strategies = get_strategies(engine, selected_date)
+    strategies = get_strategies(get_database_engine(required=False), selected_date)
 
     # Build the dropdown options
     options = [{'label': s, 'value': s} for s in strategies]
@@ -606,7 +580,7 @@ def update_pnl_table(selected_date, selected_strategies, n_clicks):
     if not selected_date:
         return [], [], "", ERROR_STYLE_HIDDEN
 
-    df = fetch_pnl_data(engine, selected_date, selected_strategies)
+    df = fetch_pnl_data(get_database_engine(required=False), selected_date, selected_strategies)
     if df.empty:
         error_message = _valuation_data_error or "No P&L rows are available for the selected date and strategies."
         return [], [], error_message, ERROR_STYLE_VISIBLE

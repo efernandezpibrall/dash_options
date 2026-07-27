@@ -10,6 +10,7 @@ import pages.greeks
 import pages.valuation
 import pages.trades
 import pages.vol_surface
+import pages.vol_calibration
 import pages.prices
 import pages.slopes
 import pages.spreads
@@ -32,6 +33,11 @@ nav_links = html.Header([
                 dcc.Link('Valuation', href='/valuation', className='nav-link-secondary'),
                 dcc.Link('Trades', href='/trades', className='nav-link-secondary'),
                 dcc.Link('Volatility Surface', href='/vol_surface', className='nav-link-secondary'),
+                dcc.Link(
+                    'Vol Calibration',
+                    href='/vol_calibration?product=ttf',
+                    className='nav-link-secondary',
+                ) if pages.vol_calibration.calibration_enabled() else None,
                 dcc.Link('Underlying Prices', href='/prices', className='nav-link-secondary'),
                 dcc.Link('Slopes', href='/slopes', className='nav-link-secondary'),
                 dcc.Link('Spreads', href='/spreads', className='nav-link-secondary'),
@@ -52,6 +58,7 @@ nav_links = html.Header([
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
     nav_links,
+    html.Div(id='nav-active-sink', style={'display': 'none'}),
     html.Div(id='dashboard-source-status-banner', className='dashboard-source-status-banner'),
     html.Div(id='page-content')
 ])
@@ -97,9 +104,12 @@ def update_dashboard_source_status(pathname, refresh_clicks):
     )
 
 # Callback to handle page routing
-@app.callback(Output('page-content', 'children'),
-              Input('url', 'pathname'))
-def display_page(pathname):
+@app.callback(
+    Output('page-content', 'children'),
+    Input('url', 'pathname'),
+    Input('url', 'search'),
+)
+def display_page(pathname, search):
     if pathname == '/':
         return pages.greeks.layout
     elif pathname == '/greeks':
@@ -110,6 +120,8 @@ def display_page(pathname):
         return pages.trades.layout
     elif pathname == '/vol_surface':
         return pages.vol_surface.layout
+    elif pathname == '/vol_calibration' and pages.vol_calibration.calibration_enabled():
+        return pages.vol_calibration.create_layout(search)
     elif pathname == '/prices':
         return pages.prices.layout
     elif pathname == '/slopes':
@@ -146,6 +158,7 @@ clientside_callback(
                 '/valuation': 'Valuation',
                 '/trades': 'Trades',
                 '/vol_surface': 'Volatility Surface',
+                '/vol_calibration': 'Vol Calibration',
                 '/prices': 'Underlying Prices',
                 '/slopes': 'Slopes',
                 '/spreads': 'Spreads',
@@ -171,9 +184,25 @@ clientside_callback(
         return '';
     }
     """,
-    Output('url', 'search'),  # Dummy output
+    Output('nav-active-sink', 'children'),
     [Input('url', 'pathname')]
 )
+
+app.validation_layout = html.Div([
+    app.layout,
+    pages.greeks.layout,
+    pages.valuation.layout,
+    pages.trades.layout,
+    pages.vol_surface.layout,
+    pages.vol_calibration.validation_layout(),
+    pages.prices.layout,
+    pages.slopes.layout,
+    pages.spreads.layout,
+    pages.pricer.layout,
+    pages.correlations.layout,
+    pages.scenarios.layout,
+    pages.pnl_explain.layout,
+])
 
 if __name__ == '__main__':
     debug_enabled = os.getenv('DASH_DEBUG', '').lower() in {'1', 'true', 'yes', 'on'}

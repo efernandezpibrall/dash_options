@@ -1,0 +1,40 @@
+/* Styles scoped to the embedded volatility calibration workspace. */
+
+.vol-calibration-page .card {
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.vol-calibration-page .form-control,
+.vol-calibration-page .Select-control {
+    margin-bottom: 8px;
+}
+
+.vol-calibration-page .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
+.vol-calibration-page .dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+    font-size: 0.85rem;
+}
+
+.vol-calibration-page .js-plotly-plot {
+    width: 100% !important;
+}
+
+.vol-calibration-page .alert {
+    margin-top: 10px;
+    margin-bottom: 10px;
+}
+
+.vol-calibration-page .btn {
+    font-weight: 500;
+}
+
+.vol-calibration-page .parameter-value {
+    font-family: monospace;
+}
+
+.vol-calibration-page .vol-calibration-tabs {
+    margin-bottom: 1rem;
+}
+
+.vol-calibration-page .vol-calibration-release-notice {
+    margin-bottom: 1rem;
+}

@@ -3,8 +3,6 @@ Henry Hub (HH) commodity page.
 
 US natural gas with call skew characteristic.
 """
-import sys
-from pathlib import Path
 from datetime import date, timedelta
 from io import StringIO, BytesIO
 
@@ -14,28 +12,25 @@ import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, Input, Output, State, no_update, ctx
 from dash.exceptions import PreventUpdate
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-from components.parameter_table import create_parameter_table, format_params_for_table, parse_table_data, update_arb_status_in_row
-from components.smile_grid import create_smile_grid, create_smile_grid_figure
-from components.comparison_modal import (
+from vol_calibration.components.parameter_table import create_parameter_table, format_params_for_table, parse_table_data, update_arb_status_in_row
+from vol_calibration.components.smile_grid import create_smile_grid, create_smile_grid_figure
+from vol_calibration.components.comparison_modal import (
     create_comparison_modal,
     create_comparison_plot,
     format_comparison_data,
     extract_final_params
 )
-from components.data_status import create_data_status_badge, format_data_status
-from components.batch_calibration_modal import (
+from vol_calibration.components.data_status import format_data_status
+from vol_calibration.components.batch_calibration_modal import (
     create_batch_calibration_confirm_modal,
     create_batch_calibration_progress_modal,
     format_batch_result_row,
     create_batch_summary,
     create_batch_results_table,
 )
+from vol_calibration.feature_flags import writes_enabled
 
-from options.calibration_engine.io.loaders import (
-    load_market_data, load_market_data_with_metadata, create_sample_data
-)
+from options.calibration_engine.io.loaders import load_market_data_with_metadata, create_sample_data
 from options.calibration_engine.calibration import calibrate, evaluate_fit
 from options.calibration_engine.config.defaults import get_defaults
 from options.calibration_engine.io.storage import (
@@ -95,7 +90,15 @@ def create_header():
                 dbc.Button([html.I(className="fas fa-sync-alt me-1"), "Reload"], id=f'{COMMODITY_LOWER}-reload-btn', color="secondary", outline=True, size="sm"),
                 dbc.Button([html.I(className="fas fa-magic me-1"), "Calibrate"], id=f'{COMMODITY_LOWER}-calibrate-all-btn', color="success", outline=True, size="sm", title="Calibrate selected expiry"),
                 dbc.Button([html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"], id=f'{COMMODITY_LOWER}-batch-calibrate-btn', color="success", size="sm", title="Calibrate all expiries at once"),
-                dbc.Button([html.I(className="fas fa-save me-1"), "Save All"], id=f'{COMMODITY_LOWER}-save-all-btn', color="primary", outline=True, size="sm"),
+                dbc.Button(
+                    [html.I(className="fas fa-save me-1"), "Save All"],
+                    id=f'{COMMODITY_LOWER}-save-all-btn',
+                    color="primary",
+                    outline=True,
+                    size="sm",
+                    disabled=not writes_enabled(),
+                    title="Saving is disabled during the migration release.",
+                ),
                 dbc.Button([html.I(className="fas fa-file-excel me-1"), "Export"], id=f'{COMMODITY_LOWER}-export-btn', color="info", outline=True, size="sm"),
             ]),
         ], width="auto", className="ms-auto"),
@@ -307,6 +310,8 @@ def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks
     if triggered_id == f'{COMMODITY_LOWER}-comparison-cancel-btn':
         return default_outputs
     if triggered_id == f'{COMMODITY_LOWER}-comparison-save-btn':
+        if not writes_enabled():
+            raise PreventUpdate
         # Save final params to database
         if comparison_store is not None:
             try:
@@ -586,7 +591,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     if market_data_json is None or table_data is None:
         raise PreventUpdate
 
-    auto_save = 'auto_save' in (auto_save_opts or [])
+    auto_save = writes_enabled() and 'auto_save' in (auto_save_opts or [])
     skip_good = 'skip_good' in (skip_good_opts or [])
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
@@ -609,7 +614,6 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
             pass
 
     expiries = sorted(market_data['expiry'].unique())
-    total = len(expiries)
     results = []
     updated_table_data = table_data.copy()
 
@@ -681,7 +685,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
                 results.append(format_batch_result_row(expiry_str, 'Success', old_rmse, new_rmse))
                 success_count += 1
 
-            except Exception as e:
+            except Exception:
                 results.append(format_batch_result_row(expiry_str, 'Failed', old_rmse, None))
                 fail_count += 1
         else:

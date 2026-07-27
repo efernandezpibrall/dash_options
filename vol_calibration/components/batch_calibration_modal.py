@@ -4,10 +4,11 @@ Batch calibration modal component.
 Provides a confirmation dialog and progress tracking for calibrating
 all expiries at once with safety measures.
 """
-import pandas as pd
 import dash_bootstrap_components as dbc
-from dash import html, dcc, dash_table
+from dash import html, dash_table
 from typing import Dict, List, Optional
+
+from vol_calibration.feature_flags import writes_enabled
 
 
 def create_batch_calibration_confirm_modal(commodity: str) -> dbc.Modal:
@@ -51,7 +52,11 @@ def create_batch_calibration_confirm_modal(commodity: str) -> dbc.Modal:
                     dbc.Checklist(
                         id=f"{prefix}-batch-auto-save",
                         options=[
-                            {"label": " Auto-save calibrated parameters to database", "value": "auto_save"}
+                            {
+                                "label": " Auto-save calibrated parameters to database",
+                                "value": "auto_save",
+                                "disabled": not writes_enabled(),
+                            }
                         ],
                         value=[],
                         className="mb-2",

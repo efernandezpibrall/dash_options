@@ -14,6 +14,7 @@ import dash_bootstrap_components as dbc
 from dash import html, dcc, dash_table
 from typing import Dict, Optional, List
 from options.calibration_engine.converters.delta import strike_to_delta
+from vol_calibration.feature_flags import writes_enabled
 
 
 # Parameter columns for comparison table
@@ -126,6 +127,12 @@ def create_comparison_modal(commodity: str) -> dbc.Modal:
                     "Save Final",
                     id=f"{commodity.lower()}-comparison-save-btn",
                     color="success",
+                    disabled=not writes_enabled(),
+                    title=(
+                        "Database writes are disabled during the read/calibrate/export release."
+                        if not writes_enabled()
+                        else "Save final parameters"
+                    ),
                 ),
             ]),
         ],
@@ -236,8 +243,6 @@ def create_comparison_plot(
     go.Figure
         Overlay comparison plot
     """
-    import sys
-    sys.path.insert(0, '/home/efernandez/development/Github')
     from options.calibration_engine.models.wing_model import wing_model_iv
 
     fig = go.Figure()

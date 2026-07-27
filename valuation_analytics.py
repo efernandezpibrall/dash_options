@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from db_fallback import DB_SCHEMA, engine, fq_table
+from db_fallback import DB_SCHEMA, fq_table
+from runtime_config import get_database_engine
 from options.options_library import kirk_model_with_substitution, kirk_spread_greeks
 
 
@@ -161,7 +162,7 @@ def available_valuation_dates():
             ORDER BY cob_date DESC'''
     )
     try:
-        dates = pd.read_sql(query, engine)
+        dates = pd.read_sql(query, get_database_engine())
     except Exception as exc:
         raise ValuationDataError(f'Unable to load valuation dates: {exc}') from exc
     return tuple(pd.to_datetime(dates['cob_date'], errors='coerce').dropna().dt.strftime('%Y-%m-%d'))
@@ -177,7 +178,11 @@ def _load_valuation_snapshot_cached(cob_date):
             ORDER BY substrategy, expiration_date, asset_a, asset_b, put_call'''
     )
     try:
-        frame = pd.read_sql(query, engine, params={'cob_date': pd.Timestamp(cob_date).date()})
+        frame = pd.read_sql(
+            query,
+            get_database_engine(),
+            params={'cob_date': pd.Timestamp(cob_date).date()},
+        )
     except Exception as exc:
         raise ValuationDataError(f'Unable to load valuation snapshot {cob_date}: {exc}') from exc
     return _normalize_snapshot(frame)

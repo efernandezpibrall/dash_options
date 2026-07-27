@@ -1,7 +1,5 @@
 """Volatility surface dashboard page."""
-import configparser
 import io
-import os
 import threading
 
 from dash import html, dcc, callback, Output, Input, State
@@ -9,10 +7,10 @@ import dash
 import dash_ag_grid as dag
 import plotly.graph_objects as go
 import pandas as pd
-from sqlalchemy import create_engine
 
 from dataframe_utils import concat_dataframes
-from db_fallback import read_trino_query, safe_exception_message
+from db_fallback import DB_SCHEMA, read_trino_query, safe_exception_message
+from runtime_config import get_database_engine
 
 
 _DATA_CACHE_LOCK = threading.Lock()
@@ -35,32 +33,6 @@ SURFACE_COLUMNS = [
 SURFACE_SOURCE_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF', 'NBP'}
 SURFACE_PRODUCT_DISPLAY_MAP = {'BRENT': 'Brent'}
 
-#------ code to be able to access config.ini, even having the path in the .virtualenvs is not working without it ------#
-try:
-    # Get the directory where your script is located
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Navigate to the directory containing config.ini
-    # Adjust the number of '..' as needed to reach the correct directory
-    config_dir = os.path.abspath(os.path.join(script_dir, '..','..'))  # Go up one level
-    CONFIG_FILE_PATH = os.path.join(config_dir, 'config.ini')
-except Exception:
-    CONFIG_FILE_PATH = 'config.ini'  # Assumes it's in the same directory or the path it is detected
-
-# --- Load Configuration from INI File ---
-config_reader = configparser.ConfigParser(interpolation=None)
-config_reader.read(CONFIG_FILE_PATH)
-
-# Read values from the ini file sections
-DB_CONNECTION_STRING = config_reader.get('DATABASE', 'CONNECTION_STRING', fallback=None)
-DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng')
-
-
-# --- Essential Variable Checks ---
-if not DB_CONNECTION_STRING:
-    raise ValueError(f"Missing DATABASE CONNECTION_STRING in {CONFIG_FILE_PATH}")
-
-# create engine
-engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
 SURFACE_POSTGRES_SOURCE_LABEL = f'{DB_SCHEMA}.implied_volatility_surface_from_prices'
 SURFACE_SOURCE_LABEL = 'raw.icap.implied_volatility_surface_from_prices'
 SURFACE_TRINO_SOURCES = [
@@ -414,7 +386,7 @@ def load_surface_data():
 
     for source_label, surface_query in SURFACE_POSTGRES_SOURCES:
         try:
-            surface_df = pd.read_sql(sql=surface_query, con=engine)
+            surface_df = pd.read_sql(sql=surface_query, con=get_database_engine())
             normalized_surface = _normalize_surface_data(surface_df)
             if normalized_surface.empty:
                 load_errors.append(f'{source_label}: no usable rows')

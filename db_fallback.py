@@ -1,33 +1,22 @@
-import configparser
 import logging
-import os
 import re
 
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
+
+from runtime_config import config_value, get_database_engine
 
 
 logger = logging.getLogger(__name__)
 
 IDENTIFIER_PATTERN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE_PATH = os.path.join(os.path.abspath(os.path.join(SCRIPT_DIR, '..')), 'config.ini')
-
-config_reader = configparser.ConfigParser(interpolation=None)
-config_reader.read(CONFIG_FILE_PATH)
-
-DB_CONNECTION_STRING = config_reader.get('DATABASE', 'CONNECTION_STRING', fallback=None)
-DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng') or 'at_lng'
-TRINOS_HOST = config_reader.get('TRINOS', 'HOST', fallback=None)
-TRINOS_USERNAME = config_reader.get('TRINOS', 'USERNAME', fallback=None)
-TRINOS_TOKEN = config_reader.get('TRINOS', 'TOKEN', fallback=None)
-TRINOS_PORT = config_reader.get('TRINOS', 'PORT', fallback='443') or '443'
-
-if not DB_CONNECTION_STRING:
-    raise ValueError(f"Missing DATABASE CONNECTION_STRING in {CONFIG_FILE_PATH}")
-
-engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
+DB_CONNECTION_STRING = config_value('DATABASE', 'CONNECTION_STRING')
+DB_SCHEMA = config_value('DATABASE', 'SCHEMA', fallback='at_lng') or 'at_lng'
+TRINOS_HOST = config_value('TRINOS', 'HOST')
+TRINOS_USERNAME = config_value('TRINOS', 'USERNAME')
+TRINOS_TOKEN = config_value('TRINOS', 'TOKEN')
+TRINOS_PORT = config_value('TRINOS', 'PORT', fallback='443') or '443'
 
 
 def quote_ident(identifier):
@@ -107,7 +96,11 @@ def read_with_fallback(
 
     try:
         postgres_statement = text(postgres_query) if isinstance(postgres_query, str) else postgres_query
-        return pd.read_sql(postgres_statement, con=engine, params=postgres_params)
+        return pd.read_sql(
+            postgres_statement,
+            con=get_database_engine(),
+            params=postgres_params,
+        )
     except Exception as postgres_exc:
         postgres_message = safe_exception_message(postgres_exc)
         raise RuntimeError(

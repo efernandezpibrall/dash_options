@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import dash_bootstrap_components as dbc
 from dash import html, dcc
-from typing import List, Dict, Optional, Literal
+from typing import Dict, Optional, Literal
 from options.calibration_engine.converters.delta import strike_to_delta
 
 
@@ -173,8 +173,6 @@ def create_smile_grid_figure(
         Plotly figure with subplot grid
     """
     # Import wing model
-    import sys
-    sys.path.insert(0, '/home/efernandez/development/Github')
     from options.calibration_engine.models.wing_model import wing_model_iv
 
     # Get unique expiries - display all available expiries
@@ -469,8 +467,6 @@ def create_single_smile_plot(
     go.Figure
         Single smile plot
     """
-    import sys
-    sys.path.insert(0, '/home/efernandez/development/Github')
     from options.calibration_engine.models.wing_model import wing_model_iv
 
     fig = go.Figure()

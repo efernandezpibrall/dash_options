@@ -8,7 +8,8 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from db_fallback import DB_SCHEMA, engine, safe_exception_message
+from db_fallback import DB_SCHEMA, safe_exception_message
+from runtime_config import get_database_engine
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def load_dashboard_source_statuses(as_of=None):
         """
     )
     try:
+        engine = get_database_engine()
         with engine.connect() as connection:
             frame = pd.read_sql(query, connection)
     except Exception as exc:

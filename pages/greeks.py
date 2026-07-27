@@ -1,9 +1,7 @@
 # pages/greeks.py
-import configparser
 import hashlib
 import io
 import json
-import os
 import threading
 from collections import OrderedDict
 from functools import lru_cache
@@ -12,28 +10,11 @@ import dash
 import dash_ag_grid as dag
 from dash import Input, Output, State, callback, dcc, html
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 from dataframe_utils import concat_dataframes
-
-
-try:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_dir = os.path.abspath(os.path.join(script_dir, '..', '..'))
-    CONFIG_FILE_PATH = os.path.join(config_dir, 'config.ini')
-except Exception:
-    CONFIG_FILE_PATH = 'config.ini'
-
-config_reader = configparser.ConfigParser(interpolation=None)
-config_reader.read(CONFIG_FILE_PATH)
-
-DB_CONNECTION_STRING = config_reader.get('DATABASE', 'CONNECTION_STRING', fallback=None)
-DB_SCHEMA = config_reader.get('DATABASE', 'SCHEMA', fallback='at_lng')
-
-if not DB_CONNECTION_STRING:
-    raise ValueError(f"Missing DATABASE CONNECTION_STRING in {CONFIG_FILE_PATH}")
-
-engine = create_engine(DB_CONNECTION_STRING, pool_pre_ping=True)
+from db_fallback import DB_SCHEMA
+from runtime_config import get_database_engine
 
 VALUATION_TABLE = f'{DB_SCHEMA}.trades_options_valuation'
 _GREEKS_SERVER_CACHE = OrderedDict()
@@ -493,7 +474,7 @@ def _format_cob_option(value):
 
 
 def _read_sql(query, params=None):
-    return pd.read_sql(text(query), engine, params=params or {})
+    return pd.read_sql(text(query), get_database_engine(), params=params or {})
 
 
 def get_available_dates():

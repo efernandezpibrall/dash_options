@@ -7,7 +7,6 @@ Implements Framework Section 4.2:
 - Conditional formatting on RMSE and Arbitrage status
 - Row selection highlights corresponding smile plot
 """
-import dash_bootstrap_components as dbc
 from dash import html, dash_table
 import pandas as pd
 from typing import List, Dict, Optional
