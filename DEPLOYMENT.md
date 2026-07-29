@@ -7,18 +7,22 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.1.0`, built from reviewed `options` commit
-`eb9f39b`, and this repository's requirements. Do not resolve an unversioned
+`at-options-analytics==1.2.0`, built from reviewed `options` commit
+`6854666f03bfc181c6eeae155e873e0843db7c54`, and this repository's
+requirements. The release wheel SHA-256 is
+`58ef4a25b711220479a1793752914e201aefc814c9a8807b4fa52ae5911b21e0`.
+Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
 
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout eb9f39b
+git -C /path/to/options checkout 6854666f03bfc181c6eeae155e873e0843db7c54
 python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-python -m pip install dist/at_options_analytics-1.1.0-py3-none-any.whl
+echo "58ef4a25b711220479a1793752914e201aefc814c9a8807b4fa52ae5911b21e0  dist/at_options_analytics-1.2.0-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.0-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.1.0'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.0'"
 ```
 
 Run before producing the deployment artifact:
