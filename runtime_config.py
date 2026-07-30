@@ -36,10 +36,9 @@ def load_runtime_config() -> configparser.ConfigParser:
             config.read(candidate)
             break
 
-    if not config.has_section("DATABASE"):
-        config.add_section("DATABASE")
-    if not config.has_section("TRINOS"):
-        config.add_section("TRINOS")
+    for section in ("DATABASE", "TRINOS", "ASPECT", "NETWORK"):
+        if not config.has_section(section):
+            config.add_section(section)
 
     env_mappings = {
         ("DATABASE", "CONNECTION_STRING"): ("DATABASE_URL", "OPTIONS_DATABASE_URL"),
@@ -50,6 +49,13 @@ def load_runtime_config() -> configparser.ConfigParser:
         ("TRINOS", "TOKEN"): ("TRINOS_TOKEN",),
         ("TRINOS", "PORT"): ("TRINOS_PORT",),
         ("TRINOS", "VERIFY_SSL"): ("TRINOS_VERIFY_SSL",),
+        ("ASPECT", "USERNAME"): ("ASPECT_USERNAME",),
+        ("ASPECT", "PASSWORD"): ("ASPECT_PASSWORD",),
+        ("ASPECT", "BASE_URL"): ("ASPECT_BASE_URL",),
+        ("ASPECT", "BOOK"): ("ASPECT_BOOK",),
+        ("ASPECT", "VERIFY_SSL"): ("ASPECT_VERIFY_SSL",),
+        ("ASPECT", "REQUEST_TIMEOUT_SECONDS"): ("ASPECT_REQUEST_TIMEOUT_SECONDS",),
+        ("NETWORK", "PROXY_URL"): ("OPTIONS_PROXY_URL", "PROXY_URL"),
     }
     for (section, option), names in env_mappings.items():
         for name in names:

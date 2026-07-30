@@ -139,9 +139,11 @@ def test_excel_summary_records_model_version(module):
         "2026-07-08",
     )
     workbook = BytesIO(base64.b64decode(download["content"]))
-    summary = pd.read_excel(workbook, sheet_name="Summary")
+    excel_file = pd.ExcelFile(workbook)
+    summary = pd.read_excel(excel_file, sheet_name="Summary")
 
     assert summary.loc[0, "Model Version"] == DEFAULT_CALIBRATION_MODEL_VERSION
+    assert excel_file.sheet_names == ["Parameters", "Summary"]
 
 
 @pytest.mark.parametrize("module", PRODUCT_MODULES)

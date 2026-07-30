@@ -2,21 +2,50 @@
 import hashlib
 import io
 import json
+import logging
 import threading
 from collections import OrderedDict
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 import dash
 import dash_ag_grid as dag
 from dash import Input, Output, State, callback, dcc, html
 import pandas as pd
+import requests
 from sqlalchemy import text
 
 from dataframe_utils import concat_dataframes
 from db_fallback import DB_SCHEMA
-from runtime_config import get_database_engine
+from runtime_config import config_bool, config_value, get_database_engine
 
-VALUATION_TABLE = f'{DB_SCHEMA}.trades_options_valuation'
+logger = logging.getLogger(__name__)
+
+VALUATION_TABLE = f'{DB_SCHEMA}.trades_options_valuation_current'
+ASPECT_SOURCE_LABEL = 'Aspect Position Exposure Report'
+ASPECT_DEFAULT_URL = (
+    'https://at.myaspect.net/webservice/aspectrs/'
+    '_MiddleOffice_POSITION_ExposureReport'
+)
+ASPECT_DEFAULT_BOOK = 'AD-LNG'
+ASPECT_REQUIRED_COLUMNS = {
+    'instrument',
+    'qty',
+    'uoM',
+    'maturityForwardDate',
+    'strategy',
+    'entityType',
+}
+ASPECT_EXPORT_COLUMNS = [
+    'instrument',
+    'qty',
+    'uoM',
+    'maturityForwardDate',
+    'strategy',
+    'dealType',
+    'entityType',
+    'exchangeTradeOtc',
+]
 _GREEKS_SERVER_CACHE = OrderedDict()
 _GREEKS_SERVER_CACHE_LOCK = threading.Lock()
 _GREEKS_SERVER_CACHE_MAX_ENTRIES = 32
@@ -40,7 +69,7 @@ GREEK_DEFINITIONS = {
     },
     'theta': {
         'label': 'Theta',
-        'type': 'pair',
+        'type': 'instrument_or_pair',
         'column': 'qty_theta',
     },
     'correlation': {
@@ -82,6 +111,7 @@ DATA_COLUMNS = [
     'type_option',
     'put_call',
     'buy_sell',
+    'currency',
     'expiration_date',
     'quantity',
     'unit_quantity',
@@ -128,6 +158,33 @@ def _empty_store(message='No data available'):
     }
 
 
+def _empty_aspect_store(message='Aspect exposure has not been loaded', status='idle'):
+    return {
+        'meta': {
+            'status': status,
+            'message': message,
+            'source': ASPECT_SOURCE_LABEL,
+            'mode': None,
+            'requested_cob_date': None,
+            'fetched_at': None,
+            'source_rows': 0,
+            'accepted_rows': 0,
+            'rejected_rows': 0,
+            'instruments': 0,
+            'strategies': 0,
+        },
+        'rows': [],
+    }
+
+
+class AspectConfigurationError(RuntimeError):
+    """Raised when the Aspect source is not configured for this runtime."""
+
+
+class AspectSourceError(RuntimeError):
+    """Raised when the Aspect source cannot provide a usable exposure snapshot."""
+
+
 def _greeks_cache_key(namespace, parts):
     payload = json.dumps(
         {
@@ -163,6 +220,16 @@ def _resolve_greeks_payload(reference):
         if payload is not None:
             _GREEKS_SERVER_CACHE.move_to_end(cache_key)
     return payload if payload is not None else _empty_store('Server snapshot expired; refresh the page')
+
+
+def _resolve_aspect_payload(reference):
+    if not reference:
+        return _empty_aspect_store()
+
+    payload = _resolve_greeks_payload(reference)
+    if payload.get('meta', {}).get('source') == ASPECT_SOURCE_LABEL:
+        return payload
+    return _empty_aspect_store('Aspect snapshot expired; reload Aspect exposure', status='error')
 
 
 def _clear_greeks_server_cache():
@@ -219,6 +286,16 @@ def _standard_pair(asset_a, asset_b):
     if len(assets) == 1:
         return assets[0]
     return ' / '.join(sorted(assets))
+
+
+def _underlying_sides(row):
+    sides = []
+    for side in ('a', 'b'):
+        asset = row.get(f'asset_{side}')
+        if asset is None or pd.isna(asset) or not str(asset).strip():
+            continue
+        sides.append((side, str(asset).strip()))
+    return sides
 
 
 def _display_asset_label(value):
@@ -439,9 +516,19 @@ def _format_maturity_component(
     date_value = pd.to_datetime(value, errors='coerce')
     if pd.isna(date_value):
         return 'Unknown'
-    if maturity_type == 'calendar':
+    maturity_bucket = _format_date_bucket(
+        date_value,
+        aggregation,
+        month_through,
+        quarter_through,
+        cob_date,
+    )
+    if (
+        maturity_type == 'calendar'
+        and not (len(maturity_bucket) == 4 and maturity_bucket.isdigit())
+    ):
         return f'{date_value.year}-CAL'
-    return _format_date_bucket(date_value, aggregation, month_through, quarter_through, cob_date)
+    return maturity_bucket
 
 
 def _format_maturity_pair(row, aggregation, month_through=None, quarter_through=None, cob_date=None):
@@ -471,6 +558,164 @@ def _format_cob_option(value):
     if pd.isna(date_value):
         return None
     return date_value.strftime('%Y-%m-%d')
+
+
+def _dubai_today():
+    return pd.Timestamp.now(tz=ZoneInfo('Asia/Dubai')).date()
+
+
+def _resolve_aspect_request_date(mode, selected_date):
+    if mode == 'live':
+        return _dubai_today()
+    if mode != 'settlement':
+        raise ValueError(f'Unsupported Aspect pricing mode: {mode}')
+
+    date_value = _to_timestamp(selected_date)
+    if date_value is None:
+        raise AspectSourceError('Select a COB date before loading Aspect settlement exposure.')
+    return date_value.date()
+
+
+def _aspect_request_timeout():
+    raw_value = config_value('ASPECT', 'REQUEST_TIMEOUT_SECONDS', fallback='90')
+    try:
+        timeout = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise AspectConfigurationError(
+            'ASPECT.REQUEST_TIMEOUT_SECONDS must be a number.'
+        ) from exc
+    if not 1 <= timeout <= 300:
+        raise AspectConfigurationError(
+            'ASPECT.REQUEST_TIMEOUT_SECONDS must be between 1 and 300 seconds.'
+        )
+    return timeout
+
+
+def _extract_aspect_response_records(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ('data', 'rows', 'result'):
+            candidate = payload.get(key)
+            if isinstance(candidate, list):
+                return candidate
+        if ASPECT_REQUIRED_COLUMNS.issubset(payload):
+            return [payload]
+    raise AspectSourceError('Aspect returned an unsupported response shape.')
+
+
+def fetch_aspect_exposure_report(request_date):
+    username = config_value('ASPECT', 'USERNAME')
+    password = config_value('ASPECT', 'PASSWORD')
+    if not username or not password:
+        raise AspectConfigurationError(
+            'Aspect credentials are unavailable. Configure ASPECT_USERNAME and '
+            'ASPECT_PASSWORD for the dashboard runtime.'
+        )
+
+    endpoint = config_value('ASPECT', 'BASE_URL', fallback=ASPECT_DEFAULT_URL) or ASPECT_DEFAULT_URL
+    book = config_value('ASPECT', 'BOOK', fallback=ASPECT_DEFAULT_BOOK) or ASPECT_DEFAULT_BOOK
+    try:
+        verify_ssl = config_bool('ASPECT', 'VERIFY_SSL', fallback=True)
+    except ValueError as exc:
+        raise AspectConfigurationError(str(exc)) from exc
+    proxy_url = config_value('NETWORK', 'PROXY_URL')
+    timeout = _aspect_request_timeout()
+    today_pricing = 0 if request_date == _dubai_today() else 1
+    request_payload = {
+        'cobDate': request_date.strftime('%Y-%m-%d'),
+        'todayPricing': today_pricing,
+        'book': book,
+        'displayExchangeTradeOtc': True,
+    }
+    request_options = {
+        'json': request_payload,
+        'auth': (username, password),
+        'timeout': (min(10.0, timeout), timeout),
+        'verify': verify_ssl,
+    }
+    if proxy_url:
+        request_options['proxies'] = {'http': proxy_url, 'https': proxy_url}
+
+    try:
+        response = requests.post(endpoint, **request_options)
+    except requests.RequestException as exc:
+        raise AspectSourceError('Aspect service could not be reached.') from exc
+
+    if response.status_code in {401, 403}:
+        raise AspectSourceError('Aspect authentication was rejected.')
+    if not response.ok:
+        raise AspectSourceError(
+            f'Aspect service request failed with HTTP {response.status_code}.'
+        )
+
+    try:
+        response_payload = response.json()
+    except ValueError as exc:
+        raise AspectSourceError('Aspect returned a non-JSON response.') from exc
+
+    records = _extract_aspect_response_records(response_payload)
+    return pd.DataFrame.from_records(records)
+
+
+def _prepare_aspect_records(data):
+    missing_columns = sorted(ASPECT_REQUIRED_COLUMNS - set(data.columns))
+    if missing_columns:
+        raise AspectSourceError(
+            'Aspect response is missing required fields: ' + ', '.join(missing_columns)
+        )
+
+    prepared = data.copy()
+    for column in ASPECT_EXPORT_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = None
+
+    prepared['instrument'] = prepared['instrument'].astype('string').str.strip()
+    prepared['qty'] = pd.to_numeric(prepared['qty'], errors='coerce')
+    prepared['maturityForwardDate'] = pd.to_datetime(
+        prepared['maturityForwardDate'],
+        errors='coerce',
+    )
+    valid_rows = (
+        prepared['instrument'].notna()
+        & prepared['instrument'].ne('')
+        & prepared['qty'].notna()
+        & prepared['maturityForwardDate'].notna()
+    )
+    rejected_rows = int((~valid_rows).sum())
+    prepared = prepared.loc[valid_rows, ASPECT_EXPORT_COLUMNS].copy()
+    if prepared.empty and not data.empty:
+        raise AspectSourceError(
+            'Aspect returned rows, but none had a valid instrument, quantity, and maturity.'
+        )
+
+    for column in ('uoM', 'strategy', 'dealType', 'entityType', 'exchangeTradeOtc'):
+        prepared[column] = prepared[column].fillna('N/A').astype(str)
+    prepared['qty'] = prepared['qty'].astype(float)
+    prepared['maturityForwardDate'] = prepared['maturityForwardDate'].dt.strftime('%Y-%m-%d')
+    return prepared, rejected_rows
+
+
+def _load_aspect_payload(mode, selected_date):
+    request_date = _resolve_aspect_request_date(mode, selected_date)
+    source_data = fetch_aspect_exposure_report(request_date)
+    prepared, rejected_rows = _prepare_aspect_records(source_data)
+    fetched_at = pd.Timestamp.now(tz=ZoneInfo('Asia/Dubai')).isoformat()
+    meta = {
+        'status': 'ok',
+        'message': 'Aspect exposure loaded',
+        'source': ASPECT_SOURCE_LABEL,
+        'mode': mode,
+        'requested_cob_date': request_date.strftime('%Y-%m-%d'),
+        'fetched_at': fetched_at,
+        'source_rows': int(source_data.shape[0]),
+        'accepted_rows': int(prepared.shape[0]),
+        'rejected_rows': rejected_rows,
+        'instruments': int(prepared['instrument'].nunique()),
+        'strategies': int(prepared['strategy'].nunique()),
+        'book': config_value('ASPECT', 'BOOK', fallback=ASPECT_DEFAULT_BOOK) or ASPECT_DEFAULT_BOOK,
+    }
+    return {'meta': meta, 'rows': prepared.to_dict('records')}
 
 
 def _read_sql(query, params=None):
@@ -505,12 +750,11 @@ def fetch_filter_values(cob_date):
         set(data['asset_a'].dropna().astype(str).tolist())
         | set(data['asset_b'].dropna().astype(str).tolist())
     )
-    pairs = sorted(
-        {
-            _standard_pair(row['asset_a'], row['asset_b'])
-            for _, row in data[['asset_a', 'asset_b']].dropna(how='all').iterrows()
-        }
-    )
+    pairs = sorted({
+        _standard_pair(row['asset_a'], row['asset_b'])
+        for _, row in data[['asset_a', 'asset_b']].dropna(how='all').iterrows()
+        if len(_underlying_sides(row)) == 2
+    })
 
     bucket_options = (
         [{'label': f'Instrument | {asset}', 'value': f'instrument::{asset}'} for asset in assets]
@@ -624,7 +868,11 @@ def build_maturity_cutoff_options(cob_date):
 def fetch_instrument_unit_map():
     try:
         query = f'''
-            SELECT a.instrument, b."Conv_factor", b."To_unit" AS unit
+            SELECT
+                a.instrument,
+                b."Conv_factor",
+                b."From_unit" AS native_unit,
+                b."To_unit" AS unit
             FROM {DB_SCHEMA}.mapping_instrument_marker a
             LEFT JOIN {DB_SCHEMA}.mapping_instrument_curve_enverus b
                 ON a."Marker" = b."Instrument"
@@ -639,6 +887,7 @@ def fetch_instrument_unit_map():
         if instrument is None or pd.isna(instrument):
             continue
         unit_map[str(instrument)] = {
+            'native_unit': _normalize_unit(row.get('native_unit')),
             'unit': _normalize_unit(row.get('unit')),
             'conv_factor': _safe_number(row.get('Conv_factor'), 1.0) or 1.0,
         }
@@ -648,6 +897,9 @@ def fetch_instrument_unit_map():
 def _instrument_unit_info(asset, unit_map, fallback_unit):
     info = unit_map.get(str(asset), {})
     return {
+        'native_unit': _normalize_unit(
+            info.get('native_unit') or fallback_unit
+        ),
         'unit': _normalize_unit(info.get('unit') or fallback_unit),
         'conv_factor': _safe_number(info.get('conv_factor'), 1.0) or 1.0,
     }
@@ -670,13 +922,16 @@ def normalize_greek_contributions(
 
     for source_row_id, row in data.iterrows():
         pair = _standard_pair(row.get('asset_a'), row.get('asset_b'))
+        underlying_sides = _underlying_sides(row)
         base = {
             'source_row_id': int(source_row_id),
+            'source': 'Options valuation',
             'cob_date': _format_cob_option(row.get('cob_date')),
             'strategy': row.get('substrategy') or 'N/A',
             'trade_type': row.get('type_trade') or 'N/A',
             'option_type': row.get('type_option') or 'N/A',
             'put_call': row.get('put_call') or 'N/A',
+            'currency': row.get('currency'),
             'asset_pair': pair,
             'quantity': _safe_number(row.get('quantity')),
             'value': _safe_number(row.get('qty_value')),
@@ -692,13 +947,13 @@ def normalize_greek_contributions(
 
                 raw_value = _safe_number(row.get(source_column))
                 unit_info = _instrument_unit_info(asset, unit_map, row.get('unit_quantity'))
-                display_unit = unit_info['unit']
+                display_unit = unit_info['native_unit']
                 display_value = raw_value
 
-                if greek_key in ['delta', 'gamma']:
+                if greek_key in ['delta', 'gamma'] and unit_mode == 'lots':
                     display_value = display_value * unit_info['conv_factor']
-                    if unit_mode == 'lots':
-                        display_value = display_value / _lot_divisor(display_unit)
+                    display_value = display_value / _lot_divisor(unit_info['unit'])
+                    display_unit = 'Lots'
 
                 maturity_column = f'maturity_date_{side}'
                 maturity_type_column = f'maturity_date_type_{side}'
@@ -727,34 +982,143 @@ def normalize_greek_contributions(
                     })
 
         theta_value = _safe_number(row.get('qty_theta'))
-        theta_maturity = _format_maturity_pair(row, aggregation, month_through, quarter_through, cob_date)
-        normalized_rows.append({
-            **base,
-            'greek': 'theta',
-            'greek_label': 'Theta',
-            'bucket_type': 'Pair',
-            'risk_bucket': pair,
-            'instrument': 'N/A',
-            'unit': _normalize_unit(row.get('unit_quantity')),
-            'maturity_bucket': theta_maturity,
-            'maturity_pair': theta_maturity,
-            'exposure': theta_value,
-        })
+        if len(underlying_sides) == 1:
+            theta_side, theta_asset = underlying_sides[0]
+            theta_unit_info = _instrument_unit_info(
+                theta_asset,
+                unit_map,
+                row.get('unit_quantity'),
+            )
+            theta_entries = _expand_instrument_maturity(
+                row.get(f'maturity_date_{theta_side}'),
+                row.get(f'maturity_date_type_{theta_side}'),
+                theta_value,
+                aggregation,
+                month_through,
+                quarter_through,
+                cob_date,
+            )
+            for theta_maturity, allocated_theta in theta_entries:
+                normalized_rows.append({
+                    **base,
+                    'greek': 'theta',
+                    'greek_label': 'Theta',
+                    'bucket_type': 'Instrument',
+                    'risk_bucket': theta_asset,
+                    'instrument': theta_asset,
+                    'unit': theta_unit_info['native_unit'],
+                    'maturity_bucket': theta_maturity,
+                    'maturity_pair': theta_maturity,
+                    'exposure': allocated_theta,
+                })
+        else:
+            theta_maturity = _format_maturity_pair(
+                row,
+                aggregation,
+                month_through,
+                quarter_through,
+                cob_date,
+            )
+            normalized_rows.append({
+                **base,
+                'greek': 'theta',
+                'greek_label': 'Theta',
+                'bucket_type': 'Pair',
+                'risk_bucket': pair,
+                'instrument': 'N/A',
+                'unit': _normalize_unit(row.get('unit_quantity')),
+                'maturity_bucket': theta_maturity,
+                'maturity_pair': theta_maturity,
+                'exposure': theta_value,
+            })
 
-        corr_value = _safe_number(row.get('qty_corr_sensitivity'))
-        corr_maturity = _format_maturity_pair(row, aggregation, month_through, quarter_through, cob_date)
-        normalized_rows.append({
-            **base,
-            'greek': 'correlation',
-            'greek_label': 'Correlation',
-            'bucket_type': 'Pair',
-            'risk_bucket': pair,
-            'instrument': 'N/A',
-            'unit': _normalize_unit(row.get('unit_quantity')),
-            'maturity_bucket': corr_maturity,
-            'maturity_pair': corr_maturity,
-            'exposure': corr_value,
-        })
+        if len(underlying_sides) == 2:
+            corr_value = _safe_number(row.get('qty_corr_sensitivity'))
+            corr_maturity = _format_maturity_pair(
+                row,
+                aggregation,
+                month_through,
+                quarter_through,
+                cob_date,
+            )
+            normalized_rows.append({
+                **base,
+                'greek': 'correlation',
+                'greek_label': 'Correlation',
+                'bucket_type': 'Pair',
+                'risk_bucket': pair,
+                'instrument': 'N/A',
+                'unit': _normalize_unit(row.get('unit_quantity')),
+                'maturity_bucket': corr_maturity,
+                'maturity_pair': corr_maturity,
+                'exposure': corr_value,
+            })
+
+    return pd.DataFrame(normalized_rows)
+
+
+def normalize_aspect_contributions(
+    data,
+    aggregation='mixed',
+    unit_mode='native',
+    month_through=None,
+    quarter_through=None,
+    cob_date=None,
+):
+    if data.empty:
+        return pd.DataFrame()
+
+    unit_map = fetch_instrument_unit_map()
+    normalized_rows = []
+    data = data.reset_index(drop=True)
+
+    for source_row_id, row in data.iterrows():
+        instrument = str(row.get('instrument') or '').strip()
+        if not instrument:
+            continue
+
+        unit_info = _instrument_unit_info(instrument, unit_map, row.get('uoM'))
+        display_unit = unit_info['unit']
+        display_value = _safe_number(row.get('qty')) * unit_info['conv_factor']
+        if unit_mode == 'lots':
+            display_value = display_value / _lot_divisor(display_unit)
+
+        maturity_entries = _expand_instrument_maturity(
+            row.get('maturityForwardDate'),
+            'month',
+            display_value,
+            aggregation,
+            month_through,
+            quarter_through,
+            cob_date,
+        )
+        base = {
+            'source_row_id': f'aspect-{source_row_id}',
+            'source': ASPECT_SOURCE_LABEL,
+            'cob_date': _format_cob_option(cob_date),
+            'strategy': row.get('strategy') or 'N/A',
+            'trade_type': row.get('entityType') or 'N/A',
+            'option_type': row.get('dealType') or 'Aspect exposure',
+            'put_call': 'N/A',
+            'currency': None,
+            'asset_pair': instrument,
+            'quantity': _safe_number(row.get('qty')),
+            'value': 0.0,
+            'pnl': 0.0,
+        }
+        for maturity_bucket, allocated_value in maturity_entries:
+            normalized_rows.append({
+                **base,
+                'greek': 'delta',
+                'greek_label': 'Delta',
+                'bucket_type': 'Instrument',
+                'risk_bucket': instrument,
+                'instrument': instrument,
+                'unit': display_unit,
+                'maturity_bucket': maturity_bucket,
+                'maturity_pair': maturity_bucket,
+                'exposure': allocated_value,
+            })
 
     return pd.DataFrame(normalized_rows)
 
@@ -977,8 +1341,15 @@ def create_unit_ladder_df(rows, greek_key):
     return net[ordered_columns]
 
 
-def _bucket_greek_column_labels(bucket_type):
-    greek_keys = ['theta', 'correlation'] if bucket_type == 'Pair' else ['delta', 'gamma', 'vega']
+def _bucket_greek_column_labels(bucket_type, available_greeks=None):
+    greek_keys = (
+        ['theta', 'correlation']
+        if bucket_type == 'Pair'
+        else ['delta', 'gamma', 'vega', 'theta']
+    )
+    if available_greeks is not None:
+        available_greeks = set(available_greeks)
+        greek_keys = [greek_key for greek_key in greek_keys if greek_key in available_greeks]
     return [GREEK_DEFINITIONS[greek_key]['label'] for greek_key in greek_keys]
 
 
@@ -1031,7 +1402,10 @@ def create_bucket_greek_tables(rows):
         table = table.loc[
             sorted(table.index, key=lambda row_index: _maturity_sort_key(table.at[row_index, 'Maturity']))
         ].reset_index(drop=True)
-        greek_columns = _bucket_greek_column_labels(bucket['bucket_type'])
+        greek_columns = _bucket_greek_column_labels(
+            bucket['bucket_type'],
+            bucket_rows['greek'],
+        )
         for column in greek_columns:
             if column not in table.columns:
                 table[column] = 0.0
@@ -1043,7 +1417,11 @@ def create_bucket_greek_tables(rows):
         table['_row_type'] = 'normal'
         table = concat_dataframes([table, pd.DataFrame([total_row])], ignore_index=True)
         unit_label = str(bucket['unit']) if bucket['unit'] is not None and not pd.isna(bucket['unit']) else ''
-        title = f"{bucket['display_bucket']} ({unit_label})" if unit_label else str(bucket['display_bucket'])
+        bucket_type_label = (
+            'ASSET' if bucket['bucket_type'] == 'Instrument' else 'PAIR'
+        )
+        bucket_label = f"{bucket_type_label}: {bucket['display_bucket']}"
+        title = f'{bucket_label} ({unit_label})' if unit_label else bucket_label
         bucket_tables.append({
             'id': f'bucket-greeks-{index}',
             'title': title,
@@ -1081,6 +1459,7 @@ def create_raw_rows_df(rows):
         'strategy',
         'trade_type',
         'option_type',
+        'currency',
         'greek_label',
         'bucket_type',
         'risk_bucket',
@@ -1099,6 +1478,7 @@ def create_raw_rows_df(rows):
             'strategy': 'Strategy',
             'trade_type': 'Trade Type',
             'option_type': 'Option Type',
+            'currency': 'Currency',
             'greek_label': 'Greek',
             'bucket_type': 'Bucket Type',
             'risk_bucket': 'Risk Bucket',
@@ -1134,12 +1514,142 @@ def build_output_tables(rows):
     }
 
 
+def create_aspect_summary_df(rows):
+    if rows.empty:
+        return pd.DataFrame()
+
+    working = rows.copy()
+    working['Instrument'] = working['risk_bucket'].map(_display_asset_label)
+    summary = (
+        working.groupby(
+            ['strategy', 'trade_type', 'Instrument', 'unit'],
+            dropna=False,
+        )
+        .agg(Delta=('exposure', 'sum'))
+        .reset_index()
+        .rename(
+            columns={
+                'strategy': 'Strategy',
+                'trade_type': 'Trade Type',
+                'unit': 'Unit',
+            }
+        )
+    )
+    summary['_sort_abs'] = summary['Delta'].abs()
+    summary = summary.sort_values(
+        ['_sort_abs', 'Strategy', 'Instrument'],
+        ascending=[False, True, True],
+    ).drop(columns=['_sort_abs'])
+    return summary[['Strategy', 'Trade Type', 'Instrument', 'Unit', 'Delta']]
+
+
+def create_aspect_raw_export_df(rows):
+    if rows.empty:
+        return pd.DataFrame()
+    return rows[ASPECT_EXPORT_COLUMNS].rename(
+        columns={
+            'instrument': 'Instrument',
+            'qty': 'Quantity',
+            'uoM': 'Source Unit',
+            'maturityForwardDate': 'Maturity',
+            'strategy': 'Strategy',
+            'dealType': 'Deal Type',
+            'entityType': 'Entity Type',
+            'exchangeTradeOtc': 'Exchange/OTC',
+        }
+    )
+
+
+def _sanitize_excel_text(frame):
+    safe = frame.copy()
+    for column in safe.select_dtypes(include=['object', 'string']).columns:
+        safe[column] = safe[column].map(
+            lambda value: (
+                f"'{value}"
+                if isinstance(value, str) and value.startswith(('=', '+', '-', '@'))
+                else value
+            )
+        )
+    return safe
+
+
+def _aspect_status_text(meta):
+    status = meta.get('status')
+    if status != 'ok':
+        return meta.get('message') or 'Aspect exposure is unavailable.'
+
+    mode_label = 'Live' if meta.get('mode') == 'live' else 'Settlement'
+    message = (
+        f"{mode_label} Aspect exposure | COB {meta.get('requested_cob_date')} | "
+        f"{meta.get('accepted_rows', 0):,} accepted rows | "
+        f"{meta.get('instruments', 0):,} instruments | "
+        f"book {meta.get('book') or ASPECT_DEFAULT_BOOK}"
+    )
+    rejected_rows = int(meta.get('rejected_rows') or 0)
+    if rejected_rows:
+        message += f' | {rejected_rows:,} invalid rows excluded'
+    return message
+
+
+def build_aspect_overlay_tables(rows):
+    if rows.empty:
+        return html.Div(
+            'Load an Aspect settlement or live snapshot to view the delta overlay.',
+            className='greeks-empty-state',
+        )
+
+    summary = create_aspect_summary_df(rows)
+    delta_ladder = create_ladder_df(rows, 'delta')
+    delta_unit_ladder = create_unit_ladder_df(rows, 'delta')
+    unit_headers = create_ladder_unit_headers(rows, 'delta')
+
+    return html.Div([
+        html.Div([
+            html.Div('By Strategy and Instrument', className='greeks-ladder-subtitle'),
+            build_compact_table(
+                'greeks-aspect-summary-table',
+                summary,
+                fit_to_content=True,
+                grid_class_suffix=' greeks-aspect-grid',
+            ),
+        ], className='greeks-aspect-table-panel'),
+        html.Div([
+            html.Div('By Maturity and Instrument', className='greeks-ladder-subtitle'),
+            build_compact_table(
+                'greeks-aspect-delta-ladder-table',
+                delta_ladder,
+                fit_to_content=True,
+                grid_class_suffix=' greeks-aspect-grid',
+                unit_headers=unit_headers,
+            ),
+        ], className='greeks-aspect-table-panel'),
+        html.Div([
+            html.Div('By Maturity and Unit', className='greeks-ladder-subtitle'),
+            build_compact_table(
+                'greeks-aspect-unit-ladder-table',
+                delta_unit_ladder,
+                fit_to_content=True,
+                grid_class_suffix=' greeks-aspect-grid',
+            ),
+        ], className='greeks-aspect-table-panel'),
+    ], className='greeks-aspect-table-grid')
+
+
+QUANTITY_GREEK_DECIMAL_PLACES = 6
+QUANTITY_GREEK_NUMBER_FORMAT = '#,##0.000000'
+MONETARY_NUMBER_FORMAT = '#,##0.00'
+MONETARY_EXPORT_COLUMNS = {'Value', 'P&L'}
+INTEGER_EXPORT_COLUMNS = {'Source Row'}
+
+
 def _round_numeric(df):
     if df.empty:
         return df
     rounded = df.copy()
     for column in rounded.select_dtypes(include='number').columns:
-        rounded[column] = rounded[column].round(0)
+        rounded[column] = rounded[column].round(
+            QUANTITY_GREEK_DECIMAL_PLACES
+        )
     return rounded
 
 
@@ -1147,10 +1657,11 @@ def _format_grid_number(value):
     numeric_value = _safe_number(value)
     if numeric_value == 0:
         return None
-    return f'{numeric_value:,.0f}'
+    return f'{numeric_value:,.{QUANTITY_GREEK_DECIMAL_PLACES}f}'
 
 
 def _format_grid_records(df, numeric_columns):
+    formatted = []
     formatted = []
     for record in df.to_dict('records'):
         clean = {}
@@ -1403,7 +1914,29 @@ def _format_number(value):
 def _format_currency(value):
     value = _safe_number(value)
     sign = '-' if value < 0 else ''
-    return f'{sign}${abs(value):,.0f}'
+    return (
+        f'{sign}${abs(value):,.{QUANTITY_GREEK_DECIMAL_PLACES}f}'
+    )
+
+
+def _apply_export_number_formats(worksheet, frame):
+    numeric_columns = set(
+        frame.select_dtypes(include='number').columns.tolist()
+    )
+    for column_index, column in enumerate(frame.columns, start=1):
+        if column not in numeric_columns:
+            continue
+        if column in MONETARY_EXPORT_COLUMNS:
+            number_format = MONETARY_NUMBER_FORMAT
+        elif column in INTEGER_EXPORT_COLUMNS:
+            number_format = '#,##0'
+        else:
+            number_format = QUANTITY_GREEK_NUMBER_FORMAT
+        for row_index in range(2, len(frame) + 2):
+            worksheet.cell(
+                row=row_index,
+                column=column_index,
+            ).number_format = number_format
 
 
 def _theta_kpi_class(value):
@@ -1456,6 +1989,7 @@ layout = html.Div([
     dcc.Store(id='refresh-trigger-store', storage_type='memory'),
     dcc.Store(id='greeks-unfiltered-normalized-store', storage_type='memory'),
     dcc.Store(id='greeks-normalized-store', storage_type='memory'),
+    dcc.Store(id='greeks-aspect-store', storage_type='memory'),
     dcc.Download(id='download-greeks-monitor-workbook'),
 
     html.Div([
@@ -1519,6 +2053,18 @@ layout = html.Div([
                 ),
             ], className='greeks-monitor-control-group greeks-control-unit-mode'),
             html.Div([
+                html.Button(
+                    'Load Aspect COB',
+                    id='greeks-aspect-settlement-btn',
+                    className='greeks-aspect-button greeks-aspect-button-secondary',
+                    title='Load the selected COB settlement exposure from Aspect',
+                ),
+                html.Button(
+                    'Load Aspect Live',
+                    id='greeks-aspect-live-btn',
+                    className='greeks-aspect-button greeks-aspect-button-live',
+                    title='Load today’s live exposure from Aspect',
+                ),
                 html.Button('Export Workbook', id='export-greeks-workbook-btn', className='inline-button-primary'),
             ], className='greeks-monitor-actions'),
         ], className='greeks-monitor-control-row'),
@@ -1565,15 +2111,28 @@ layout = html.Div([
         children=[
             html.Div(id='greeks-kpi-strip'),
             html.Div([
+                dcc.Loading(
+                    id='greeks-aspect-loading',
+                    type='circle',
+                    children=html.Div([
+                        html.Div([
+                            html.H3('Aspect Delta Overlay', className='section-title-inline greeks-monitor-title'),
+                        ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
+                        html.Div(
+                            id='greeks-aspect-status',
+                            className='greeks-aspect-status greeks-aspect-status-idle',
+                            role='status',
+                            **{'aria-live': 'polite'},
+                        ),
+                        html.Div(
+                            id='greeks-aspect-table-container',
+                            className='supply-dest-table-container greeks-monitor-table-wrap',
+                        ),
+                    ], className='main-section-container supply-dest-section greeks-monitor-section greeks-aspect-section'),
+                ),
                 html.Div([
                     html.Div([
-                        html.H3('Current Greeks Summary', className='section-title-inline greeks-monitor-title'),
-                    ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
-                    html.Div(id='greeks-summary-table-container', className='supply-dest-table-container greeks-monitor-table-wrap'),
-                ], className='main-section-container supply-dest-section greeks-monitor-section'),
-                html.Div([
-                    html.Div([
-                        html.H3('Maturity by Risk Bucket', className='section-title-inline greeks-monitor-title'),
+                        html.H3('Maturity by ASSET/PAIR', className='section-title-inline greeks-monitor-title'),
                     ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
                     html.Div(id='greeks-bucket-greek-tables-container', className='supply-dest-table-container greeks-monitor-table-wrap'),
                 ], className='main-section-container supply-dest-section greeks-monitor-section'),
@@ -1596,6 +2155,45 @@ def trigger_data_refresh(n_clicks):
         _clear_greeks_server_cache()
         return {'timestamp': pd.Timestamp.now().isoformat(), 'refresh_count': n_clicks}
     return dash.no_update
+
+
+@callback(
+    Output('greeks-aspect-store', 'data'),
+    Input('greeks-aspect-settlement-btn', 'n_clicks'),
+    Input('greeks-aspect-live-btn', 'n_clicks'),
+    State('date-selector', 'value'),
+    prevent_initial_call=True,
+    running=[
+        (Output('greeks-aspect-settlement-btn', 'disabled'), True, False),
+        (Output('greeks-aspect-live-btn', 'disabled'), True, False),
+    ],
+)
+def load_aspect_exposure(settlement_clicks, live_clicks, selected_date):
+    del settlement_clicks, live_clicks
+    triggered_id = dash.ctx.triggered_id
+    mode = 'live' if triggered_id == 'greeks-aspect-live-btn' else 'settlement'
+    try:
+        payload = _load_aspect_payload(mode, selected_date)
+    except (AspectConfigurationError, AspectSourceError) as exc:
+        logger.warning('Aspect exposure load failed: %s', exc)
+        return _empty_aspect_store(str(exc), status='error')
+    except Exception:
+        logger.exception('Unexpected Aspect exposure load failure')
+        return _empty_aspect_store(
+            'Aspect exposure could not be loaded because of an unexpected source error.',
+            status='error',
+        )
+
+    meta = payload.get('meta', {})
+    return _cache_greeks_payload(
+        payload,
+        'aspect',
+        [
+            meta.get('mode'),
+            meta.get('requested_cob_date'),
+            meta.get('fetched_at'),
+        ],
+    )
 
 
 @callback(
@@ -1858,8 +2456,59 @@ def update_filtered_greeks_store(base_store, selected_strategies, selected_trade
 
 
 @callback(
+    Output('greeks-aspect-status', 'children'),
+    Output('greeks-aspect-status', 'className'),
+    Output('greeks-aspect-table-container', 'children'),
+    Input('greeks-aspect-store', 'data'),
+    Input('maturity-aggregation-mode-selector', 'value'),
+    Input('month-through-selector', 'value'),
+    Input('quarter-through-selector', 'value'),
+    Input('unit-mode-selector', 'value'),
+)
+def update_aspect_overlay(
+    aspect_store,
+    aggregation,
+    month_through,
+    quarter_through,
+    unit_mode,
+):
+    payload = _resolve_aspect_payload(aspect_store)
+    meta = payload.get('meta', {})
+    status = meta.get('status') or 'idle'
+    status_class = f'greeks-aspect-status greeks-aspect-status-{status}'
+
+    if status != 'ok':
+        empty = html.Div(
+            'The option Greeks tables below remain available and are not changed.',
+            className='greeks-empty-state',
+        )
+        return _aspect_status_text(meta), status_class, empty
+
+    raw_rows = pd.DataFrame(payload.get('rows', []))
+    if raw_rows.empty:
+        empty = html.Div(
+            'Aspect returned no exposure rows for this snapshot.',
+            className='greeks-empty-state',
+        )
+        return _aspect_status_text(meta), status_class, empty
+
+    normalized = normalize_aspect_contributions(
+        raw_rows,
+        aggregation or 'mixed',
+        unit_mode or 'native',
+        month_through,
+        quarter_through,
+        meta.get('requested_cob_date'),
+    )
+    return (
+        _aspect_status_text(meta),
+        status_class,
+        build_aspect_overlay_tables(normalized),
+    )
+
+
+@callback(
     Output('greeks-kpi-strip', 'children'),
-    Output('greeks-summary-table-container', 'children'),
     Output('greeks-bucket-greek-tables-container', 'children'),
     Output('greeks-ladder-sections', 'children'),
     Input('greeks-normalized-store', 'data'),
@@ -1868,7 +2517,7 @@ def update_monitor_tables(store_data):
     payload = _resolve_greeks_payload(store_data)
     if not payload.get('rows'):
         empty = html.Div('No data for the current selection.', className='greeks-empty-state')
-        return empty, empty, empty, []
+        return empty, empty, []
 
     rows = pd.DataFrame(payload['rows'])
     meta = payload.get('meta', {})
@@ -1876,7 +2525,6 @@ def update_monitor_tables(store_data):
 
     return (
         build_kpi_strip(rows, meta),
-        build_compact_table('greeks-summary-table', tables['summary'], fit_to_content=True),
         build_bucket_greek_sections(tables),
         build_ladder_sections(tables),
     )
@@ -1886,37 +2534,97 @@ def update_monitor_tables(store_data):
     Output('download-greeks-monitor-workbook', 'data'),
     Input('export-greeks-workbook-btn', 'n_clicks'),
     State('greeks-normalized-store', 'data'),
+    State('greeks-aspect-store', 'data'),
+    State('maturity-aggregation-mode-selector', 'value'),
+    State('month-through-selector', 'value'),
+    State('quarter-through-selector', 'value'),
+    State('unit-mode-selector', 'value'),
     prevent_initial_call=True,
 )
-def export_greeks_workbook(n_clicks, store_data):
+def export_greeks_workbook(
+    n_clicks,
+    store_data,
+    aspect_store,
+    aggregation,
+    month_through,
+    quarter_through,
+    unit_mode,
+):
     payload = _resolve_greeks_payload(store_data)
-    if not n_clicks or not payload.get('rows'):
+    aspect_payload = _resolve_aspect_payload(aspect_store)
+    if not n_clicks or (not payload.get('rows') and not aspect_payload.get('rows')):
         return dash.no_update
 
-    rows = pd.DataFrame(payload['rows'])
-    tables = build_output_tables(rows)
-    cob_date = payload.get('meta', {}).get('cob_date') or pd.Timestamp.now().strftime('%Y-%m-%d')
+    rows = pd.DataFrame(payload.get('rows', []))
+    tables = build_output_tables(rows) if not rows.empty else {}
+    cob_date = (
+        payload.get('meta', {}).get('cob_date')
+        or aspect_payload.get('meta', {}).get('requested_cob_date')
+        or pd.Timestamp.now().strftime('%Y-%m-%d')
+    )
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        sheet_map = {
-            'Summary': tables['summary'],
-            'Bucket Greeks': tables['bucket_greek_export'],
-            'Delta Ladder': tables['delta_ladder'],
-            'Delta Unit Ladder': tables['delta_unit_ladder'],
-            'Gamma Ladder': tables['gamma_ladder'],
-            'Gamma Unit Ladder': tables['gamma_unit_ladder'],
-            'Vega Ladder': tables['vega_ladder'],
-            'Vega Unit Ladder': tables['vega_unit_ladder'],
-            'Theta Ladder': tables['theta_ladder'],
-            'Theta Unit Ladder': tables['theta_unit_ladder'],
-            'Correlation Ladder': tables['correlation_ladder'],
-            'Corr Unit Ladder': tables['correlation_unit_ladder'],
-            'Raw Normalized': tables['raw'],
-        }
+        sheet_map = {}
+        if tables:
+            sheet_map.update({
+                'Summary': tables['summary'],
+                'Bucket Greeks': tables['bucket_greek_export'],
+                'Delta Ladder': tables['delta_ladder'],
+                'Delta Unit Ladder': tables['delta_unit_ladder'],
+                'Gamma Ladder': tables['gamma_ladder'],
+                'Gamma Unit Ladder': tables['gamma_unit_ladder'],
+                'Vega Ladder': tables['vega_ladder'],
+                'Vega Unit Ladder': tables['vega_unit_ladder'],
+                'Theta Ladder': tables['theta_ladder'],
+                'Theta Unit Ladder': tables['theta_unit_ladder'],
+                'Correlation Ladder': tables['correlation_ladder'],
+                'Corr Unit Ladder': tables['correlation_unit_ladder'],
+                'Raw Normalized': tables['raw'],
+            })
+
+        aspect_meta = aspect_payload.get('meta', {})
+        aspect_raw = pd.DataFrame(aspect_payload.get('rows', []))
+        if aspect_meta.get('status') == 'ok' and not aspect_raw.empty:
+            aspect_normalized = normalize_aspect_contributions(
+                aspect_raw,
+                aggregation or 'mixed',
+                unit_mode or 'native',
+                month_through,
+                quarter_through,
+                aspect_meta.get('requested_cob_date'),
+            )
+            aspect_metadata = pd.DataFrame([
+                {'Field': 'Source', 'Value': aspect_meta.get('source')},
+                {'Field': 'Mode', 'Value': aspect_meta.get('mode')},
+                {'Field': 'COB Date', 'Value': aspect_meta.get('requested_cob_date')},
+                {'Field': 'Fetched At', 'Value': aspect_meta.get('fetched_at')},
+                {'Field': 'Book', 'Value': aspect_meta.get('book')},
+                {'Field': 'Source Rows', 'Value': aspect_meta.get('source_rows')},
+                {'Field': 'Accepted Rows', 'Value': aspect_meta.get('accepted_rows')},
+                {'Field': 'Rejected Rows', 'Value': aspect_meta.get('rejected_rows')},
+            ])
+            sheet_map.update({
+                'Aspect Metadata': _sanitize_excel_text(aspect_metadata),
+                'Aspect Summary': _sanitize_excel_text(create_aspect_summary_df(aspect_normalized)),
+                'Aspect Delta': create_ladder_df(aspect_normalized, 'delta'),
+                'Aspect Unit Delta': create_unit_ladder_df(aspect_normalized, 'delta'),
+                'Aspect Raw': _sanitize_excel_text(create_aspect_raw_export_df(aspect_raw)),
+            })
+
         for sheet_name, table in sheet_map.items():
             export_df = table.drop(columns=['_row_type'], errors='ignore')
-            export_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+            export_sheet_name = sheet_name[:31]
+            export_df.to_excel(
+                writer,
+                sheet_name=export_sheet_name,
+                index=False,
+            )
+            if sheet_name != 'Aspect Metadata':
+                _apply_export_number_formats(
+                    writer.sheets[export_sheet_name],
+                    export_df,
+                )
 
     output.seek(0)
     return dcc.send_bytes(output.getvalue(), f'current_greeks_monitor_{cob_date}.xlsx')

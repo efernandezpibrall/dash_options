@@ -1,7 +1,7 @@
 import pytest
 
 import db_fallback
-from runtime_config import clear_runtime_config_cache, config_bool
+from runtime_config import clear_runtime_config_cache, config_bool, config_value
 from vol_calibration.feature_flags import (
     background_jobs_enabled,
     publication_enabled,
@@ -62,6 +62,21 @@ def test_invalid_ssl_verification_setting_fails_closed(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="must be a boolean"):
         config_bool("TRINOS", "VERIFY_SSL", fallback=True)
+
+
+def test_aspect_environment_settings_are_available_without_a_config_section(
+    monkeypatch,
+    tmp_path,
+):
+    _use_empty_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("ASPECT_USERNAME", "aspect-user")
+    monkeypatch.setenv("ASPECT_PASSWORD", "aspect-password")
+    monkeypatch.setenv("ASPECT_VERIFY_SSL", "true")
+    clear_runtime_config_cache()
+
+    assert config_value("ASPECT", "USERNAME") == "aspect-user"
+    assert config_value("ASPECT", "PASSWORD") == "aspect-password"
+    assert config_bool("ASPECT", "VERIFY_SSL", fallback=True) is True
 
 
 def test_trino_connection_receives_the_configured_ssl_setting(monkeypatch):

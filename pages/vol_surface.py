@@ -7,7 +7,10 @@ from dash import html, dcc, callback, Output, Input, State
 import dash
 import dash_ag_grid as dag
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
 import pandas as pd
+from sqlalchemy import text
 
 from dataframe_utils import concat_dataframes
 from db_fallback import DB_SCHEMA, read_trino_query, safe_exception_message
@@ -44,6 +47,10 @@ SURFACE_TRINO_SOURCES = [
 SURFACE_POSTGRES_SOURCES = [
     (SURFACE_POSTGRES_SOURCE_LABEL, f'select * from {SURFACE_POSTGRES_SOURCE_LABEL}'),
 ]
+TTF_COMPARISON_TABLE = (
+    f'{DB_SCHEMA}.option_volatility_surface_comparison_current'
+)
+VALUATION_CURRENT_TABLE = f'{DB_SCHEMA}.trades_options_valuation_current'
 
 
 def _empty_unified_atm_df():
@@ -371,7 +378,9 @@ def _normalize_surface_data(surface_df):
 def load_surface_data():
     load_errors = []
 
-    for source_label, table_name in SURFACE_TRINO_SOURCES:
+    for source_index, (source_label, table_name) in enumerate(
+        SURFACE_TRINO_SOURCES
+    ):
         try:
             surface_df = read_trino_query(f'select * from {table_name}', catalog='raw', schema='icap')
             normalized_surface = _normalize_surface_data(surface_df)
@@ -381,7 +390,7 @@ def load_surface_data():
             return normalized_surface, {
                 'source': source_label,
                 'error': None,
-                'fallback_used': False,
+                'fallback_used': source_index > 0,
             }
         except Exception as exc:
             load_errors.append(f'{source_label}: {safe_exception_message(exc)}')
@@ -546,6 +555,92 @@ def _get_surface_snapshot(code, cob_date):
     return snapshot
 
 
+def get_operational_surface_snapshot(product, requested_cob, refresh=False):
+    """Return the governed surface for an exact COB or its nearest prior COB.
+
+    The returned rows use the same normalized schema and source order as the
+    ``/vol_surface`` page.  Resolution is product-scoped and can only move
+    backwards in time.
+    """
+    requested_timestamp = pd.to_datetime(requested_cob, errors='coerce')
+    normalized_product = str(product or '').strip().upper()
+    display_product = SURFACE_PRODUCT_DISPLAY_MAP.get(
+        normalized_product,
+        normalized_product,
+    )
+
+    result = {
+        'data': _empty_surface_df(),
+        'product': display_product,
+        'requested_cob': requested_timestamp.normalize()
+        if not pd.isna(requested_timestamp)
+        else None,
+        'actual_cob': None,
+        'date_fallback_used': False,
+        'source': DATA_CACHE_STATE['surface']['source'],
+        'source_fallback_used': bool(
+            DATA_CACHE_STATE['surface'].get('fallback_used', False)
+        ),
+        'error': None,
+    }
+
+    if normalized_product not in CALIBRATION_PRODUCTS:
+        result['error'] = f'Unsupported operational surface product: {product}'
+        return result
+    if pd.isna(requested_timestamp):
+        result['error'] = f'Invalid requested COB: {requested_cob}'
+        return result
+
+    if refresh:
+        _refresh_cached_data(force=True)
+    else:
+        _ensure_cached_data()
+
+    surface_status = DATA_CACHE_STATE['surface']
+    result['source'] = surface_status['source']
+    result['source_fallback_used'] = bool(
+        surface_status.get('fallback_used', False)
+    )
+
+    if surface_dataset.empty:
+        result['error'] = (
+            surface_status.get('error')
+            or f'No operational surface data is available for {display_product}'
+        )
+        return result
+
+    requested_timestamp = requested_timestamp.normalize()
+    product_rows = surface_dataset.loc[
+        surface_dataset['code'] == display_product
+    ]
+    eligible_dates = (
+        pd.to_datetime(product_rows['cob_date'], errors='coerce')
+        .dt.normalize()
+        .loc[lambda values: values <= requested_timestamp]
+        .dropna()
+    )
+    if eligible_dates.empty:
+        result['error'] = (
+            f'No operational surface COB exists on or before '
+            f'{requested_timestamp:%Y-%m-%d} for {display_product}'
+        )
+        return result
+
+    actual_cob = eligible_dates.max()
+    snapshot = _get_surface_snapshot(display_product, actual_cob)
+    if snapshot.empty:
+        result['error'] = (
+            f'Operational surface resolution returned no rows for '
+            f'{display_product} on {actual_cob:%Y-%m-%d}'
+        )
+        return result
+
+    result['data'] = snapshot
+    result['actual_cob'] = actual_cob
+    result['date_fallback_used'] = actual_cob < requested_timestamp
+    return result
+
+
 def _get_surface_delta_order(surface_df):
     if surface_df.empty:
         return pd.DataFrame(columns=['delta_bucket', 'delta_sort_key'])
@@ -675,6 +770,263 @@ def _empty_figure(message, title):
         align='center',
     )
     return fig
+
+
+def _load_ttf_source_comparison(selected_date, selected_expiry, engine=None):
+    """Load published normalized ICAP/ICE nodes and TFO trade-strike marks."""
+    if not selected_date or not selected_expiry:
+        return pd.DataFrame(), pd.DataFrame()
+    db_engine = engine or get_database_engine(required=False)
+    params = {
+        'cob_date': pd.Timestamp(selected_date).date(),
+        'maturity_date': pd.Timestamp(selected_expiry).date(),
+    }
+    curve_query = text(f"""
+        SELECT
+            valuation_run_id,
+            valuation_revision,
+            valuation_methodology_version,
+            'EUR' AS currency,
+            cob_date,
+            maturity_date,
+            option_expiration_date,
+            surface_source,
+            native_node_type,
+            native_node_value,
+            strike,
+            call_delta,
+            volatility,
+            forward_value,
+            settlement_price,
+            contract_type,
+            total_volume,
+            open_interest,
+            vendor_volatility,
+            vendor_volatility_difference,
+            put_call_parity_difference,
+            quality_status,
+            valid_for_comparison,
+            source_name,
+            vendor_published_at,
+            ingested_at,
+            method,
+            day_count,
+            delta_convention
+        FROM {TTF_COMPARISON_TABLE}
+        WHERE cob_date = :cob_date
+          AND product = 'TTF'
+          AND maturity_date = :maturity_date
+        ORDER BY surface_source, strike
+    """)
+    trade_query = text(f"""
+        SELECT
+            valuation_run_id,
+            valuation_revision,
+            currency,
+            substrategy,
+            buy_sell,
+            put_call,
+            strike,
+            forward_price_used,
+            volatility_used,
+            comparison_call_delta_used,
+            comparison_volatility_used,
+            comparison_status,
+            price,
+            comparison_price,
+            qty_pnl,
+            comparison_qty_pnl
+        FROM {VALUATION_CURRENT_TABLE}
+        WHERE cob_date = :cob_date
+          AND contract_convention_code = 'ICE_TTF_TFO'
+          AND maturity_date_a = :maturity_date
+        ORDER BY strike, buy_sell
+    """)
+    curves = pd.read_sql(curve_query, db_engine, params=params)
+    trades = pd.read_sql(trade_query, db_engine, params=params)
+    return curves, trades
+
+
+def _create_ttf_source_comparison_figure(curves, trades):
+    if curves is None or curves.empty:
+        return _empty_figure(
+            'No published ICAP–ICE comparison is available for this expiry.',
+            'TTF ICAP vs ICE',
+        )
+    prepared = curves.copy()
+    for column in ('strike', 'volatility'):
+        prepared[column] = pd.to_numeric(prepared[column], errors='coerce')
+    prepared = prepared.dropna(subset=['strike', 'volatility'])
+    if prepared.empty:
+        return _empty_figure(
+            'Published comparison nodes are invalid.',
+            'TTF ICAP vs ICE',
+        )
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.10,
+        row_heights=[0.72, 0.28],
+    )
+    colors = {'ICAP': '#0057B8', 'ICE': '#E76F51'}
+    for source in ('ICAP', 'ICE'):
+        source_rows = prepared[
+            prepared['surface_source'].astype(str).str.upper().eq(source)
+        ].sort_values('strike')
+        if source_rows.empty:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=source_rows['strike'],
+                y=100 * source_rows['volatility'],
+                mode='lines+markers',
+                name=source,
+                line={'color': colors[source], 'width': 2},
+                marker={'size': 6},
+                customdata=np.column_stack(
+                    [
+                        source_rows['call_delta'],
+                        source_rows['quality_status'],
+                    ]
+                ),
+                hovertemplate=(
+                    f'{source}<br>Strike %{{x:.2f}}'
+                    '<br>Vol %{y:.4f}%'
+                    '<br>Call delta %{customdata[0]:.4f}'
+                    '<br>Status %{customdata[1]}<extra></extra>'
+                ),
+            ),
+            row=1,
+            col=1,
+        )
+
+    if trades is not None and not trades.empty:
+        trade_rows = trades.copy()
+        trade_rows['strike'] = pd.to_numeric(
+            trade_rows['strike'],
+            errors='coerce',
+        )
+        for source, vol_column, symbol in (
+            ('ICAP Trades', 'volatility_used', 'diamond'),
+            ('ICE Trades', 'comparison_volatility_used', 'x'),
+        ):
+            trade_rows[vol_column] = pd.to_numeric(
+                trade_rows[vol_column],
+                errors='coerce',
+            )
+            marked = trade_rows.dropna(subset=['strike', vol_column])
+            if marked.empty:
+                continue
+            fig.add_trace(
+                go.Scatter(
+                    x=marked['strike'],
+                    y=100 * marked[vol_column],
+                    mode='markers',
+                    name=source,
+                    marker={
+                        'symbol': symbol,
+                        'size': 11,
+                        'color': '#111827',
+                        'line': {'width': 1, 'color': '#FFFFFF'},
+                    },
+                    text=marked['substrategy'],
+                    hovertemplate=(
+                        '%{text}<br>Strike %{x:.2f}'
+                        '<br>Vol %{y:.4f}%<extra></extra>'
+                    ),
+                ),
+                row=1,
+                col=1,
+            )
+
+    icap = prepared[
+        prepared['surface_source'].astype(str).str.upper().eq('ICAP')
+    ].sort_values('strike')
+    ice = prepared[
+        prepared['surface_source'].astype(str).str.upper().eq('ICE')
+        & prepared['valid_for_comparison'].fillna(False)
+    ].sort_values('strike')
+    if len(icap) >= 2 and not ice.empty:
+        overlap = ice[
+            ice['strike'].between(icap['strike'].min(), icap['strike'].max())
+        ].copy()
+        if not overlap.empty:
+            icap_at_ice = np.interp(
+                overlap['strike'],
+                icap['strike'],
+                icap['volatility'],
+            )
+            overlap['difference_pp'] = 100 * (
+                overlap['volatility'].to_numpy() - icap_at_ice
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=overlap['strike'],
+                    y=overlap['difference_pp'],
+                    mode='lines+markers',
+                    name='ICE − ICAP',
+                    line={'color': '#7C3AED', 'width': 1.8},
+                    marker={'size': 5},
+                    hovertemplate=(
+                        'Strike %{x:.2f}<br>ICE − ICAP '
+                        '%{y:.4f} pp<extra></extra>'
+                    ),
+                ),
+                row=2,
+                col=1,
+            )
+    fig.add_hline(y=0, line_width=1, line_dash='dot', line_color='#9CA3AF', row=2, col=1)
+    _apply_vol_chart_theme(
+        fig,
+        None,
+        margin=dict(l=55, r=20, t=18, b=42),
+        hovermode='x unified',
+        showlegend=True,
+    )
+    fig.update_yaxes(title_text='Volatility (%)', row=1, col=1)
+    fig.update_yaxes(title_text='Diff (pp)', row=2, col=1)
+    fig.update_xaxes(title_text='Strike (EUR/MWh)', row=2, col=1)
+    fig.update_layout(height=520)
+    return fig
+
+
+def _ttf_comparison_records(curves):
+    if curves is None or curves.empty:
+        return []
+    output = curves.copy()
+    if 'currency' not in output:
+        output['currency'] = 'EUR'
+    output['volatility_pct'] = 100 * pd.to_numeric(
+        output['volatility'],
+        errors='coerce',
+    )
+    output['call_delta_pct'] = 100 * pd.to_numeric(
+        output['call_delta'],
+        errors='coerce',
+    )
+    columns = [
+        'currency',
+        'surface_source',
+        'native_node_type',
+        'native_node_value',
+        'strike',
+        'call_delta_pct',
+        'volatility_pct',
+        'settlement_price',
+        'total_volume',
+        'open_interest',
+        'quality_status',
+        'source_name',
+        'method',
+        'day_count',
+    ]
+    return (
+        output[columns]
+        .where(pd.notna(output[columns]), None)
+        .to_dict('records')
+    )
 
 
 def _calculate_symmetric_color_range(values, default_range=0.05):
@@ -1676,6 +2028,72 @@ layout = html.Div([
                 'Delta Vol History',
                 className='volatility-history-chart-card'
             ),
+            html.Div(
+                [
+                    _build_volatility_section_header(
+                        'TTF ICAP Official vs ICE Settlement-Derived Shadow'
+                    ),
+                    html.Div(
+                        id='ttf-source-comparison-status',
+                        className='volatility-status-line volatility-status-neutral',
+                    ),
+                    dcc.Graph(
+                        id='ttf-source-comparison-graph',
+                        figure=_empty_figure(
+                            'Select TTF and an expiry to view the comparison.',
+                            'TTF ICAP vs ICE',
+                        ),
+                        config=VOL_GRAPH_CONFIG,
+                        className='volatility-chart-graph',
+                    ),
+                    dag.AgGrid(
+                        id='ttf-source-comparison-grid',
+                        rowData=[],
+                        columnDefs=[
+                            {'headerName': 'Source', 'field': 'surface_source', 'pinned': 'left', 'width': 88},
+                            {'headerName': 'Currency', 'field': 'currency', 'width': 88},
+                            {'headerName': 'Native Node', 'field': 'native_node_type', 'width': 112},
+                            {'headerName': 'Node Value', 'field': 'native_node_value', 'type': 'rightAligned', 'width': 100,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toFixed(4)"}},
+                            {'headerName': 'Strike', 'field': 'strike', 'type': 'rightAligned', 'width': 88,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toFixed(3)"}},
+                            {'headerName': 'Call Delta %', 'field': 'call_delta_pct', 'type': 'rightAligned', 'width': 110,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toFixed(2)"}},
+                            {'headerName': 'Vol %', 'field': 'volatility_pct', 'type': 'rightAligned', 'width': 88,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toFixed(4)"}},
+                            {'headerName': 'Settlement', 'field': 'settlement_price', 'type': 'rightAligned', 'width': 104,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toFixed(3)"}},
+                            {'headerName': 'Volume', 'field': 'total_volume', 'type': 'rightAligned', 'width': 88,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toLocaleString()"}},
+                            {'headerName': 'Open Interest', 'field': 'open_interest', 'type': 'rightAligned', 'width': 108,
+                             'valueFormatter': {'function': "params.value == null ? '' : Number(params.value).toLocaleString()"}},
+                            {'headerName': 'Quality', 'field': 'quality_status', 'minWidth': 120},
+                            {'headerName': 'Method', 'field': 'method', 'minWidth': 190},
+                            {'headerName': 'Day Count', 'field': 'day_count', 'width': 104},
+                        ],
+                        defaultColDef={
+                            'sortable': True,
+                            'resizable': True,
+                            'filter': False,
+                            'suppressHeaderMenuButton': True,
+                        },
+                        dashGridOptions={
+                            'domLayout': 'normal',
+                            'rowHeight': 26,
+                            'headerHeight': 32,
+                            'pagination': True,
+                            'paginationPageSize': 20,
+                            'suppressPaginationPanel': False,
+                            'enableCellTextSelection': True,
+                        },
+                        className='ag-theme-alpine mckinsey-ag-grid volatility-surface-grid',
+                        style={'width': '100%', 'height': '590px'},
+                    ),
+                ],
+                id='ttf-source-comparison-container',
+                className='volatility-section volatility-surface-section',
+                style={'display': 'none'},
+            ),
             html.Div(id='surface-table-container', style={'width': '100%'})
         ], id='surface-content-wrapper', style={'display': 'none'})
     ], id='surface-section-container', className='volatility-section volatility-surface-section')
@@ -2448,6 +2866,78 @@ def update_surface_section(
 
 
 @callback(
+    Output('ttf-source-comparison-container', 'style'),
+    Output('ttf-source-comparison-status', 'children'),
+    Output('ttf-source-comparison-graph', 'figure'),
+    Output('ttf-source-comparison-grid', 'rowData'),
+    Input('refresh-options-data', 'n_clicks'),
+    Input('table-date-picker', 'date'),
+    Input('surface-product-tabs', 'value'),
+    Input('surface-expiry-dropdown', 'value'),
+)
+def update_ttf_source_comparison(
+    n_clicks,
+    selected_date,
+    active_product,
+    selected_expiry,
+):
+    del n_clicks
+    if str(active_product or '').upper() != 'TTF':
+        return (
+            {'display': 'none'},
+            '',
+            _empty_figure(
+                'Select TTF to view the source comparison.',
+                'TTF ICAP vs ICE',
+            ),
+            [],
+        )
+    visible = {'display': 'block'}
+    if not selected_date or not selected_expiry:
+        return (
+            visible,
+            'Select a COB date and TTF expiry.',
+            _empty_figure(
+                'Select a COB date and TTF expiry.',
+                'TTF ICAP vs ICE',
+            ),
+            [],
+        )
+    try:
+        curves, trades = _load_ttf_source_comparison(
+            selected_date,
+            selected_expiry,
+        )
+    except Exception as exc:
+        message = (
+            'Published TTF comparison could not be loaded: '
+            f'{safe_exception_message(exc)}'
+        )
+        return visible, message, _empty_figure(message, 'TTF ICAP vs ICE'), []
+    if curves.empty:
+        message = 'No published ICAP–ICE nodes are available for this TTF expiry.'
+        return visible, message, _empty_figure(message, 'TTF ICAP vs ICE'), []
+
+    revision = int(curves['valuation_revision'].iloc[0])
+    run_id = str(curves['valuation_run_id'].iloc[0])
+    source_counts = curves['surface_source'].value_counts().to_dict()
+    trade_count = len(trades)
+    status = (
+        f'Published revision {revision} · run {run_id} · '
+        f'EUR native currency · '
+        f"ICAP nodes {source_counts.get('ICAP', 0)} · "
+        f"ICE nodes {source_counts.get('ICE', 0)} · "
+        f'trade strikes {trade_count}'
+    )
+    return (
+        visible,
+        status,
+        _create_ttf_source_comparison_figure(curves, trades),
+        _ttf_comparison_records(curves),
+    )
+
+
+@callback(
     Output('table-grouping-dropdown', 'value'),
     Input('refresh-options-data', 'n_clicks'),
     prevent_initial_call=True
@@ -2492,10 +2982,17 @@ def export_volatility_table(n_clicks, selected_date, selected_products, grouping
     Input("export-surface-table-btn", "n_clicks"),
     [State('table-date-picker', 'date'),
      State('table-prev-date-picker', 'date'),
-     State('surface-product-tabs', 'value')],
+     State('surface-product-tabs', 'value'),
+     State('surface-expiry-dropdown', 'value')],
     prevent_initial_call=True
 )
-def export_surface_table(n_clicks, selected_date, prev_selected_date, active_product):
+def export_surface_table(
+    n_clicks,
+    selected_date,
+    prev_selected_date,
+    active_product,
+    selected_expiry,
+):
     if not n_clicks or not selected_date or not active_product:
         return None
 
@@ -2513,6 +3010,29 @@ def export_surface_table(n_clicks, selected_date, prev_selected_date, active_pro
             current_table_df.to_excel(writer, sheet_name=f'{active_product} Surface', index=False)
             if not diff_table_df.empty:
                 diff_table_df.to_excel(writer, sheet_name=f'{active_product} Change', index=False)
+            if str(active_product).upper() == 'TTF' and selected_expiry:
+                try:
+                    comparison_curves, comparison_trades = (
+                        _load_ttf_source_comparison(
+                            selected_date,
+                            selected_expiry,
+                        )
+                    )
+                except Exception:
+                    comparison_curves = pd.DataFrame()
+                    comparison_trades = pd.DataFrame()
+                if not comparison_curves.empty:
+                    comparison_curves.to_excel(
+                        writer,
+                        sheet_name='TTF ICAP vs ICE',
+                        index=False,
+                    )
+                if not comparison_trades.empty:
+                    comparison_trades.to_excel(
+                        writer,
+                        sheet_name='TTF Trade Marks',
+                        index=False,
+                    )
         output.seek(0)
 
         selected_date_str = pd.to_datetime(selected_date).strftime('%Y%m%d')

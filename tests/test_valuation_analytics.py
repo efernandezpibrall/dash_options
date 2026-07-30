@@ -1,9 +1,11 @@
 import numpy as np
 import pandas as pd
 
-from options.options_library import kirk_model_with_substitution, kirk_spread_greeks
+from options.options_library import black_76, kirk_model_with_substitution, kirk_spread_greeks
 from valuation_analytics import (
     POSITION_KEY_COLUMNS,
+    aggregate_pnl_explain,
+    aggregate_scenario,
     calculate_pnl_explain,
     run_portfolio_scenario,
 )
@@ -26,6 +28,7 @@ def _position(cob='2026-07-08', price_a=12.0, price_b=8.0, vol_a=0.30, vol_b=0.2
         'model': 'kirk',
         'put_call': 'call',
         'buy_sell': 'buy',
+        'currency': 'USD',
         'premium': 0.0,
         'expiration_date': pd.Timestamp('2027-07-08'),
         'quantity': quantity,
@@ -53,6 +56,57 @@ def _position(cob='2026-07-08', price_a=12.0, price_b=8.0, vol_a=0.30, vol_b=0.2
         'qty_pnl': quantity * price,
         **greeks,
     }
+    return row
+
+
+def _black_position(cob, price_a):
+    row = _position(cob=cob, price_a=price_a, quantity=74_500)
+    time = row['time_to_expiry']
+    vol = 0.721
+    strike = 60.0
+    value, delta, gamma, theta, vega, _rho = black_76(
+        'C',
+        price_a,
+        strike,
+        time,
+        0.0,
+        vol,
+    )
+    row.update({
+        'strategy': 'AD-LNG-Fin-TTF-TEST',
+        'substrategy': 'AD-LNG-Fin-TTF-Oct26-CS60x65',
+        'type_trade': 'Financial Option',
+        'type_option': 'european',
+        'model': 'black76',
+        'currency': 'EUR',
+        'premium': -7.65,
+        'strike': strike,
+        'asset_a': 'ICE_TTF',
+        'maturity_date_a': pd.Timestamp('2026-10-01'),
+        'asset_b': None,
+        'asset_b_multiplier': None,
+        'asset_b_premium': None,
+        'maturity_date_type_b': None,
+        'maturity_date_b': None,
+        'adjusted_price_a': price_a,
+        'adjusted_price_b': None,
+        'adjusted_strike': strike,
+        'adjusted_vol_a': vol,
+        'adjusted_vol_b': None,
+        'correlation': None,
+        'price': value,
+        'delta_S1': delta,
+        'delta_S2': 0.0,
+        'gamma_S1': gamma,
+        'gamma_S2': 0.0,
+        'gamma_S1S2': 0.0,
+        'vega_sigma1': vega,
+        'vega_sigma2': 0.0,
+        'corr_sensitivity': 0.0,
+        'theta': theta,
+        'qty_value': row['quantity'] * value,
+        'qty_pnl': row['quantity'] * (value - 7.65),
+    })
     return row
 
 
@@ -97,3 +151,98 @@ def test_pnl_explain_reconciles_actual_value_change():
         explain.iloc[0]['actual_pnl'],
         explain.iloc[0]['explained_pnl'] + explain.iloc[0]['unexplained_pnl'],
     )
+
+
+def test_pnl_explain_keeps_single_asset_black76_a_side_risk():
+    previous = pd.DataFrame([_black_position('2026-07-27', 42.375)])
+    current = pd.DataFrame([_black_position('2026-07-28', 43.375)])
+
+    explain = calculate_pnl_explain(previous, current)
+
+    assert len(explain) == 1
+    assert explain.iloc[0]['position_status'] == 'Matched'
+    assert explain.iloc[0]['price_mark_changed']
+    assert np.isclose(
+        explain.iloc[0]['delta_pnl'],
+        previous.iloc[0]['quantity'] * previous.iloc[0]['delta_S1'],
+    )
+    assert explain.iloc[0]['gamma_pnl'] > 0
+    assert explain.iloc[0]['vega_pnl'] == 0
+    assert explain.iloc[0]['correlation_pnl'] == 0
+
+
+def test_scenario_aggregation_never_sums_across_currencies():
+    results = pd.DataFrame(
+        [
+            {
+                'currency': 'USD',
+                'substrategy': 'Same',
+                'base_value': 100.25,
+                'shocked_value': 101.50,
+                'exact_pnl': 1.25,
+                'delta_pnl': 1.25,
+                'gamma_pnl': 0.0,
+                'vega_pnl': 0.0,
+                'correlation_pnl': 0.0,
+                'theta_pnl': 0.0,
+                'rate_pnl': 0.0,
+                'approximation_pnl': 1.25,
+                'interaction_residual': 0.0,
+                'base_reconciliation': 0.0,
+            },
+            {
+                'currency': 'EUR',
+                'substrategy': 'Same',
+                'base_value': 200.25,
+                'shocked_value': 202.50,
+                'exact_pnl': 2.25,
+                'delta_pnl': 2.25,
+                'gamma_pnl': 0.0,
+                'vega_pnl': 0.0,
+                'correlation_pnl': 0.0,
+                'theta_pnl': 0.0,
+                'rate_pnl': 0.0,
+                'approximation_pnl': 2.25,
+                'interaction_residual': 0.0,
+                'base_reconciliation': 0.0,
+            },
+        ]
+    )
+
+    aggregated = aggregate_scenario(results, 'substrategy')
+
+    assert len(aggregated) == 2
+    assert dict(zip(aggregated['currency'], aggregated['exact_pnl'])) == {
+        'EUR': 2.25,
+        'USD': 1.25,
+    }
+
+
+def test_pnl_explain_aggregation_never_sums_across_currencies():
+    rows = []
+    for currency, actual in [('USD', 1.25), ('EUR', 2.25)]:
+        row = {
+            'currency': currency,
+            'substrategy': 'Same',
+            'actual_pnl': actual,
+            'delta_pnl': actual,
+            'gamma_pnl': 0.0,
+            'vega_pnl': 0.0,
+            'correlation_pnl': 0.0,
+            'theta_pnl': 0.0,
+            'trade_pnl': 0.0,
+            'explained_pnl': actual,
+            'unexplained_pnl': 0.0,
+        }
+        rows.append(row)
+
+    aggregated = aggregate_pnl_explain(
+        pd.DataFrame(rows),
+        'substrategy',
+    )
+
+    assert len(aggregated) == 2
+    assert dict(zip(aggregated['currency'], aggregated['actual_pnl'])) == {
+        'EUR': 2.25,
+        'USD': 1.25,
+    }

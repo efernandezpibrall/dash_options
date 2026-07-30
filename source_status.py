@@ -50,14 +50,14 @@ def make_source_status(source, latest_cob=None, fallback_used=False, error=None,
 
 def load_dashboard_source_statuses(as_of=None):
     sources = {
-        'Portfolio': f'{DB_SCHEMA}.trades_options_valuation',
+        'Portfolio': f'{DB_SCHEMA}.trades_options_valuation_current',
         'Vol Surface': f'{DB_SCHEMA}.implied_volatility_surface_from_prices',
         'Forward Curves': f'{DB_SCHEMA}.curve',
     }
     query = text(
         f"""
         SELECT 'Portfolio' AS label, max(cob_date)::date AS latest_cob
-        FROM {DB_SCHEMA}.trades_options_valuation
+        FROM {DB_SCHEMA}.trades_options_valuation_current
         UNION ALL
         SELECT 'Vol Surface', max(cob_date)::date
         FROM {DB_SCHEMA}.implied_volatility_surface_from_prices

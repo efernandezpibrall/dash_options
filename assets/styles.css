@@ -691,7 +691,52 @@ button:hover {
 .greeks-monitor-actions {
     display: flex;
     align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
     margin-left: auto;
+}
+
+.greeks-aspect-button {
+    min-height: 34px;
+    padding: 8px 13px;
+    border: 1px solid #94a3b8;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #334155;
+    cursor: pointer;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+    transition:
+        background 0.15s ease,
+        border-color 0.15s ease,
+        color 0.15s ease,
+        box-shadow 0.15s ease;
+}
+
+.greeks-aspect-button:hover:not(:disabled) {
+    border-color: #64748b;
+    background: #f8fafc;
+    color: #0f172a;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.10);
+}
+
+.greeks-aspect-button-live {
+    border-color: #2f855a;
+    color: #166534;
+}
+
+.greeks-aspect-button-live:hover:not(:disabled) {
+    border-color: #166534;
+    background: #f0fdf4;
+    color: #14532d;
+}
+
+.greeks-aspect-button:disabled {
+    cursor: wait;
+    opacity: 0.55;
 }
 
 .greeks-control-date {
@@ -987,6 +1032,46 @@ button:hover {
     border-radius: 6px;
 }
 
+.greeks-aspect-status {
+    margin: 0 0 12px;
+    padding: 9px 11px;
+    border: 1px solid #cbd5e1;
+    border-left-width: 4px;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.35;
+}
+
+.greeks-aspect-status-ok {
+    border-color: #a7d7bc;
+    border-left-color: #2f855a;
+    background: #f0fdf4;
+    color: #166534;
+}
+
+.greeks-aspect-status-error {
+    border-color: #fecaca;
+    border-left-color: #dc2626;
+    background: #fef2f2;
+    color: #991b1b;
+}
+
+.greeks-aspect-table-grid {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 14px;
+    max-width: 100%;
+}
+
+.greeks-aspect-table-panel {
+    min-width: 0;
+    max-width: 100%;
+}
+
 @media (max-width: 1100px) {
     .greeks-kpi-strip {
         grid-template-columns: repeat(2, minmax(160px, 1fr));
@@ -1000,6 +1085,10 @@ button:hover {
 
     .greeks-monitor-actions {
         margin-left: 0;
+    }
+
+    .greeks-monitor-actions > * {
+        flex: 1 1 auto;
     }
 
     .greeks-monitor-control-group,
@@ -1022,6 +1111,10 @@ button:hover {
 
     .greeks-kpi-strip {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .greeks-aspect-table-grid {
+        flex-direction: column;
     }
 }
 
@@ -4064,13 +4157,30 @@ button:hover {
 }
 
 .pricer-result-card {
-    padding: 11px 12px;
+    padding: 6px;
+    border-top-width: 2px;
+}
+
+.pricer-result-card-has-hover-detail {
+    position: relative;
+    overflow: visible;
+    cursor: help;
+}
+
+.pricer-result-card-has-hover-detail:hover,
+.pricer-result-card-has-hover-detail:focus-within {
+    z-index: 20;
+}
+
+.pricer-result-card-has-hover-detail:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
 }
 
 .pricer-result-card-label {
-    margin-bottom: 5px;
+    margin-bottom: 3px;
     color: #64748b;
-    font-size: 10px;
+    font-size: 8.5px;
     font-weight: 800;
     line-height: 1;
     letter-spacing: 0.07em;
@@ -4079,22 +4189,93 @@ button:hover {
 
 .pricer-result-card-value {
     color: #0f172a;
-    font-size: 22px;
+    font-size: 17px;
     font-weight: 800;
-    line-height: 1.1;
+    line-height: 1.05;
     font-variant-numeric: tabular-nums;
 }
 
 .pricer-result-card-detail {
-    margin-top: 5px;
+    margin-top: 3px;
     color: #64748b;
-    font-size: 11.5px;
+    font-size: 9.5px;
     font-weight: 650;
+    line-height: 1.25;
+}
+
+.pricer-result-card-detail-hover {
+    position: absolute;
+    top: calc(100% - 2px);
+    right: 8px;
+    left: 8px;
+    z-index: 30;
+    margin-top: 0;
+    padding: 6px 8px;
+    border: 1px solid #a5d8e6;
+    border-radius: 6px;
+    background: #ffffff;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
+    color: #334155;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-2px);
+    transition:
+        opacity 120ms ease,
+        transform 120ms ease,
+        visibility 120ms ease;
+    pointer-events: none;
+}
+
+.pricer-result-card-has-hover-detail:hover .pricer-result-card-detail-hover,
+.pricer-result-card-has-hover-detail:focus-within .pricer-result-card-detail-hover {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
 }
 
 .pricer-result-card-primary {
     border-color: #b9d4ef;
     background: linear-gradient(180deg, #ffffff 0%, #f2f8fd 100%);
+}
+
+.pricer-result-card-unit {
+    border-color: #93c5fd;
+    background: linear-gradient(180deg, #ffffff 0%, #eff6ff 100%);
+}
+
+.pricer-result-card-trade {
+    border-color: #86efac;
+    background: linear-gradient(180deg, #ffffff 0%, #f0fdf4 100%);
+}
+
+.pricer-result-card-market {
+    border-color: #fcd34d;
+    background: linear-gradient(180deg, #ffffff 0%, #fffbeb 100%);
+}
+
+.pricer-result-card-basis {
+    border-color: #c4b5fd;
+    background: linear-gradient(180deg, #ffffff 0%, #f5f3ff 100%);
+}
+
+.pricer-result-card-context {
+    border-color: #cbd5e1;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+}
+
+.pricer-result-card-sizing {
+    border-color: #fdba74;
+    background: linear-gradient(180deg, #ffffff 0%, #fff7ed 100%);
+}
+
+.pricer-result-card-time {
+    border-color: #5eead4;
+    background: linear-gradient(180deg, #ffffff 0%, #f0fdfa 100%);
+}
+
+.pricer-result-card-adjustment {
+    border-color: #67e8f9;
+    background: linear-gradient(180deg, #ffffff 0%, #ecfeff 100%);
 }
 
 .pricer-model-inputs-used-container {
@@ -4311,6 +4492,13 @@ button:hover {
     border-radius: 0;
 }
 
+.ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid
+    .ag-layout-auto-height .ag-center-cols-viewport,
+.ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid
+    .ag-layout-auto-height .ag-center-cols-container {
+    min-height: 0 !important;
+}
+
 .ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid .ag-header,
 .ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid .ag-header-cell,
 .ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid .ag-header-group-cell {
@@ -4411,10 +4599,401 @@ button:hover {
     min-height: 12px !important;
 }
 
+.pricer-model-field {
+    min-width: 0;
+}
+
+.pricer-context-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    gap: 8px;
+    align-items: end;
+}
+
+.pricer-context-with-valuation {
+    display: grid;
+    grid-template-columns:
+        minmax(100px, 0.75fr)
+        minmax(70px, 0.5fr)
+        minmax(164px, 1.25fr)
+        repeat(auto-fit, minmax(94px, 1fr));
+    gap: 8px;
+    align-items: end;
+}
+
+.pricer-context-with-valuation > #pricer-shared-context {
+    display: contents;
+}
+
+.pricer-context-with-valuation .pricer-filter-dropdown {
+    width: 100%;
+    min-width: 0;
+}
+
+.pricer-market-sizing-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 220px);
+    gap: 8px;
+    align-items: stretch;
+}
+
+.pricer-setup-panel {
+    min-width: 0;
+    padding: 9px 10px 10px;
+    border: 1px solid #d8e2ee;
+    border-radius: 8px;
+    background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+}
+
+.pricer-setup-label {
+    margin-bottom: 7px;
+    color: #64748b;
+    font-size: 9.5px;
+    font-weight: 820;
+    line-height: 1;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.pricer-sizing-grid {
+    display: grid;
+    grid-template-columns: minmax(145px, 1fr);
+    gap: 8px;
+}
+
+.pricer-subsection-title {
+    margin: 1px 0 0;
+    color: #334155;
+    font-size: 14px;
+    font-weight: 760;
+    line-height: 1.2;
+}
+
+.pricer-field-hint {
+    color: #64748b;
+    font-size: 10.5px;
+    font-weight: 550;
+    line-height: 1.25;
+}
+
+.pricer-inline-method-note {
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 8px 10px;
+    border: 1px solid #fde68a;
+    border-radius: 7px;
+    background: #fffbeb;
+    color: #92400e;
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 1.35;
+}
+
+.pricer-leg-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 2px;
+}
+
+.pricer-leg-heading,
+.pricer-leg-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pricer-leg-edit-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.pricer-secondary-button,
+.pricer-remove-button {
+    min-height: 31px;
+    padding: 6px 11px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 720;
+    line-height: 1.15;
+    cursor: pointer;
+}
+
+.pricer-secondary-button {
+    border: 1px solid #a8c8e5;
+    background: #f2f8fd;
+    color: #0f4c81;
+}
+
+.pricer-secondary-button:hover {
+    border-color: #7badd7;
+    background: #e6f2fb;
+}
+
+.pricer-remove-button {
+    border: 1px solid #fecaca;
+    background: #fff7f7;
+    color: #b42318;
+}
+
+.pricer-remove-button:hover {
+    border-color: #fca5a5;
+    background: #fef2f2;
+}
+
+.pricer-leg-actions .pricer-calculation-status {
+    min-width: 0;
+}
+
+.pricer-leg-toolbar .pricer-empty-state {
+    margin: 0;
+    padding: 4px 8px;
+    border-style: solid;
+}
+
+.pricer-calculation-status:empty,
+.pricer-action-status:empty {
+    display: none;
+}
+
+.pricer-leg-toolbar:has(.pricer-empty-state-success) .pricer-action-status {
+    display: none;
+}
+
+.pricer-calculate-button:disabled {
+    cursor: wait;
+    opacity: 0.68;
+    transform: none;
+}
+
+.pricer-action-status {
+    min-height: 16px;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.pricer-output-body-structure {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.pricer-summary-grid {
+    display: contents;
+}
+
+.pricer-summary-grid:empty,
+.pricer-model-inputs-used-container:empty,
+.pricer-time-info:empty {
+    display: none;
+}
+
+.pricer-output-overview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: stretch;
+    justify-content: flex-start;
+}
+
+.pricer-output-overview .pricer-result-card {
+    flex: 0 1 auto;
+    width: max-content;
+    max-width: 100%;
+}
+
+.pricer-output-overview .pricer-result-card-value {
+    white-space: nowrap;
+}
+
+.pricer-output-overview .pricer-result-card-label {
+    white-space: nowrap;
+}
+
+.pricer-output-overview:not(:has(.pricer-result-card)) {
+    display: none;
+}
+
+.pricer-model-inputs-used-container,
+.pricer-time-info {
+    display: contents;
+}
+
+.pricer-output-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 5px 14px;
+    padding: 8px 10px;
+    border-bottom: 1px solid #d6e0eb;
+    background: linear-gradient(180deg, #fbfdff 0%, #eef4fa 100%);
+}
+
+.pricer-output-panel-header .pricer-output-panel-title {
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+.pricer-output-panel:has(#pricer-unit-results-container:empty) {
+    display: none;
+}
+
+.pricer-output-section:not(:has(.pricer-result-card)):not(:has(.pricer-empty-state)) {
+    display: none;
+}
+
+.pricer-output-panel-note {
+    color: #64748b;
+    font-size: 10.5px;
+    font-weight: 620;
+    line-height: 1.3;
+}
+
+.pricer-compatibility-output {
+    display: none !important;
+}
+
+.pricer-warning-container {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pricer-warning-container:empty {
+    display: none;
+}
+
+.pricer-empty-state-success {
+    border-color: #bbf7d0;
+    background: #f0fdf4;
+    color: #166534;
+}
+
+.pricer-chart-card > .pricer-chart-card-title {
+    flex: 0 0 auto;
+    margin: 0;
+    min-height: 42px;
+    padding: 12px 10px 9px;
+    box-sizing: border-box;
+    border-bottom: 1px solid #edf2f7;
+    background: linear-gradient(180deg, #fbfdff 0%, #f1f6fb 100%);
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid .ag-cell.pricer-editable-cell {
+    background-image: linear-gradient(
+        135deg,
+        transparent 0,
+        transparent calc(100% - 6px),
+        rgba(46, 134, 193, 0.38) calc(100% - 6px),
+        rgba(46, 134, 193, 0.38) 100%
+    );
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid .ag-cell.pricer-invalid-cell {
+    outline: 1px solid #dc2626;
+    outline-offset: -1px;
+    background-color: #fef2f2 !important;
+    color: #991b1b !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-data-grid .ag-row-pinned .ag-cell {
+    border-top: 2px solid #94a3b8 !important;
+    background: #e8eef5 !important;
+    color: #0f172a !important;
+    font-weight: 820 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
+    .ag-header-group-cell.pricer-result-column-group {
+    background: #dde8f3 !important;
+    border-top: 2px solid #8da9c3 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
+    .ag-header-group-cell.pricer-result-column-group-position {
+    background: #dcefe5 !important;
+    border-top-color: #659979 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
+    .ag-header-group-cell-label {
+    justify-content: center;
+    color: #172033;
+    font-size: 10.5px;
+    font-weight: 850;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-tooltip {
+    padding: 6px 8px;
+    border: 1px solid #334155;
+    border-radius: 5px;
+    background: #172033;
+    box-shadow: 0 5px 14px rgba(15, 23, 42, 0.22);
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
+    .ag-cell.pricer-metric-tooltip-cell {
+    cursor: help;
+    text-decoration: underline dotted rgba(51, 65, 85, 0.62);
+    text-underline-offset: 2px;
+}
+
+.pricer-config-section,
+.pricer-output-section {
+    margin-bottom: 14px;
+    padding-right: 12px;
+    padding-bottom: 12px;
+    padding-left: 12px;
+}
+
+.pricer-config-section .pricer-section-header,
+.pricer-output-section .pricer-section-header {
+    margin-right: -12px;
+    margin-bottom: 10px;
+    margin-left: -12px;
+    padding: 10px 12px;
+}
+
+.pricer-config-section .pricer-config-body {
+    gap: 8px;
+}
+
+.pricer-page button:focus-visible,
+.pricer-page input:focus-visible,
+.pricer-page .Select-control:focus-within,
+.pricer-page .ag-cell-focus {
+    outline: 2px solid #2563eb !important;
+    outline-offset: 2px;
+}
+
 @media (max-width: 1000px) {
     .pricer-output-body,
     .pricer-chart-grid {
         grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-market-sizing-layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-context-with-valuation {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .pricer-sticky-filter-group {
@@ -4438,6 +5017,16 @@ button:hover {
 }
 
 @media (max-width: 640px) {
+    .options-dashboard-container.pricer-page {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
+    .professional-section-header.pricer-sticky-filter-bar {
+        margin-left: -10px;
+        margin-right: -10px;
+    }
+
     .pricer-config-toolbar,
     .pricer-payoff-controls {
         align-items: stretch;
@@ -4459,6 +5048,28 @@ button:hover {
 
     .pricer-segmented-selector label {
         flex: 1 1 0;
+    }
+
+    .pricer-context-grid,
+    .pricer-context-with-valuation,
+    .pricer-sizing-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-model-field,
+    .pricer-leg-actions,
+    .pricer-leg-actions button,
+    .pricer-calculate-button {
+        width: 100%;
+    }
+
+    .pricer-leg-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-chart-card {
+        min-height: 420px;
     }
 }
 
@@ -5372,6 +5983,24 @@ button:hover {
         gap: 8px;
     }
 
+    .main-navigation {
+        width: 100%;
+        min-width: 0;
+        overflow: hidden;
+    }
+
+    .nav-group-secondary {
+        min-width: 0;
+        max-width: 100%;
+        flex: 1 1 auto;
+        flex-wrap: nowrap;
+        justify-content: flex-start;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+        -webkit-overflow-scrolling: touch;
+    }
+
     .top-bar-controls {
         align-self: flex-end;
     }
@@ -6258,15 +6887,36 @@ button:hover {
    ======================================== */
 
 .options-dashboard-container.trades-page {
-    padding: 10px 16px 28px;
+    padding: 16px 24px 28px;
     background: #f4f7fb;
     min-height: calc(100vh - var(--dashboard-top-bar-height, 54px));
     box-sizing: border-box;
 }
 
+.trades-page-header {
+    margin: 0 0 14px;
+}
+
+.trades-page-title {
+    margin: 0;
+    color: #0f172a;
+    font-family: var(--font-family-primary, "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif);
+    font-size: 26px;
+    font-weight: 750;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+}
+
+.trades-page-subtitle {
+    max-width: 920px;
+    margin: 5px 0 0;
+    color: #526174;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
 .professional-section-header.trades-sticky-filter-bar {
-    position: sticky;
-    top: var(--dashboard-top-bar-height, 54px);
+    position: relative;
     z-index: 1100;
     display: flex;
     align-items: center;
@@ -6274,7 +6924,7 @@ button:hover {
     gap: 8px;
     min-height: 42px;
     padding: 7px 12px;
-    margin: -10px -16px 12px;
+    margin: 0 0 12px;
     background: linear-gradient(180deg, #fbfdff 0%, #eef3f8 100%);
     border: 0;
     border-bottom: 1px solid #cbd5e1;
@@ -6302,14 +6952,17 @@ button:hover {
         0 1px 2px rgba(15, 23, 42, 0.035);
 }
 
-.trades-date-filter-group,
-.trades-view-filter-group {
+.trades-date-filter-group {
     flex: 0 0 auto;
 }
 
 .trades-strategy-filter-group {
     flex: 1 1 520px;
     max-width: 860px;
+}
+
+.trades-sticky-filter-bar .trades-export-button {
+    margin-left: auto;
 }
 
 .trades-sticky-filter-bar .filter-group-header {
@@ -6368,65 +7021,6 @@ button:hover {
     z-index: 1300 !important;
 }
 
-.trades-view-selector {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    min-height: 27px;
-    padding: 1px;
-    border: 1px solid rgba(203, 213, 225, 0.82);
-    border-radius: 999px;
-    background: #f6f9fc;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
-}
-
-.trades-view-selector label {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 68px;
-    min-height: 23px;
-    margin: 0 !important;
-    padding: 5px 9px;
-    border: 1px solid transparent;
-    border-radius: 999px;
-    color: #64748b;
-    font-size: 11.5px;
-    font-weight: 750;
-    line-height: 1;
-    white-space: nowrap;
-    cursor: pointer;
-    transition:
-        background 0.15s ease,
-        border-color 0.15s ease,
-        box-shadow 0.15s ease,
-        color 0.15s ease;
-    user-select: none;
-}
-
-.trades-view-selector label:hover {
-    color: #334155;
-    background: rgba(255, 255, 255, 0.68);
-}
-
-.trades-view-selector label:has(input:checked),
-.trades-view-selector label[aria-selected="true"],
-.trades-view-selector label.selected {
-    border-color: #c4d2e2;
-    background: #ffffff;
-    color: #0f172a;
-    box-shadow:
-        0 1px 2px rgba(15, 23, 42, 0.08),
-        inset 0 0 0 1px rgba(255, 255, 255, 0.76);
-}
-
-.trades-view-selector input[type="radio"] {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
-}
-
 .trades-section {
     width: 100%;
     margin: 8px 0 22px;
@@ -6440,6 +7034,45 @@ button:hover {
         inset 0 1px 0 rgba(255, 255, 255, 0.88),
         0 12px 26px rgba(15, 23, 42, 0.045);
     overflow: hidden;
+}
+
+.trades-source-status {
+    margin: 0 0 8px;
+    padding: 9px 12px;
+    border: 1px solid #cbd5e1;
+    border-left: 4px solid #64748b;
+    border-radius: 7px;
+    background: #ffffff;
+    color: #334155;
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.4;
+    font-variant-numeric: tabular-nums;
+}
+
+.trades-source-status-success {
+    border-left-color: #0f766e;
+    background: #f0fdfa;
+    color: #115e59;
+}
+
+.trades-source-status-warning {
+    border-left-color: #d97706;
+    background: #fffbeb;
+    color: #92400e;
+}
+
+.trades-source-status-error {
+    border-left-color: #dc2626;
+    background: #fef2f2;
+    color: #991b1b;
+}
+
+.trades-sign-note {
+    margin: 0 0 12px;
+    color: #526174;
+    font-size: 12px;
+    line-height: 1.4;
 }
 
 .trades-section-header {
@@ -6460,6 +7093,21 @@ button:hover {
     box-shadow:
         0 1px 2px rgba(15, 23, 42, 0.06),
         0 8px 18px rgba(15, 23, 42, 0.04);
+}
+
+.trades-section-title {
+    margin: 0;
+    color: #0f172a;
+    font-size: 18px;
+    font-weight: 720;
+    line-height: 1.2;
+}
+
+.trades-export-status {
+    min-height: 18px;
+    color: #475569;
+    font-size: 11.5px;
+    font-weight: 650;
 }
 
 .trades-section-header .section-title-inline {
@@ -6552,11 +7200,11 @@ button:hover {
 }
 
 .ag-theme-alpine.mckinsey-ag-grid.trades-ag-grid {
-    --ag-font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --ag-font-family: var(--font-family-primary, "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif);
     --ag-font-size: 11px;
     --ag-grid-size: 2px;
-    --ag-row-height: 24px;
-    --ag-header-height: 30px;
+    --ag-row-height: 28px;
+    --ag-header-height: 34px;
     --ag-cell-horizontal-padding: 4px;
     --ag-border-color: #d7e3ef;
     --ag-row-border-color: #edf2f7;
@@ -6580,12 +7228,25 @@ button:hover {
 
 .ag-theme-alpine.mckinsey-ag-grid.trades-ag-grid .ag-header-cell-text {
     color: #334155;
-    font-size: 9.5px;
-    font-weight: 850;
+    font-size: 10.5px;
+    font-weight: 750;
     line-height: 1.05;
     letter-spacing: 0.03em;
     text-transform: uppercase;
     white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.trades-ag-grid .ag-header-group-cell.trades-column-group-header {
+    border-right: 1px solid #cbd5e1;
+    background: #e8eff7;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.trades-ag-grid .ag-header-group-cell.trades-column-group-header .ag-header-group-text {
+    color: #1e3a5f;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
 }
 
 .ag-theme-alpine.mckinsey-ag-grid.trades-ag-grid .ag-header-cell-label {
@@ -6689,6 +7350,14 @@ button:hover {
 }
 
 @media (max-width: 900px) {
+    .options-dashboard-container.trades-page {
+        padding: 14px 12px 24px;
+    }
+
+    .trades-page-title {
+        font-size: 23px;
+    }
+
     .professional-section-header.trades-sticky-filter-bar {
         flex-wrap: wrap;
         align-items: stretch;
@@ -6702,15 +7371,12 @@ button:hover {
     }
 
     .trades-strategy-dropdown {
-        min-width: 220px;
+        min-width: 0;
     }
 
-    .trades-view-selector {
+    .trades-sticky-filter-bar .trades-export-button {
         width: 100%;
-    }
-
-    .trades-view-selector label {
-        flex: 1 1 0;
+        margin-left: 0;
     }
 
     .trades-section {
@@ -6722,10 +7388,43 @@ button:hover {
         padding: 11px 10px;
     }
 }
+
+@media (max-width: 420px) {
+    .options-dashboard-container.trades-page {
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .trades-sticky-filter-group {
+        align-items: stretch;
+        flex-direction: column;
+        border-radius: 10px;
+    }
+
+    .trades-date-dropdown,
+    .trades-strategy-dropdown {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .trades-section {
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .trades-section-header {
+        margin-right: -8px;
+        margin-left: -8px;
+    }
+}
 .dashboard-source-status-banner {
+    position: sticky;
+    top: var(--dashboard-top-bar-height, 54px);
+    z-index: 1190;
     width: 100%;
     padding: 8px 18px 0;
     background: #f8fafc;
+    box-sizing: border-box;
 }
 
 .dashboard-source-status-content {
@@ -6759,6 +7458,30 @@ button:hover {
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.72);
     white-space: nowrap;
+}
+
+@media (max-width: 1180px) {
+    .dashboard-source-status-banner {
+        top: 91px;
+    }
+}
+
+@media (max-width: 768px) {
+    .dashboard-source-status-banner {
+        top: 136px;
+    }
+
+    .dashboard-source-status-content {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: thin;
+    }
+
+    .dashboard-source-status-headline,
+    .dashboard-source-status-chip {
+        flex: 0 0 auto;
+    }
 }
 .correlations-filter-bar {
     display: grid;

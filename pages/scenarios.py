@@ -14,7 +14,9 @@ from valuation_analytics import (
     available_valuation_dates,
     clear_valuation_analytics_cache,
     load_valuation_snapshot,
+    resolve_currency,
     run_portfolio_scenario,
+    select_currency,
 )
 
 
@@ -45,13 +47,9 @@ def _empty_figure(message):
     return figure
 
 
-def _money(value):
+def _money(value, currency):
     value = float(value or 0)
-    if abs(value) >= 1_000_000:
-        return f'{value / 1_000_000:,.2f}m'
-    if abs(value) >= 1_000:
-        return f'{value / 1_000:,.1f}k'
-    return f'{value:,.0f}'
+    return f'{value:,.2f} {currency}'
 
 
 def _stat(label, value, tone='neutral'):
@@ -61,7 +59,7 @@ def _stat(label, value, tone='neutral'):
     )
 
 
-def _component_waterfall(results):
+def _component_waterfall(results, currency):
     if results.empty:
         return _empty_figure('No valid positions for this scenario.')
     totals = results.sum(numeric_only=True)
@@ -85,20 +83,22 @@ def _component_waterfall(results):
             increasing={'marker': {'color': '#16a34a'}},
             decreasing={'marker': {'color': '#dc2626'}},
             totals={'marker': {'color': '#2563eb'}},
-            hovertemplate='%{x}<br>%{y:,.0f}<extra></extra>',
+            hovertemplate=(
+                f'%{{x}}<br>%{{y:,.2f}} {currency}<extra></extra>'
+            ),
         )
     )
     figure.update_layout(
         template='plotly_white',
         height=390,
         margin=dict(l=60, r=20, t=20, b=70),
-        yaxis={'title': 'Portfolio P&L'},
+        yaxis={'title': f'Portfolio P&L ({currency})'},
         showlegend=False,
     )
     return figure
 
 
-def _group_figure(aggregated, grouping):
+def _group_figure(aggregated, grouping, currency):
     if aggregated.empty:
         return _empty_figure('No scenario results to group.')
     figure = go.Figure(
@@ -106,16 +106,19 @@ def _group_figure(aggregated, grouping):
             x=aggregated[grouping],
             y=aggregated['exact_pnl'],
             marker_color=np.where(aggregated['exact_pnl'] >= 0, '#16a34a', '#dc2626'),
-            text=aggregated['exact_pnl'].map(lambda value: f'{value:,.0f}'),
+            text=aggregated['exact_pnl'].map(lambda value: f'{value:,.2f}'),
             textposition='outside',
-            hovertemplate='%{x}<br>Exact P&L: %{y:,.0f}<extra></extra>',
+            hovertemplate=(
+                f'%{{x}}<br>Exact P&L: %{{y:,.2f}} '
+                f'{currency}<extra></extra>'
+            ),
         )
     )
     figure.update_layout(
         template='plotly_white',
         height=390,
         margin=dict(l=60, r=20, t=20, b=90),
-        yaxis={'title': 'Exact scenario P&L'},
+        yaxis={'title': f'Exact scenario P&L ({currency})'},
         xaxis={'title': GROUPING_LABELS.get(grouping, grouping), 'tickangle': -25},
     )
     return figure
@@ -126,8 +129,11 @@ def _grid_payload(aggregated, grouping):
         return [], []
     display = aggregated.copy()
     for column in display.columns:
-        if column != grouping:
-            display[column] = pd.to_numeric(display[column], errors='coerce').round(0)
+        if column not in {grouping, 'currency'}:
+            display[column] = pd.to_numeric(
+                display[column],
+                errors='coerce',
+            ).round(2)
     headers = {
         grouping: GROUPING_LABELS.get(grouping, grouping),
         'base_value': 'Base value',
@@ -141,8 +147,9 @@ def _grid_payload(aggregated, grouping):
         'rate_pnl': 'Rate',
         'interaction_residual': 'Non-linear / cross',
     }
+    headers['currency'] = 'Currency'
     columns = []
-    for column in [grouping, *PNL_COLUMNS]:
+    for column in ['currency', grouping, *PNL_COLUMNS]:
         definition = {
             'field': column,
             'headerName': headers.get(column, column),
@@ -151,11 +158,13 @@ def _grid_payload(aggregated, grouping):
             'resizable': True,
             'minWidth': 118 if column != grouping else 170,
         }
-        if column != grouping:
+        if column not in {grouping, 'currency'}:
             definition.update(
                 {
                     'type': 'numericColumn',
-                    'valueFormatter': {'function': "d3.format(',.0f')(params.value)"},
+                    'valueFormatter': {
+                        'function': "d3.format(',.2f')(params.value)"
+                    },
                     'cellStyle': {
                         'styleConditions': [
                             {'condition': 'params.value < 0', 'style': {'color': '#b91c1c'}},
@@ -165,11 +174,15 @@ def _grid_payload(aggregated, grouping):
                 }
             )
         columns.append(definition)
-    return display[[grouping, *PNL_COLUMNS]].to_dict('records'), columns
+    return (
+        display[['currency', grouping, *PNL_COLUMNS]].to_dict('records'),
+        columns,
+    )
 
 
-def _scenario_frame(cob_date, strategies, shocks):
+def _scenario_frame(cob_date, strategies, currency, shocks):
     snapshot = load_valuation_snapshot(cob_date)
+    snapshot = select_currency(snapshot, currency)
     if strategies:
         snapshot = snapshot[snapshot['substrategy'].isin(strategies)].copy()
     return run_portfolio_scenario(snapshot, **shocks)
@@ -182,6 +195,15 @@ layout = html.Div(
             [
                 html.Div([html.Label('Valuation COB'), dcc.Dropdown(id='scenario-cob', clearable=False)]),
                 html.Div([html.Label('Strategies'), dcc.Dropdown(id='scenario-strategies', multi=True)]),
+                html.Div(
+                    [
+                        html.Label('Currency'),
+                        dcc.Dropdown(
+                            id='scenario-currency',
+                            clearable=False,
+                        ),
+                    ]
+                ),
                 html.Div(
                     [
                         html.Label('Group result by'),
@@ -206,7 +228,10 @@ layout = html.Div(
             className='analytics-filter-bar',
         ),
         html.Div(
-            'Full Kirk revaluation. Rate is a separate discount overlay because the production Kirk valuation is undiscounted.',
+            'Full Kirk revaluation in one selected native currency. No FX '
+            'conversion or cross-currency aggregation is performed. Rate is a '
+            'separate discount overlay because the production Kirk valuation '
+            'is undiscounted.',
             className='analytics-model-note',
         ),
         html.Div(id='scenario-status', className='analytics-status'),
@@ -242,11 +267,19 @@ layout = html.Div(
     Output('scenario-cob', 'value'),
     Output('scenario-strategies', 'options'),
     Output('scenario-strategies', 'value'),
+    Output('scenario-currency', 'options'),
+    Output('scenario-currency', 'value'),
     Input('refresh-options-data', 'n_clicks'),
     State('scenario-cob', 'value'),
     State('scenario-strategies', 'value'),
+    State('scenario-currency', 'value'),
 )
-def update_scenario_selectors(refresh_clicks, current_cob, current_strategies):
+def update_scenario_selectors(
+    refresh_clicks,
+    current_cob,
+    current_strategies,
+    current_currency,
+):
     try:
         if refresh_clicks:
             clear_valuation_analytics_cache()
@@ -255,9 +288,20 @@ def update_scenario_selectors(refresh_clicks, current_cob, current_strategies):
         snapshot = load_valuation_snapshot(resolved_cob) if resolved_cob else pd.DataFrame()
         strategies = sorted(snapshot['substrategy'].dropna().unique()) if not snapshot.empty else []
         selected = [value for value in (current_strategies or strategies) if value in strategies]
-        return ([{'label': date, 'value': date} for date in dates], resolved_cob, [{'label': value, 'value': value} for value in strategies], selected)
+        currencies = sorted(
+            snapshot['currency'].dropna().astype(str).unique()
+        )
+        currency = resolve_currency(snapshot, current_currency)
+        return (
+            [{'label': date, 'value': date} for date in dates],
+            resolved_cob,
+            [{'label': value, 'value': value} for value in strategies],
+            selected,
+            [{'label': value, 'value': value} for value in currencies],
+            currency,
+        )
     except ValuationDataError:
-        return [], None, [], []
+        return [], None, [], [], [], None
 
 
 @callback(
@@ -269,6 +313,7 @@ def update_scenario_selectors(refresh_clicks, current_cob, current_strategies):
     Output('scenario-status', 'children'),
     Input('scenario-run', 'n_clicks'),
     Input('scenario-cob', 'value'),
+    Input('scenario-currency', 'value'),
     State('scenario-strategies', 'value'),
     State('scenario-grouping', 'value'),
     State('scenario-price-a', 'value'),
@@ -279,8 +324,21 @@ def update_scenario_selectors(refresh_clicks, current_cob, current_strategies):
     State('scenario-rate', 'value'),
     State('scenario-days', 'value'),
 )
-def update_scenario_results(_run_clicks, cob_date, strategies, grouping, price_a, price_b, vol_a, vol_b, correlation, rate, days):
-    if not cob_date:
+def update_scenario_results(
+    _run_clicks,
+    cob_date,
+    currency,
+    strategies,
+    grouping,
+    price_a,
+    price_b,
+    vol_a,
+    vol_b,
+    correlation,
+    rate,
+    days,
+):
+    if not cob_date or not currency:
         empty = _empty_figure('No valuation snapshot selected.')
         return empty, empty, [], [], [], html.Div('No valuation snapshot is available.', className='analytics-warning')
     shocks = {
@@ -293,7 +351,12 @@ def update_scenario_results(_run_clicks, cob_date, strategies, grouping, price_a
         'business_days_forward': days,
     }
     try:
-        results, invalid = _scenario_frame(cob_date, strategies, shocks)
+        results, invalid = _scenario_frame(
+            cob_date,
+            strategies,
+            currency,
+            shocks,
+        )
     except (ValuationDataError, ValueError, FloatingPointError) as exc:
         empty = _empty_figure('Scenario calculation failed validation.')
         return empty, empty, [], [], [], html.Div(str(exc), className='analytics-warning')
@@ -305,17 +368,25 @@ def update_scenario_results(_run_clicks, cob_date, strategies, grouping, price_a
     stats = [
         _stat('Positions revalued', f'{len(results):,}', 'success' if len(results) else 'warning'),
         _stat('Positions excluded', f'{len(invalid):,}', 'warning' if len(invalid) else 'neutral'),
-        _stat('Base value', _money(totals.get('base_value', 0))),
-        _stat('Shocked value', _money(totals.get('shocked_value', 0))),
-        _stat('Exact P&L', _money(exact), 'success' if exact >= 0 else 'warning'),
-        _stat('Non-linear / cross', _money(residual), 'warning' if abs(residual) > max(abs(exact) * 0.1, 1) else 'neutral'),
+        _stat('Base value', _money(totals.get('base_value', 0), currency)),
+        _stat('Shocked value', _money(totals.get('shocked_value', 0), currency)),
+        _stat('Exact P&L', _money(exact, currency), 'success' if exact >= 0 else 'warning'),
+        _stat('Non-linear / cross', _money(residual, currency), 'warning' if abs(residual) > max(abs(exact) * 0.1, 1) else 'neutral'),
     ]
     status = html.Div(
-        f'{cob_date} valuation snapshot · {len(results)} Kirk spread positions · '
+        f'{cob_date} valuation snapshot · {currency} only · '
+        f'{len(results)} Kirk spread positions · '
         f'{len(invalid)} excluded with explicit validation errors. Exact P&L is the full revaluation; component P&L is a local approximation.',
         className='analytics-info',
     )
-    return _component_waterfall(results), _group_figure(aggregated, grouping), rows, columns, stats, status
+    return (
+        _component_waterfall(results, currency),
+        _group_figure(aggregated, grouping, currency),
+        rows,
+        columns,
+        stats,
+        status,
+    )
 
 
 @callback(
@@ -323,6 +394,7 @@ def update_scenario_results(_run_clicks, cob_date, strategies, grouping, price_a
     Input('scenario-export', 'n_clicks'),
     State('scenario-cob', 'value'),
     State('scenario-strategies', 'value'),
+    State('scenario-currency', 'value'),
     State('scenario-grouping', 'value'),
     State('scenario-price-a', 'value'),
     State('scenario-price-b', 'value'),
@@ -333,8 +405,21 @@ def update_scenario_results(_run_clicks, cob_date, strategies, grouping, price_a
     State('scenario-days', 'value'),
     prevent_initial_call=True,
 )
-def export_scenario(n_clicks, cob_date, strategies, grouping, price_a, price_b, vol_a, vol_b, correlation, rate, days):
-    if not n_clicks or not cob_date:
+def export_scenario(
+    n_clicks,
+    cob_date,
+    strategies,
+    currency,
+    grouping,
+    price_a,
+    price_b,
+    vol_a,
+    vol_b,
+    correlation,
+    rate,
+    days,
+):
+    if not n_clicks or not cob_date or not currency:
         return dash.no_update
     shocks = {
         'price_a_pct': price_a,
@@ -346,11 +431,26 @@ def export_scenario(n_clicks, cob_date, strategies, grouping, price_a, price_b, 
         'business_days_forward': days,
     }
     try:
-        results, invalid = _scenario_frame(cob_date, strategies, shocks)
+        results, invalid = _scenario_frame(
+            cob_date,
+            strategies,
+            currency,
+            shocks,
+        )
     except ValuationDataError:
         return dash.no_update
     output = io.BytesIO()
-    assumptions = pd.DataFrame([{'assumption': key, 'value': value} for key, value in {'cob_date': cob_date, 'grouping': grouping, **shocks}.items()])
+    assumptions = pd.DataFrame(
+        [
+            {'assumption': key, 'value': value}
+            for key, value in {
+                'cob_date': cob_date,
+                'currency': currency,
+                'grouping': grouping,
+                **shocks,
+            }.items()
+        ]
+    )
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         aggregate_scenario(results, grouping).to_excel(writer, sheet_name='Summary', index=False)
         results.to_excel(writer, sheet_name='Position Detail', index=False)

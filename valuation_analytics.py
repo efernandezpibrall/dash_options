@@ -29,6 +29,7 @@ VALUATION_COLUMNS = [
     'model',
     'put_call',
     'buy_sell',
+    'currency',
     'premium',
     'expiration_date',
     'quantity',
@@ -88,6 +89,7 @@ NUMERIC_COLUMNS = [
         'model',
         'put_call',
         'buy_sell',
+        'currency',
         'unit_quantity',
         'asset_a',
         'maturity_date_type_a',
@@ -107,6 +109,7 @@ POSITION_KEY_COLUMNS = [
     'model',
     'put_call',
     'buy_sell',
+    'currency',
     'premium',
     'expiration_date',
     'unit_quantity',
@@ -147,6 +150,18 @@ def _normalize_snapshot(frame):
     if frame is None or frame.empty:
         return pd.DataFrame(columns=VALUATION_COLUMNS)
     data = frame.copy()
+    if 'currency' not in data:
+        raise ValuationDataError('Valuation snapshot is missing currency.')
+    currency = data['currency'].astype('string').str.strip()
+    invalid_currency = currency.isna() | ~currency.str.fullmatch(
+        r'[A-Z]{3}',
+        na=False,
+    )
+    if invalid_currency.any():
+        raise ValuationDataError(
+            'Valuation snapshot contains an invalid currency code.'
+        )
+    data['currency'] = currency.astype(str)
     for column in DATE_COLUMNS:
         data[column] = pd.to_datetime(data[column], errors='coerce')
     for column in NUMERIC_COLUMNS:
@@ -154,11 +169,36 @@ def _normalize_snapshot(frame):
     return data
 
 
+def available_currencies(frame):
+    data = _normalize_snapshot(frame)
+    return sorted(data['currency'].dropna().astype(str).unique().tolist())
+
+
+def resolve_currency(frame, selected_currency=None):
+    currencies = available_currencies(frame)
+    if not currencies:
+        return None
+    if selected_currency in currencies:
+        return selected_currency
+    if 'USD' in currencies:
+        return 'USD'
+    return currencies[0]
+
+
+def select_currency(frame, currency):
+    data = _normalize_snapshot(frame)
+    if currency not in available_currencies(data):
+        raise ValuationDataError(
+            f'Currency {currency!r} is unavailable in this valuation snapshot.'
+        )
+    return data[data['currency'].eq(currency)].copy()
+
+
 @lru_cache(maxsize=1)
 def available_valuation_dates():
     query = text(
         f'''SELECT DISTINCT cob_date
-            FROM {fq_table(DB_SCHEMA, 'trades_options_valuation')}
+            FROM {fq_table(DB_SCHEMA, 'trades_options_valuation_current')}
             ORDER BY cob_date DESC'''
     )
     try:
@@ -173,7 +213,7 @@ def _load_valuation_snapshot_cached(cob_date):
     selected_columns = ', '.join(f'"{column}"' for column in VALUATION_COLUMNS)
     query = text(
         f'''SELECT {selected_columns}
-            FROM {fq_table(DB_SCHEMA, 'trades_options_valuation')}
+            FROM {fq_table(DB_SCHEMA, 'trades_options_valuation_current')}
             WHERE cob_date = :cob_date
             ORDER BY substrategy, expiration_date, asset_a, asset_b, put_call'''
     )
@@ -341,6 +381,7 @@ def run_portfolio_scenario(
         results.append(
             {
                 'substrategy': row.substrategy,
+                'currency': row.currency,
                 'expiry_year': row.expiry_year,
                 'asset_pair': row.asset_pair,
                 'portfolio': 'Portfolio',
@@ -386,7 +427,15 @@ def aggregate_scenario(results, grouping):
         'interaction_residual',
         'base_reconciliation',
     ]
-    return results.groupby(grouping, dropna=False, as_index=False)[numeric].sum().sort_values('exact_pnl')
+    return (
+        results.groupby(
+            ['currency', grouping],
+            dropna=False,
+            as_index=False,
+        )[numeric]
+        .sum()
+        .sort_values(['currency', 'exact_pnl'])
+    )
 
 
 def _aggregate_snapshot_positions(frame):
@@ -462,11 +511,26 @@ def calculate_pnl_explain(previous, current):
     merged['actual_pnl'] = merged['qty_pnl_current'].fillna(0) - merged['qty_pnl_previous'].fillna(0)
     matched = merged['_merge'].eq('both')
     prior_quantity = merged['quantity_previous'].fillna(0)
-    ds1 = merged['adjusted_price_a_current'] - merged['adjusted_price_a_previous']
-    ds2 = merged['adjusted_price_b_current'] - merged['adjusted_price_b_previous']
-    dv1_points = (merged['adjusted_vol_a_current'] - merged['adjusted_vol_a_previous']) * 100
-    dv2_points = (merged['adjusted_vol_b_current'] - merged['adjusted_vol_b_previous']) * 100
-    drho_points = (merged['correlation_current'] - merged['correlation_previous']) * 100
+    ds1 = (
+        merged['adjusted_price_a_current']
+        - merged['adjusted_price_a_previous']
+    ).fillna(0.0)
+    ds2 = (
+        merged['adjusted_price_b_current']
+        - merged['adjusted_price_b_previous']
+    ).fillna(0.0)
+    dv1_points = (
+        (merged['adjusted_vol_a_current'] - merged['adjusted_vol_a_previous'])
+        * 100
+    ).fillna(0.0)
+    dv2_points = (
+        (merged['adjusted_vol_b_current'] - merged['adjusted_vol_b_previous'])
+        * 100
+    ).fillna(0.0)
+    drho_points = (
+        (merged['correlation_current'] - merged['correlation_previous'])
+        * 100
+    ).fillna(0.0)
     merged['price_mark_changed'] = matched & (ds1.abs().gt(1e-10) | ds2.abs().gt(1e-10))
     merged['vol_mark_changed'] = matched & (dv1_points.abs().gt(1e-10) | dv2_points.abs().gt(1e-10))
     merged['correlation_mark_changed'] = matched & drho_points.abs().gt(1e-10)
@@ -529,4 +593,12 @@ def aggregate_pnl_explain(explain, grouping):
         'explained_pnl',
         'unexplained_pnl',
     ]
-    return explain.groupby(grouping, dropna=False, as_index=False)[numeric].sum().sort_values('actual_pnl')
+    return (
+        explain.groupby(
+            ['currency', grouping],
+            dropna=False,
+            as_index=False,
+        )[numeric]
+        .sum()
+        .sort_values(['currency', 'actual_pnl'])
+    )

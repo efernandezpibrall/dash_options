@@ -1,677 +1,845 @@
+"""Trade-level ledger for immutable published option valuation snapshots."""
+
+from __future__ import annotations
+
+import logging
+
 import dash
 import dash_ag_grid as dag
-from dash import html, dcc, Input, Output, State
-import io
-import pandas as pd
-import numpy as np
-from sqlalchemy import text
+from dash import Input, Output, State, dcc, html, no_update
 
 from runtime_config import get_database_engine
-_trades_data_error = None
+from trade_ledger import (
+    OUTPUT_COLUMNS,
+    TradeLedgerDataError,
+    build_trade_workbook,
+    get_available_cob_dates,
+    get_substrategies,
+    load_trade_snapshot,
+)
 
 
-# ------------------------------------------------------------------
-# HELPER FUNCTIONS FOR DATA ACCESS AND FORMATTING
-# ------------------------------------------------------------------
-def get_available_dates(engine):
-    """
-    Fetch distinct COB dates from 'at_lng.trades_options_valuation'
-    in descending order.
-    """
-    try:
-        query = """
-        SELECT DISTINCT cob_date
-        FROM at_lng.trades_options_valuation
-        ORDER BY cob_date DESC
-        """
-        dates_df = pd.read_sql(query, engine)
-        # Convert each date to string, e.g. '2023-01-01'
-        return [d.strftime('%Y-%m-%d') for d in dates_df['cob_date']]
-    except Exception:
-        return []
+logger = logging.getLogger(__name__)
+
+ERROR_STYLE_HIDDEN = {"display": "none"}
+ERROR_STYLE_VISIBLE = {"display": "block"}
+
+DATE_FIELDS = {
+    "cob_date",
+    "trade_date",
+    "expiration_date",
+    "maturity_date_a",
+    "maturity_date_b",
+    "maturity_date_c",
+    "discount_curve_cob_date",
+}
+TIMESTAMP_FIELDS = {"valuation_created_at", "valuation_published_at"}
+PERCENT_FIELDS = {
+    "vol_a",
+    "vol_b",
+    "vol_c",
+    "adjusted_vol_a",
+    "adjusted_vol_b",
+    "adjusted_vol_c",
+    "volatility_used",
+}
+QUANTITY_FIELDS = {"quantity"}
+MONETARY_DECIMAL_PLACES = 2
+QUANTITY_GREEK_DECIMAL_PLACES = 6
+MODEL_GREEK_DECIMAL_PLACES = 8
+FOUR_DECIMAL_FIELDS = {
+    "premium",
+    "price",
+    "intrinsic_value",
+    "time_value",
+    "pnl",
+    "strike",
+    "asset_a_multiplier",
+    "asset_a_premium",
+    "asset_b_multiplier",
+    "asset_b_premium",
+    "asset_c_multiplier",
+    "asset_c_premium",
+    "price_a",
+    "price_b",
+    "price_c",
+    "adjusted_price_a",
+    "adjusted_price_b",
+    "adjusted_price_c",
+    "adjusted_strike",
+    "time_to_expiry",
+    "correlation",
+    "discount_factor_to_expiry",
+    "forward_price_used",
+    "delta_s1",
+    "delta_s2",
+    "gamma_s1",
+    "gamma_s2",
+    "gamma_s1s2",
+    "vega_sigma1",
+    "vega_sigma2",
+    "corr_sensitivity",
+    "theta",
+    "rho",
+}
+MODEL_GREEK_FIELDS = {
+    "delta_s1",
+    "delta_s2",
+    "gamma_s1",
+    "gamma_s2",
+    "gamma_s1s2",
+    "vega_sigma1",
+    "vega_sigma2",
+    "corr_sensitivity",
+    "theta",
+    "rho",
+}
+POSITION_RISK_FIELDS = {
+    "qty_delta_asset_a",
+    "qty_delta_asset_b",
+    "qty_gamma_asset_a",
+    "qty_gamma_asset_b",
+    "qty_delta_s1",
+    "qty_delta_s2",
+    "qty_gamma_s1",
+    "qty_gamma_s2",
+    "qty_gamma_s1s2",
+    "qty_vega_sigma1",
+    "qty_vega_sigma2",
+    "qty_corr_sensitivity",
+    "qty_theta",
+    "qty_rho",
+}
+TOTAL_VALUE_FIELDS = {
+    "qty_value",
+    "qty_intrinsic_value",
+    "qty_time_value",
+    "qty_premium",
+    "qty_pnl",
+}
+SIGNED_FIELDS = {
+    "premium",
+    "price",
+    "intrinsic_value",
+    "time_value",
+    "pnl",
+    *MODEL_GREEK_FIELDS,
+    *POSITION_RISK_FIELDS,
+    *TOTAL_VALUE_FIELDS,
+}
+
+COLUMN_LABELS = {
+    "cob_date": "COB",
+    "trade_date": "Trade date",
+    "entity": "Entity",
+    "type_trade": "Trade type",
+    "book": "Book",
+    "strategy": "Strategy",
+    "substrategy": "Substrategy",
+    "type_option": "Option type",
+    "model": "Model",
+    "put_call": "C/P",
+    "buy_sell": "Buy/Sell",
+    "currency": "Currency",
+    "premium": "Execution basis / unit",
+    "expiration_date": "Expiry",
+    "quantity": "Quantity",
+    "unit_quantity": "Unit",
+    "strike": "Strike",
+    "asset_a": "Asset A",
+    "asset_a_multiplier": "A multiplier",
+    "asset_a_premium": "A adjustment",
+    "maturity_date_type_a": "A maturity type",
+    "maturity_date_a": "A maturity",
+    "asset_sign_a": "A sign",
+    "asset_b": "Asset B",
+    "asset_b_multiplier": "B multiplier",
+    "asset_b_premium": "B adjustment",
+    "maturity_date_type_b": "B maturity type",
+    "maturity_date_b": "B maturity",
+    "asset_sign_b": "B sign",
+    "asset_c": "Asset C",
+    "asset_c_multiplier": "C multiplier",
+    "asset_c_premium": "C adjustment",
+    "maturity_date_type_c": "C maturity type",
+    "maturity_date_c": "C maturity",
+    "asset_sign_c": "C sign",
+    "price_a": "Market price A",
+    "price_b": "Market price B",
+    "price_c": "Market price C",
+    "vol_a": "Market vol A",
+    "vol_b": "Market vol B",
+    "vol_c": "Market vol C",
+    "correlation": "Correlation",
+    "adjusted_price_a": "Adjusted price A",
+    "adjusted_price_b": "Adjusted price B",
+    "adjusted_price_c": "Adjusted price C",
+    "adjusted_strike": "Adjusted strike",
+    "time_to_expiry": "Time to expiry",
+    "adjusted_vol_a": "Adjusted vol A",
+    "adjusted_vol_b": "Adjusted vol B",
+    "adjusted_vol_c": "Adjusted vol C",
+    "price": "Value / unit",
+    "delta_s1": "Delta S1 / unit",
+    "delta_s2": "Delta S2 / unit",
+    "gamma_s1": "Gamma S1 / unit",
+    "gamma_s2": "Gamma S2 / unit",
+    "gamma_s1s2": "Cross-gamma / unit",
+    "vega_sigma1": "Vega A / unit",
+    "vega_sigma2": "Vega B / unit",
+    "corr_sensitivity": "Correlation / unit",
+    "theta": "Theta / unit",
+    "rho": "Rho / unit",
+    "intrinsic_value": "Intrinsic / unit",
+    "time_value": "Time value / unit",
+    "pnl": "P&L / unit",
+    "qty_delta_asset_a": "Qty Delta asset A",
+    "qty_delta_asset_b": "Qty Delta asset B",
+    "qty_gamma_asset_a": "Qty Gamma asset A",
+    "qty_gamma_asset_b": "Qty Gamma asset B",
+    "qty_delta_s1": "Qty Delta S1",
+    "qty_delta_s2": "Qty Delta S2",
+    "qty_gamma_s1": "Qty Gamma S1",
+    "qty_gamma_s2": "Qty Gamma S2",
+    "qty_gamma_s1s2": "Qty cross-gamma",
+    "qty_vega_sigma1": "Qty Vega S1",
+    "qty_vega_sigma2": "Qty Vega S2",
+    "qty_corr_sensitivity": "Qty correlation",
+    "qty_theta": "Qty Theta",
+    "qty_rho": "Qty Rho",
+    "qty_value": "Total value",
+    "qty_intrinsic_value": "Total intrinsic",
+    "qty_time_value": "Total time value",
+    "qty_premium": "Total execution basis",
+    "qty_pnl": "Total P&L",
+    "contract_convention_code": "Contract convention",
+    "discount_curve_code": "Discount curve",
+    "margin_style": "Margin style",
+    "discount_curve_cob_date": "Curve COB",
+    "discount_factor_to_expiry": "Discount factor",
+    "pricing_model_version": "Pricing model version",
+    "convention_source_url": "Convention source",
+    "forward_price_used": "Forward used",
+    "volatility_used": "Volatility used",
+    "valuation_run_id": "Valuation run ID",
+    "valuation_revision": "Revision",
+    "valuation_methodology_version": "Methodology",
+    "valuation_input_fingerprint": "Input fingerprint",
+    "valuation_created_at": "Run created at",
+    "valuation_created_by": "Run created by",
+    "valuation_published_at": "Published at",
+    "valuation_published_by": "Published by",
+}
+
+EXPORT_COLUMNS = [column for column in OUTPUT_COLUMNS if column != "cob_date"]
 
 
-def get_strategies(engine, selected_date):
-    """
-    Return a sorted list of distinct substrategies for the given COB date.
-    """
-    try:
-        query = text("""
-        SELECT DISTINCT substrategy
-        FROM at_lng.trades_options_valuation
-        WHERE cob_date = :selected_date
-        ORDER BY substrategy
-        """)
-        df_strats = pd.read_sql(query, engine, params={'selected_date': selected_date})
-        return sorted(df_strats['substrategy'].dropna().unique().tolist())
-    except Exception:
-        return []
-
-
-def fetch_trades_data(engine, selected_date, selected_strategies):
-    """
-    Query 'at_lng.trades_options_valuation' for the given COB date
-    and filter to only the specified substrategies.
-    Group by (substrategy, type_option, strike, expiration_date).
-    Aggregations:
-    - Premium: weighted average by quantity
-    - Quantity: sum
-    - Intrinsic_value: weighted average by quantity
-    - Time_value: weighted average by quantity
-    - qty_intrinsic_value: sum
-    - qty_time_value: sum
-    - qty_pnl: sum
-    """
-    global _trades_data_error
-    _trades_data_error = None
-    try:
-        # Base query for the date (main data)
-        query = text("""
-        SELECT
-            substrategy,
-            type_option,
-            put_call,
-            asset_a,
-            asset_b,
-            asset_a_multiplier,
-            asset_a_premium,
-            asset_b_multiplier,
-            asset_b_premium,
-            price_a,
-            price_b,
-            adjusted_vol_a,
-            adjusted_vol_b,
-            premium,
-            quantity,
-            unit_quantity,
-            strike,
-            expiration_date,
-            intrinsic_value,
-            time_value,
-            qty_intrinsic_value,
-            qty_time_value,
-            qty_pnl
-        FROM at_lng.trades_options_valuation
-        WHERE cob_date = :selected_date
-        """)
-        df = pd.read_sql(query, engine, params={'selected_date': selected_date})
-        if df.empty:
-            return pd.DataFrame()
-
-        # Filter to only the selected substrategies
-        if selected_strategies:
-            df = df[df['substrategy'].isin(selected_strategies)]
-        if df.empty:
-            return pd.DataFrame()
-
-        # Convert expiration_date to datetime for proper grouping
-        df['expiration_date'] = pd.to_datetime(df['expiration_date'], errors='coerce')
-
-        # Group + aggregate
-        grouped = (
-            df.groupby(['substrategy', 'type_option', 'put_call', 'asset_a', 'asset_b', 'unit_quantity', 'strike', 'expiration_date'], dropna=False)
-            .agg({
-                'asset_a_multiplier': 'first',  # constant value
-                'asset_a_premium': lambda x: np.average(x, weights=df.loc[x.index, 'quantity']) if x.notna().any() and df.loc[x.index, 'quantity'].sum() > 0 else 0,  # weighted average by quantity
-                'asset_b_multiplier': 'first',  # constant value
-                'asset_b_premium': lambda x: np.average(x, weights=df.loc[x.index, 'quantity']) if x.notna().any() and df.loc[x.index, 'quantity'].sum() > 0 else 0,  # weighted average by quantity
-                'price_a': 'first',  # market price (constant)
-                'price_b': 'first',  # market price (constant)
-                'adjusted_vol_a': 'first',  # volatility (constant)
-                'adjusted_vol_b': 'first',  # volatility (constant)
-                'premium': lambda x: np.average(x, weights=df.loc[x.index, 'quantity']) if x.notna().any() and df.loc[x.index, 'quantity'].sum() > 0 else 0,  # weighted average by quantity
-                'quantity': 'sum',  # sum
-                'intrinsic_value': lambda x: np.average(x, weights=df.loc[x.index, 'quantity']) if x.notna().any() and df.loc[x.index, 'quantity'].sum() > 0 else 0,  # weighted average by quantity
-                'time_value': lambda x: np.average(x, weights=df.loc[x.index, 'quantity']) if x.notna().any() and df.loc[x.index, 'quantity'].sum() > 0 else 0,  # weighted average by quantity
-                'qty_intrinsic_value': 'sum',  # sum
-                'qty_time_value': 'sum',  # sum
-                'qty_pnl': 'sum'  # sum
-            })
-            .reset_index()
+def _format_function(decimal_places: int) -> dict[str, str]:
+    return {
+        "function": (
+            "params.value == null ? '—' : "
+            f"d3.format(',.{decimal_places}f')(params.value)"
         )
-
-        # Sort by substrategy, type_option, put_call, asset_a, asset_b, strike, expiration_date for logical display order
-        grouped = grouped.sort_values(['substrategy', 'type_option', 'put_call', 'asset_a', 'asset_b', 'strike', 'expiration_date'])
-        
-        return grouped
-    except Exception as exc:
-        _trades_data_error = f'Trades query or aggregation failed: {type(exc).__name__}: {exc}'
-        return pd.DataFrame()
+    }
 
 
-# Dictionary to map DB column names to user-friendly display names
-COLUMN_NAME_MAPPING = {
-    'substrategy': 'Strategy',
-    'type_option': 'Option Type',
-    'put_call': 'Call/Put',
-    'asset_a': 'Asset A',
-    'asset_b': 'Asset B',
-    'asset_a_multiplier': 'Asset A Multiplier',
-    'asset_a_premium': 'Asset A Premium',
-    'asset_b_multiplier': 'Asset B Multiplier',
-    'asset_b_premium': 'Asset B Premium',
-    'price_a': 'Price A',
-    'price_b': 'Price B',
-    'adjusted_vol_a': 'Vol A',
-    'adjusted_vol_b': 'Vol B',
-    'premium': 'Premium',
-    'quantity': 'Quantity',
-    'unit_quantity': 'Unit',
-    'strike': 'Strike',
-    'expiration_date': 'Expiration Date',
-    'intrinsic_value': 'Intrinsic Value',
-    'time_value': 'Time Value',
-    'qty_intrinsic_value': 'Total Intrinsic',
-    'qty_time_value': 'Total Time Value',
-    'qty_pnl': 'Total P&L'
-}
+def _percent_format_function() -> dict[str, str]:
+    return {
+        "function": (
+            "params.value == null ? '—' : "
+            "d3.format(',.2f')(params.value * 100) + '%'"
+        )
+    }
 
 
-COLUMN_GRID_HEADER_MAPPING = {
-    'type_option': 'Type',
-    'put_call': 'C/P',
-    'asset_a': 'Asset A',
-    'asset_b': 'Asset B',
-    'asset_a_multiplier': 'A Mult',
-    'asset_a_premium': 'A Prem',
-    'asset_b_multiplier': 'B Mult',
-    'asset_b_premium': 'B Prem',
-    'price_a': 'Price A',
-    'price_b': 'Price B',
-    'adjusted_vol_a': 'Vol A',
-    'adjusted_vol_b': 'Vol B',
-    'expiration_date': 'Expiry',
-    'intrinsic_value': 'Intrinsic',
-    'time_value': 'Time',
-    'qty_intrinsic_value': 'Intrinsic Total',
-    'qty_time_value': 'Time Total',
-    'qty_pnl': 'Total P&L',
-}
+def _column(
+    field: str,
+    *,
+    width: int = 108,
+    pinned: bool = False,
+    sort: str | None = None,
+    sort_index: int | None = None,
+    tooltip: str | None = None,
+) -> dict:
+    definition = {
+        "headerName": COLUMN_LABELS.get(field, field),
+        "field": field,
+        "headerTooltip": tooltip or COLUMN_LABELS.get(field, field),
+        "tooltipField": field,
+        "width": width,
+        "minWidth": min(width, 72),
+        "maxWidth": max(width + 80, 150),
+        "sortable": True,
+        "resizable": True,
+        "filter": "agTextColumnFilter",
+        "suppressMovable": pinned,
+        "cellClass": "trades-text-cell",
+        "headerClass": "trades-text-header",
+    }
+    if pinned:
+        definition.update({"pinned": "left", "lockPinned": True})
+    if sort:
+        definition["sort"] = sort
+    if sort_index is not None:
+        definition["sortIndex"] = sort_index
 
-TRADES_COLUMN_WIDTHS = {
-    'substrategy': 154,
-    'type_option': 82,
-    'put_call': 58,
-    'asset_a': 74,
-    'asset_b': 74,
-    'asset_a_multiplier': 70,
-    'asset_a_premium': 78,
-    'asset_b_multiplier': 70,
-    'asset_b_premium': 78,
-    'price_a': 72,
-    'price_b': 72,
-    'adjusted_vol_a': 66,
-    'adjusted_vol_b': 66,
-    'premium': 78,
-    'quantity': 84,
-    'unit_quantity': 64,
-    'strike': 74,
-    'expiration_date': 92,
-    'intrinsic_value': 82,
-    'time_value': 74,
-    'qty_intrinsic_value': 108,
-    'qty_time_value': 98,
-    'qty_pnl': 94,
-}
+    if field in DATE_FIELDS or field in TIMESTAMP_FIELDS:
+        definition.update(
+            {
+                "cellDataType": "dateString",
+                "filter": "agDateColumnFilter",
+                "cellClass": "trades-date-cell",
+            }
+        )
+    elif (
+        field in QUANTITY_FIELDS
+        or field in FOUR_DECIMAL_FIELDS
+        or field in POSITION_RISK_FIELDS
+        or field in TOTAL_VALUE_FIELDS
+        or field == "valuation_revision"
+        or field in PERCENT_FIELDS
+    ):
+        definition.update(
+            {
+                "cellDataType": "number",
+                "filter": "agNumberColumnFilter",
+                "cellClass": "trades-number-cell",
+                "headerClass": "trades-number-header",
+            }
+        )
+        if field in PERCENT_FIELDS:
+            definition["valueFormatter"] = _percent_format_function()
+        elif field == "valuation_revision":
+            definition["valueFormatter"] = _format_function(0)
+        elif field in MODEL_GREEK_FIELDS:
+            definition["valueFormatter"] = _format_function(
+                MODEL_GREEK_DECIMAL_PLACES
+            )
+        elif field in POSITION_RISK_FIELDS:
+            definition["valueFormatter"] = _format_function(
+                QUANTITY_GREEK_DECIMAL_PLACES
+            )
+        elif field in QUANTITY_FIELDS:
+            definition["valueFormatter"] = _format_function(2)
+        elif field in FOUR_DECIMAL_FIELDS:
+            definition["valueFormatter"] = _format_function(4)
+        else:
+            definition["valueFormatter"] = _format_function(
+                MONETARY_DECIMAL_PLACES
+            )
 
-TRADES_DECIMAL_COLUMNS = {
-    'asset_a_multiplier',
-    'asset_a_premium',
-    'asset_b_multiplier',
-    'asset_b_premium',
-    'price_a',
-    'price_b',
-    'adjusted_vol_a',
-    'adjusted_vol_b',
-    'premium',
-    'intrinsic_value',
-    'time_value',
-}
-
-TRADES_INTEGER_COLUMNS = {
-    'quantity',
-    'strike',
-    'qty_intrinsic_value',
-    'qty_time_value',
-    'qty_pnl',
-}
-
-TRADES_NUMERIC_COLUMNS = TRADES_DECIMAL_COLUMNS | TRADES_INTEGER_COLUMNS
-TRADES_TEXT_COLUMNS = {
-    'substrategy',
-    'type_option',
-    'put_call',
-    'asset_a',
-    'asset_b',
-    'unit_quantity',
-    'expiration_date',
-}
-SUMMARY_COLUMNS = [
-    'substrategy', 'type_option', 'unit_quantity', 'strike', 'expiration_date',
-    'premium', 'quantity', 'intrinsic_value', 'time_value',
-    'qty_intrinsic_value', 'qty_time_value', 'qty_pnl'
-]
-DETAIL_COLUMNS = SUMMARY_COLUMNS + [
-    'put_call',
-    'asset_a',
-    'asset_b',
-    'asset_a_multiplier',
-    'asset_a_premium',
-    'asset_b_multiplier',
-    'asset_b_premium',
-    'price_a',
-    'price_b',
-    'adjusted_vol_a',
-    'adjusted_vol_b',
-]
-
-
-def _trades_raw_number_expression(field):
-    return f"Number(params.data && params.data['__{field}_raw'])"
-
-
-def build_trades_column_defs(df):
-    """Create compact AG Grid column definitions for the trades table."""
-    column_defs = []
-
-    for col in df.columns:
-        full_name = COLUMN_NAME_MAPPING.get(col, col)
-        header_name = COLUMN_GRID_HEADER_MAPPING.get(col, full_name)
-        width = TRADES_COLUMN_WIDTHS.get(col, 86)
-        is_numeric = pd.api.types.is_numeric_dtype(df[col]) or col in TRADES_NUMERIC_COLUMNS
-        is_text_column = col in TRADES_TEXT_COLUMNS
-
-        column_def = {
-            'headerName': header_name,
-            'field': col,
-            'sortable': True,
-            'filter': False,
-            'resizable': True,
-            'width': width,
-            'minWidth': min(width, 70),
-            'maxWidth': max(width + 22, 104),
-            'tooltipField': col,
-            'headerTooltip': full_name,
-            'suppressMovable': col in {'substrategy', 'type_option'},
-            'cellClass': (
-                'mckinsey-ag-grid-cell mckinsey-ag-grid-text-cell trades-text-cell'
-                if is_text_column else
-                'mckinsey-ag-grid-cell mckinsey-ag-grid-number-cell trades-number-cell'
-            ),
-            'headerClass': (
-                'mckinsey-ag-grid-header trades-text-header'
-                if is_text_column else
-                'mckinsey-ag-grid-header trades-number-header'
+    if field in SIGNED_FIELDS:
+        definition["cellClassRules"] = {
+            "trades-positive-cell": "Number(params.value) > 0",
+            "trades-negative-cell": "Number(params.value) < 0",
+            "trades-missing-cell": (
+                "params.value === null || params.value === undefined || "
+                "Number.isNaN(Number(params.value))"
             ),
         }
-
-        if col in {'substrategy', 'type_option'}:
-            column_def.update({'pinned': 'left', 'lockPinned': True})
-        if col == 'expiration_date':
-            column_def.update({'sort': 'asc'})
-
-        if is_numeric:
-            raw_value = _trades_raw_number_expression(col)
-            column_def.update({
-                'type': 'rightAligned',
-                'cellClassRules': {
-                    'trades-positive-cell': (
-                        f"['intrinsic_value', 'qty_intrinsic_value', 'qty_pnl'].includes('{col}') "
-                        f"&& {raw_value} > 0"
-                    ),
-                    'trades-negative-cell': f"{raw_value} < 0",
-                    'trades-missing-cell': (
-                        f"params.data === null || params.data === undefined "
-                        f"|| params.data['__{col}_raw'] === null || params.data['__{col}_raw'] === undefined "
-                        f"|| isNaN(Number(params.data['__{col}_raw']))"
-                    ),
-                },
-            })
-
-        column_defs.append(column_def)
-
-    return column_defs
+    return definition
 
 
-def _format_trades_display_value(key, value):
-    if pd.isna(value):
-        return None
-    if key == 'expiration_date':
-        return pd.to_datetime(value).strftime('%Y-%m-%d')
-    if key in TRADES_DECIMAL_COLUMNS:
-        return f"{float(value):,.2f}"
-    if key in TRADES_INTEGER_COLUMNS:
-        return f"{float(value):,.0f}"
-    return value
+def _group(header: str, children: list[dict], *, open_by_default: bool = True) -> dict:
+    return {
+        "headerName": header,
+        "headerClass": "trades-column-group-header",
+        "marryChildren": True,
+        "openByDefault": open_by_default,
+        "children": children,
+    }
 
 
-def _raw_trades_numeric_value(key, value):
-    if key not in TRADES_NUMERIC_COLUMNS or pd.isna(value):
-        return None
-    return float(value)
+TRADES_COLUMN_DEFS = [
+    _group(
+        "Trade",
+        [
+            _column("trade_date", width=104, pinned=True, sort="desc", sort_index=0),
+            _column("substrategy", width=230, pinned=True, sort="asc", sort_index=1),
+            _column("strategy", width=142),
+            _column("book", width=100),
+            _column("entity", width=90),
+            _column("type_trade", width=92),
+            _column("model", width=116),
+            _column("type_option", width=98),
+            _column("buy_sell", width=82),
+            _column("put_call", width=66),
+            _column("expiration_date", width=104, sort="asc", sort_index=2),
+        ],
+    ),
+    _group(
+        "Position and premium",
+        [
+            _column("quantity", width=104),
+            _column("unit_quantity", width=76),
+            _column("currency", width=88),
+            _column("strike", width=92),
+            _column(
+                "premium",
+                width=142,
+                tooltip="Signed booked execution-price basis per unit in the native contract currency.",
+            ),
+            _column(
+                "qty_premium",
+                width=162,
+                tooltip="Quantity-weighted execution-price basis in the native contract currency; futures-style amounts are not universal upfront cashflows.",
+            ),
+        ],
+    ),
+    _group(
+        "Valuation",
+        [
+            _column("price", width=110),
+            _column("qty_value", width=122),
+            _column("intrinsic_value", width=116),
+            _column("time_value", width=124),
+            _column("qty_intrinsic_value", width=130),
+            _column("qty_time_value", width=140),
+            _column("pnl", width=108),
+            _column("qty_pnl", width=124),
+        ],
+    ),
+    _group(
+        "Position Greeks (original fields)",
+        [
+            _column("qty_delta_asset_a", width=128),
+            _column("qty_delta_asset_b", width=128),
+            _column("qty_gamma_asset_a", width=132),
+            _column("qty_gamma_asset_b", width=132),
+            _column("qty_delta_s1", width=112),
+            _column("qty_delta_s2", width=112),
+            _column("qty_gamma_s1", width=116),
+            _column("qty_gamma_s2", width=116),
+            _column("qty_gamma_s1s2", width=132),
+            _column("qty_vega_sigma1", width=112),
+            _column("qty_vega_sigma2", width=112),
+            _column("qty_theta", width=108),
+            _column("qty_corr_sensitivity", width=130),
+            _column("qty_rho", width=104),
+        ],
+    ),
+    _group(
+        "Model Greeks per unit (original fields)",
+        [
+            _column("delta_s1", width=116),
+            _column("delta_s2", width=116),
+            _column("gamma_s1", width=120),
+            _column("gamma_s2", width=120),
+            _column("gamma_s1s2", width=132),
+            _column("vega_sigma1", width=112),
+            _column("vega_sigma2", width=112),
+            _column("theta", width=108),
+            _column("corr_sensitivity", width=136),
+            _column("rho", width=104),
+        ],
+    ),
+    _group(
+        "Contract legs",
+        [
+            _column("asset_a", width=138),
+            _column("asset_sign_a", width=70),
+            _column("asset_a_multiplier", width=112),
+            _column("asset_a_premium", width=108),
+            _column("maturity_date_type_a", width=126),
+            _column("maturity_date_a", width=104),
+            _column("asset_b", width=138),
+            _column("asset_sign_b", width=70),
+            _column("asset_b_multiplier", width=112),
+            _column("asset_b_premium", width=108),
+            _column("maturity_date_type_b", width=126),
+            _column("maturity_date_b", width=104),
+            _column("asset_c", width=138),
+            _column("asset_sign_c", width=70),
+            _column("asset_c_multiplier", width=112),
+            _column("asset_c_premium", width=108),
+            _column("maturity_date_type_c", width=126),
+            _column("maturity_date_c", width=104),
+        ],
+    ),
+    _group(
+        "Market and model inputs",
+        [
+            _column("price_a", width=112),
+            _column("price_b", width=112),
+            _column("price_c", width=112),
+            _column("adjusted_price_a", width=120),
+            _column("adjusted_price_b", width=120),
+            _column("adjusted_price_c", width=120),
+            _column("adjusted_strike", width=116),
+            _column("vol_a", width=110),
+            _column("vol_b", width=110),
+            _column("vol_c", width=110),
+            _column("adjusted_vol_a", width=116),
+            _column("adjusted_vol_b", width=116),
+            _column("adjusted_vol_c", width=116),
+            _column("correlation", width=106),
+            _column("time_to_expiry", width=118),
+            _column("forward_price_used", width=118),
+            _column("volatility_used", width=118),
+        ],
+    ),
+    _group(
+        "Valuation lineage",
+        [
+            _column("contract_convention_code", width=180),
+            _column("margin_style", width=112),
+            _column("discount_curve_code", width=126),
+            _column("discount_curve_cob_date", width=104),
+            _column("discount_factor_to_expiry", width=126),
+            _column("pricing_model_version", width=210),
+            _column("convention_source_url", width=250),
+            _column("valuation_run_id", width=250),
+            _column("valuation_revision", width=86),
+            _column("valuation_methodology_version", width=220),
+            _column("valuation_input_fingerprint", width=250),
+            _column("valuation_created_at", width=176),
+            _column("valuation_created_by", width=130),
+            _column("valuation_published_at", width=176),
+            _column("valuation_published_by", width=130),
+        ],
+    ),
+]
 
 
-def _clean_trades_records(df):
-    records = []
-    for row in df.to_dict('records'):
-        clean_row = {}
-        for key, value in row.items():
-            clean_row[key] = _format_trades_display_value(key, value)
-            if key in TRADES_NUMERIC_COLUMNS:
-                clean_row[f'__{key}_raw'] = _raw_trades_numeric_value(key, value)
-        records.append(clean_row)
-    return records
-
-
-def _export_df_from_grid_records(row_data, column_defs):
-    if not row_data or not column_defs:
-        return pd.DataFrame()
-
-    fields = [
-        column.get('field')
-        for column in column_defs
-        if isinstance(column, dict) and column.get('field') and not str(column.get('field')).startswith('__')
-    ]
-    if not fields:
-        return pd.DataFrame()
-
-    export_records = []
-    for row in row_data:
-        export_row = {}
-        for field in fields:
-            raw_key = f'__{field}_raw'
-            export_row[field] = row.get(raw_key) if raw_key in row and row.get(raw_key) is not None else row.get(field)
-        export_records.append(export_row)
-
-    return pd.DataFrame(export_records, columns=fields)
-
-
-def _filter_trades_view_columns(df, view_mode):
-    column_order = SUMMARY_COLUMNS if view_mode == 'summary' else DETAIL_COLUMNS
-    available_columns = [col for col in column_order if col in df.columns]
-    return df[available_columns]
-
-
-# ------------------------------------------------------------------
-# 3) BUILD THE DASH LAYOUT
-# ------------------------------------------------------------------
-ERROR_STYLE_HIDDEN = {'display': 'none'}
-ERROR_STYLE_VISIBLE = {'display': 'block'}
-
-
-def _build_trades_filter_bar():
+def _build_filter_bar():
     return html.Div(
         [
             html.Div(
                 [
-                    html.Span('COB', className='filter-group-header'),
+                    html.Label("COB", htmlFor="trades-date-dropdown", className="filter-group-header"),
                     dcc.Dropdown(
-                        id='trades-date-dropdown',
+                        id="trades-date-dropdown",
                         options=[],
                         value=None,
                         clearable=False,
-                        className='inline-dropdown-date trades-filter-dropdown trades-date-dropdown',
+                        className="trades-filter-dropdown trades-date-dropdown",
                     ),
                 ],
-                className='filter-group trades-sticky-filter-group trades-date-filter-group',
+                className="filter-group trades-sticky-filter-group trades-date-filter-group",
             ),
             html.Div(
                 [
-                    html.Span('View', className='filter-group-header'),
-                    dcc.RadioItems(
-                        id='trades-view-radio',
-                        options=[
-                            {'label': 'Summary', 'value': 'summary'},
-                            {'label': 'Detail', 'value': 'detail'},
-                        ],
-                        value='summary',
-                        className='trades-view-selector',
+                    html.Label(
+                        "Substrategies",
+                        htmlFor="trades-strategy-dropdown",
+                        className="filter-group-header",
                     ),
-                ],
-                className='filter-group trades-sticky-filter-group trades-view-filter-group',
-            ),
-            html.Div(
-                [
-                    html.Span('Strategies', className='filter-group-header'),
                     dcc.Dropdown(
-                        id='trades-strategy-dropdown',
+                        id="trades-strategy-dropdown",
                         options=[],
                         value=[],
                         multi=True,
-                        placeholder='Select strategies...',
-                        className='inline-dropdown-multi-strategies trades-filter-dropdown trades-strategy-dropdown',
+                        placeholder="All active substrategies",
+                        className="trades-filter-dropdown trades-strategy-dropdown",
                     ),
                 ],
-                className='filter-group trades-sticky-filter-group trades-strategy-filter-group',
+                className="filter-group trades-sticky-filter-group trades-strategy-filter-group",
+            ),
+            html.Button(
+                "Export",
+                id="export-trades-table-btn",
+                className="custom-export-btn trades-export-button",
+                title="Export the grid's current filtered and sorted rows",
             ),
         ],
-        className='professional-section-header trades-sticky-filter-bar',
+        className="professional-section-header trades-sticky-filter-bar",
     )
 
 
-def _build_trades_section_header(title, actions=None):
-    return html.Div(
-        [
-            html.Div(
-                [html.H3(title, className='section-title-inline')],
-                className='trades-section-title-row',
-            ),
-            html.Div(actions or [], className='trades-section-actions'),
-        ],
-        className='trades-section-header',
-    )
-
-
-layout = html.Div(
+layout = html.Main(
     [
-        dcc.Download(id='download-trades-table'),
-        dcc.Store(id='trades-data-store', storage_type='memory'),
-        _build_trades_filter_bar(),
-        html.Div(
+        dcc.Download(id="download-trades-table"),
+        dcc.Store(id="trades-date-state", storage_type="memory"),
+        dcc.Store(id="trades-strategy-state", storage_type="memory"),
+        dcc.Store(id="trades-snapshot-meta", storage_type="memory"),
+        html.Header(
             [
-                _build_trades_section_header(
-                    'Trades',
-                    actions=[
-                        html.Button(
-                            'Export',
-                            id='export-trades-table-btn',
-                            className='custom-export-btn trades-export-button',
+                html.H1("Trade ledger", className="trades-page-title"),
+                html.P(
+                    "Every active option trade leg with its booked economics and "
+                    "published valuation and Greeks for the selected COB.",
+                    className="trades-page-subtitle",
+                ),
+            ],
+            className="trades-page-header",
+        ),
+        _build_filter_bar(),
+        html.Div(
+            id="trades-source-status",
+            className="trades-source-status",
+            role="status",
+            **{"aria-live": "polite"},
+        ),
+        html.P(
+            "Amounts are shown in each row's native contract currency. Premium is "
+            "the signed booked execution-price basis; for futures-style contracts "
+            "it is not described as a universal upfront cashflow. No FX conversion "
+            "or cross-currency total is applied.",
+            className="trades-sign-note",
+        ),
+        html.Section(
+            [
+                html.Div(
+                    [
+                        html.H2(
+                            "Active trade legs",
+                            id="trades-active-ledger-heading",
+                            className="trades-section-title",
+                        ),
+                        html.Div(
+                            id="trades-export-status",
+                            className="trades-export-status",
+                            role="status",
+                            **{"aria-live": "polite"},
                         ),
                     ],
+                    className="trades-section-header",
                 ),
                 dcc.Loading(
-                    id='trades-loading',
-                    type='circle',
+                    id="trades-loading",
+                    type="circle",
                     children=[
-                        html.Div(id='trades-error-message', className='trades-error-message', style=ERROR_STYLE_HIDDEN),
+                        html.Div(
+                            id="trades-error-message",
+                            className="trades-error-message",
+                            style=ERROR_STYLE_HIDDEN,
+                            role="alert",
+                        ),
                         html.Div(
                             dag.AgGrid(
-                                id='trades-table',
+                                id="trades-table",
                                 rowData=[],
-                                columnDefs=[],
+                                columnDefs=TRADES_COLUMN_DEFS,
                                 defaultColDef={
-                                    'sortable': True,
-                                    'filter': False,
-                                    'resizable': True,
-                                    'suppressHeaderMenuButton': True,
-                                    'suppressHeaderFilterButton': True,
-                                    'wrapHeaderText': False,
-                                    'autoHeaderHeight': False,
+                                    "sortable": True,
+                                    "filter": True,
+                                    "resizable": True,
+                                    "suppressHeaderMenuButton": False,
+                                    "suppressHeaderFilterButton": False,
+                                    "wrapHeaderText": False,
+                                    "autoHeaderHeight": False,
                                 },
                                 dashGridOptions={
-                                    'domLayout': 'normal',
-                                    'rowHeight': 24,
-                                    'headerHeight': 30,
-                                    'pagination': False,
-                                    'suppressPaginationPanel': True,
-                                    'enableCellTextSelection': True,
-                                    'ensureDomOrder': True,
-                                    'animateRows': False,
-                                    'rowSelection': {
-                                        'mode': 'singleRow',
-                                        'checkboxes': False,
-                                        'enableClickSelection': True,
-                                    },
+                                    "domLayout": "normal",
+                                    "rowHeight": 28,
+                                    "headerHeight": 34,
+                                    "groupHeaderHeight": 30,
+                                    "pagination": False,
+                                    "suppressPaginationPanel": True,
+                                    "enableCellTextSelection": True,
+                                    "ensureDomOrder": True,
+                                    "animateRows": False,
+                                    "getRowId": {"function": "params.data._trade_key"},
+                                    "ariaLabel": "Active option trade ledger",
                                 },
-                                className='ag-theme-alpine mckinsey-ag-grid supply-dest-summary-grid trades-ag-grid',
-                                style={'width': '100%', 'height': 'calc(100vh - 250px)', 'minHeight': '340px'},
+                                className=(
+                                    "ag-theme-alpine mckinsey-ag-grid "
+                                    "supply-dest-summary-grid trades-ag-grid"
+                                ),
+                                style={
+                                    "width": "100%",
+                                    "height": "calc(100vh - 330px)",
+                                    "minHeight": "420px",
+                                },
                                 dangerously_allow_code=True,
                             ),
-                            className='trades-table-container',
+                            className="trades-table-container",
                         ),
                     ],
                 ),
             ],
-            className='trades-section',
+            className="trades-section",
+            **{"aria-labelledby": "trades-active-ledger-heading"},
         ),
     ],
-    className='options-dashboard-container trades-page',
+    className="options-dashboard-container trades-page",
 )
 
-# ------------------------------------------------------------------
-# 4) CALLBACKS
-# ------------------------------------------------------------------
+
+def _safe_data_error(exc: Exception, *, context: str) -> str:
+    if isinstance(exc, TradeLedgerDataError):
+        return str(exc)
+    logger.exception("%s failed", context)
+    return f"{context} failed. Check the configured published valuation source."
+
 
 @dash.callback(
-    Output('trades-date-dropdown', 'options'),
-    Output('trades-date-dropdown', 'value'),
-    Input('refresh-options-data', 'n_clicks'),
-    State('trades-date-dropdown', 'value'),
+    Output("trades-date-dropdown", "options"),
+    Output("trades-date-dropdown", "value"),
+    Output("trades-date-state", "data"),
+    Input("refresh-options-data", "n_clicks"),
+    State("trades-date-dropdown", "value"),
 )
 def update_trades_date_options(n_clicks, current_date):
     del n_clicks
-    dates = get_available_dates(get_database_engine(required=False))
-    options = [{'label': date, 'value': date} for date in dates]
-    selected_date = current_date if current_date in dates else (dates[0] if dates else None)
-    return options, selected_date
+    try:
+        dates = get_available_cob_dates(get_database_engine(required=False))
+    except Exception as exc:
+        message = _safe_data_error(exc, context="Trade COB discovery")
+        return [], None, {"error": message}
 
-# 4.1) Populate the strategy dropdown based on the selected date
+    options = [{"label": value, "value": value} for value in dates]
+    selected = current_date if current_date in dates else (dates[0] if dates else None)
+    if not dates:
+        return (
+            [],
+            None,
+            {
+                "error": (
+                    "No published COB has complete original valuation Greeks."
+                )
+            },
+        )
+    return options, selected, {"error": ""}
+
+
 @dash.callback(
-    Output('trades-strategy-dropdown', 'options'),
-    Output('trades-strategy-dropdown', 'value'),
-    Input('trades-date-dropdown', 'value'),
-    Input('refresh-options-data', 'n_clicks')
+    Output("trades-strategy-dropdown", "options"),
+    Output("trades-strategy-dropdown", "value"),
+    Output("trades-strategy-state", "data"),
+    Input("trades-date-dropdown", "value"),
+    Input("refresh-options-data", "n_clicks"),
+    State("trades-strategy-dropdown", "value"),
 )
-def update_strategy_options(selected_date, n_clicks):
-    """
-    Whenever the user picks a new date or clicks refresh, fetch the distinct substrategies
-    for that date from the DB, then set them as the strategy dropdown options.
-    Default the value to *all* strategies.
-    """
-    if not selected_date:
-        return [], []
-
-    # Get the list of available strategies
-    strategies = get_strategies(get_database_engine(required=False), selected_date)
-
-    # Build the dropdown options
-    options = [{'label': s, 'value': s} for s in strategies]
-
-    # Default the selected value to "all strategies" = everything
-    return options, strategies
-
-
-# 4.2) Fetch grouped trade data when date or strategy selection changes
-@dash.callback(
-    Output('trades-data-store', 'data'),
-    Input('trades-date-dropdown', 'value'),
-    Input('trades-strategy-dropdown', 'value'),
-    Input('refresh-options-data', 'n_clicks')
-)
-def update_trades_data_store(selected_date, selected_strategies, n_clicks):
-    """
-    Queries and groups trades data by (substrategy, type_option, strike, expiration_date) 
-    for the chosen date, then filters to the selected strategies.
-    """
+def update_strategy_options(selected_date, n_clicks, current_strategies):
     del n_clicks
     if not selected_date:
-        return {'data': None, 'error': '', 'error_visible': False}
-
-    df = fetch_trades_data(get_database_engine(required=False), selected_date, selected_strategies)
-    if df.empty:
-        error_message = _trades_data_error or "No trades are available for the selected date and strategies."
-        return {'data': None, 'error': error_message, 'error_visible': True}
-
-    # Format expiration_date to show only date part (remove time)
-    if 'expiration_date' in df.columns:
-        df['expiration_date'] = pd.to_datetime(df['expiration_date'])
-
-    return {
-        'data': df.to_json(date_format='iso', orient='split'),
-        'error': '',
-        'error_visible': False,
-    }
+        return [], [], {"error": ""}
+    try:
+        strategies = get_substrategies(
+            get_database_engine(required=False),
+            selected_date,
+        )
+    except Exception as exc:
+        message = _safe_data_error(exc, context="Trade substrategy discovery")
+        return [], [], {"error": message}
+    options = [{"label": value, "value": value} for value in strategies]
+    preserved = [
+        value for value in (current_strategies or []) if value in strategies
+    ]
+    return options, preserved or strategies, {"error": ""}
 
 
-# 4.3) Update the AG Grid when data or view mode changes
 @dash.callback(
-    Output('trades-table', 'rowData'),
-    Output('trades-table', 'columnDefs'),
-    Output('trades-error-message', 'children'),
-    Output('trades-error-message', 'style'),
-    Input('trades-data-store', 'data'),
-    Input('trades-view-radio', 'value')
+    Output("trades-table", "rowData"),
+    Output("trades-snapshot-meta", "data"),
+    Output("trades-source-status", "children"),
+    Output("trades-source-status", "className"),
+    Output("trades-error-message", "children"),
+    Output("trades-error-message", "style"),
+    Input("trades-date-dropdown", "value"),
+    Input("trades-strategy-dropdown", "value"),
+    Input("refresh-options-data", "n_clicks"),
+    Input("trades-date-state", "data"),
+    Input("trades-strategy-state", "data"),
 )
-def update_trades_table(data_store, view_mode):
-    """
-    Renders the current grouped trades dataset in summary or detail mode.
-    """
-    if not data_store:
-        return [], [], "", ERROR_STYLE_HIDDEN
-
-    if data_store.get('error_visible'):
-        return [], [], data_store.get('error', ''), ERROR_STYLE_VISIBLE
-
-    if not data_store.get('data'):
-        return [], [], "", ERROR_STYLE_HIDDEN
-
-    df = pd.read_json(io.StringIO(data_store['data']), orient='split')
-    if df.empty:
-        return [], [], "", ERROR_STYLE_HIDDEN
-
-    if 'expiration_date' in df.columns:
-        df['expiration_date'] = pd.to_datetime(df['expiration_date'])
-
-    # Filter columns based on view mode
-    df = _filter_trades_view_columns(df, view_mode)
-
-    data_records = _clean_trades_records(df)
-
-    columns = build_trades_column_defs(df)
-
-    return data_records, columns, "", ERROR_STYLE_HIDDEN
-
-
-# 4.4) Export callback for trades table
-@dash.callback(
-    Output("download-trades-table", "data"),
-    Input("export-trades-table-btn", "n_clicks"),
-    [State('trades-date-dropdown', 'value'),
-     State('trades-view-radio', 'value'),
-     State('trades-table', 'rowData'),
-     State('trades-table', 'columnDefs')],
-    prevent_initial_call=True
-)
-def export_trades_table(n_clicks, selected_date, view_mode, row_data, column_defs):
-    """Export Trades Detail Table to Excel"""
-    if n_clicks is None or selected_date is None:
-        raise dash.exceptions.PreventUpdate
+def update_trades_table(
+    selected_date,
+    selected_strategies,
+    n_clicks,
+    date_state,
+    strategy_state,
+):
+    del n_clicks
+    selector_error = (
+        (date_state or {}).get("error")
+        or (strategy_state or {}).get("error")
+    )
+    if selector_error:
+        return (
+            [],
+            None,
+            "Published valuation snapshot unavailable",
+            "trades-source-status trades-source-status-error",
+            selector_error,
+            ERROR_STYLE_VISIBLE,
+        )
+    if not selected_date:
+        return (
+            [],
+            None,
+            "Select a published COB",
+            "trades-source-status trades-source-status-warning",
+            "",
+            ERROR_STYLE_HIDDEN,
+        )
 
     try:
-        # Export the current AG Grid state to avoid a duplicate DB read.
-        df = _export_df_from_grid_records(row_data, column_defs)
-        if df.empty:
-            raise dash.exceptions.PreventUpdate
+        snapshot = load_trade_snapshot(
+            get_database_engine(required=False),
+            selected_date,
+            selected_strategies,
+        )
+    except Exception as exc:
+        message = _safe_data_error(exc, context="Trade snapshot load")
+        return (
+            [],
+            None,
+            "Published trade snapshot unavailable",
+            "trades-source-status trades-source-status-error",
+            message,
+            ERROR_STYLE_VISIBLE,
+        )
 
-        # Rename columns to user-friendly names
-        df_renamed = df.rename(columns=COLUMN_NAME_MAPPING)
+    metadata = snapshot.metadata()
+    status = (
+        f"{snapshot.row_count:,} active legs · COB {snapshot.cob_date} · "
+        f"currencies {', '.join(metadata['currencies'])} · "
+        f"revision {snapshot.valuation_revision} · "
+        f"{snapshot.valuation_methodology_version} · "
+        f"published {snapshot.valuation_published_at}"
+    )
+    return (
+        snapshot.records(),
+        metadata,
+        status,
+        "trades-source-status trades-source-status-success",
+        "",
+        ERROR_STYLE_HIDDEN,
+    )
 
-        # Generate filename with timestamp
-        timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-        view_suffix = f"_{view_mode}" if view_mode else ""
-        filename = f"trades_detail_table_{selected_date}{view_suffix}_{timestamp}.xlsx"
 
-        return dcc.send_data_frame(df_renamed.to_excel, filename, sheet_name="Trades Detail", index=False)
-
-    except Exception:
+@dash.callback(
+    Output("download-trades-table", "data"),
+    Output("trades-export-status", "children"),
+    Input("export-trades-table-btn", "n_clicks"),
+    State("trades-date-dropdown", "value"),
+    State("trades-strategy-dropdown", "value"),
+    State("trades-table", "virtualRowData"),
+    State("trades-table", "rowData"),
+    State("trades-table", "filterModel"),
+    State("trades-snapshot-meta", "data"),
+    prevent_initial_call=True,
+)
+def export_trades_table(
+    n_clicks,
+    selected_date,
+    selected_strategies,
+    virtual_rows,
+    row_data,
+    filter_model,
+    metadata,
+):
+    if not n_clicks:
         raise dash.exceptions.PreventUpdate
+    records = virtual_rows if virtual_rows is not None else row_data
+    if not selected_date or not metadata:
+        return no_update, "No published snapshot is available to export."
+    if not records:
+        return no_update, "The current grid filter contains no rows to export."
+
+    try:
+        workbook = build_trade_workbook(
+            records,
+            metadata,
+            columns=EXPORT_COLUMNS,
+            labels=COLUMN_LABELS,
+            filter_model=filter_model,
+            selected_substrategies=selected_strategies,
+        )
+    except Exception:
+        logger.exception("Trade workbook export failed")
+        return no_update, "Export failed. The displayed snapshot was not changed."
+
+    filename = f"trade_ledger_{selected_date}_{len(records)}_rows.xlsx"
+    return dcc.send_bytes(workbook, filename), f"Exported {len(records):,} rows."

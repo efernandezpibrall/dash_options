@@ -30,14 +30,26 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.feature_flags import writes_enabled
+from vol_calibration.calibration_inputs import (
+    UNDISCOUNTED_CALL_DELTA,
+    calibration_eligibility_error,
+    calibration_readiness,
+    select_expiry_observations,
+)
 from vol_calibration.model_version import (
     DEFAULT_CALIBRATION_MODEL_VERSION,
     calibrate_v2 as calibrate,
     evaluate_fit_v2 as evaluate_fit,
 )
 from vol_calibration.session_state import restore_product_table
+from vol_calibration.operational_surface import (
+    create_operational_surface_status,
+    create_operational_surface_store,
+    operational_surface_frame,
+    register_operational_surface_callback,
+)
 
-from options.calibration_engine.io.loaders import load_market_data_with_metadata, create_sample_data
+from options.calibration_engine.io.loaders import load_market_data_with_metadata
 from options.calibration_engine.config.defaults import get_defaults
 from options.calibration_engine.io.storage import (
     ParameterStore,
@@ -114,6 +126,7 @@ def create_header():
 layout = dbc.Container([
     create_header(),
     dcc.Store(id=f'{COMMODITY_LOWER}-market-data-store'),
+    create_operational_surface_store(COMMODITY),
     dcc.Store(id=f'{COMMODITY_LOWER}-params-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-comparison-data-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-results-store'),
@@ -129,7 +142,10 @@ layout = dbc.Container([
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader(html.H6("Smile Plots", className="mb-0")),
-                dbc.CardBody([create_smile_grid(COMMODITY)], className="p-2"),
+                dbc.CardBody([
+                    create_operational_surface_status(COMMODITY),
+                    create_smile_grid(COMMODITY),
+                ], className="p-2"),
             ]),
         ], width=12),
     ]),
@@ -140,12 +156,18 @@ layout = dbc.Container([
     dcc.Download(id=f'{COMMODITY_LOWER}-download-excel'),
 ], fluid=True)
 
+register_operational_surface_callback(COMMODITY, get_default_date)
+
 
 @callback(
     [Output(f'{COMMODITY_LOWER}-market-data-store', 'data'),
      Output(f'{COMMODITY_LOWER}-params-store', 'data'),
      Output(f'{COMMODITY_LOWER}-data-status', 'children'),
-     Output(f'{COMMODITY_LOWER}-data-status-tooltip', 'children')],
+     Output(f'{COMMODITY_LOWER}-data-status-tooltip', 'children'),
+     Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'title'),
+     Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'title')],
     [Input(f'{COMMODITY_LOWER}-date-picker', 'date'),
      Input(f'{COMMODITY_LOWER}-reload-btn', 'n_clicks')],
     prevent_initial_call=False
@@ -158,85 +180,133 @@ def load_data(trade_date, reload_clicks):
     else:
         trade_date = pd.to_datetime(trade_date).date()
 
-    try:
-        # Load market data with metadata to track source
-        result = load_market_data_with_metadata(COMMODITY, trade_date)
-        market_data = result['data']
-        data_source = result.get('source', 'unknown')
-        is_synthetic = result.get('is_synthetic', True)
-        last_update = result.get('last_update')
+    result = load_market_data_with_metadata(
+        COMMODITY,
+        trade_date,
+        allow_synthetic_fallback=False,
+    )
+    market_data = result['data']
+    data_source = result.get('source', 'unknown')
+    is_synthetic = result.get('is_synthetic', False)
+    last_update = result.get('last_update')
+    ready, readiness_message = calibration_readiness(market_data)
 
-        # Format the data status badge and tooltip
+    if market_data.empty or is_synthetic:
         badge_component, tooltip_text = format_data_status(
             data_source=data_source,
             is_synthetic=is_synthetic,
             last_update=last_update,
             trade_date=trade_date,
-            commodity=COMMODITY
+            commodity=COMMODITY,
+            message=result.get('message'),
+            error=result.get('error'),
+        )
+        empty_market_json = pd.DataFrame(
+            columns=[
+                'expiry',
+                'option_expiration_date',
+                'dte',
+                'delta',
+                'delta_convention',
+                'iv',
+                'strike',
+                'forward',
+                'rate',
+                'source_name',
+                'quote_class',
+                'weight',
+            ]
+        ).to_json(date_format='iso', orient='split')
+        empty_params_json = pd.DataFrame(
+            columns=['expiry', *PARAM_COLUMNS, 'rmse']
+        ).to_json(date_format='iso', orient='split')
+        blocked_title = (
+            result.get('message')
+            or f'No exact-COB {COMMODITY} calibration input for {trade_date}'
+        )
+        return (
+            empty_market_json,
+            empty_params_json,
+            badge_component,
+            tooltip_text,
+            True,
+            blocked_title,
+            True,
+            blocked_title,
         )
 
-        # Try to load historical params from database (T-1)
+    historical_params = None
+    try:
+        engine = get_database_engine()
+        if engine is not None:
+            historical_params = load_latest_surface_from_db(
+                engine,
+                COMMODITY,
+                trade_date,
+            )
+    except Exception:
         historical_params = None
-        try:
-            engine = get_database_engine()
-            if engine is not None:
-                historical_params = load_latest_surface_from_db(engine, COMMODITY, trade_date)
-        except Exception:
-            historical_params = None
 
-        defaults = get_defaults(COMMODITY)
-        expiries = market_data['expiry'].unique()
-        params_list = []
-        loaded_from_db = False
-
-        for expiry in sorted(expiries):
-            exp_data = market_data[market_data['expiry'] == expiry]
-            forward = exp_data['forward'].iloc[0] if 'forward' in exp_data.columns else 14.0
-            expiry_date = pd.to_datetime(expiry).date()
-
-            # Check if we have historical params for this expiry
-            params_to_use = defaults.copy()
-            if historical_params is not None and not historical_params.empty:
-                matching = historical_params[historical_params['expiry'] == expiry_date]
-                if not matching.empty:
-                    loaded_from_db = True
-                    row = matching.iloc[0]
-                    for col in PARAM_COLUMNS:
-                        if col in row and pd.notna(row[col]):
-                            params_to_use[col] = row[col]
-
-            try:
-                eval_result = evaluate_fit(params=params_to_use, market_data=exp_data, forward=forward)
-                rmse = eval_result['rmse']
-            except Exception:
-                rmse = 0.0
-            params_list.append({'expiry': expiry, **params_to_use, 'rmse': rmse})
-
-        params_df = pd.DataFrame(params_list)
-
-        # Append historical params info to tooltip if applicable
-        if loaded_from_db:
-            tooltip_text += " | Historical params loaded"
-
-        return market_data.to_json(date_format='iso', orient='split'), params_df.to_json(date_format='iso', orient='split'), badge_component, tooltip_text
-
-    except Exception as e:
-        sample_data = create_sample_data(COMMODITY, trade_date, forward=14.0)
-        defaults = get_defaults(COMMODITY)
-        params_list = [{'expiry': exp, **defaults, 'rmse': 0.0} for exp in sorted(sample_data['expiry'].unique())]
-        params_df = pd.DataFrame(params_list)
-
-        # Create synthetic data badge
-        badge_component, tooltip_text = format_data_status(
-            data_source='synthetic',
-            is_synthetic=True,
-            last_update=None,
-            trade_date=trade_date,
-            commodity=COMMODITY
+    defaults = get_defaults(COMMODITY)
+    params_list = []
+    loaded_from_db = False
+    for expiry in sorted(market_data['expiry'].unique()):
+        exp_data = select_expiry_observations(market_data, expiry)
+        forward = (
+            exp_data['forward'].iloc[0]
+            if not exp_data.empty and 'forward' in exp_data.columns
+            else np.nan
         )
-        tooltip_text += f" | Error: {str(e)[:50]}"
+        expiry_date = pd.to_datetime(expiry).date()
+        params_to_use = defaults.copy()
+        if historical_params is not None and not historical_params.empty:
+            matching = historical_params[
+                historical_params['expiry'] == expiry_date
+            ]
+            if not matching.empty:
+                loaded_from_db = True
+                row = matching.iloc[0]
+                for col in PARAM_COLUMNS:
+                    if col in row and pd.notna(row[col]):
+                        params_to_use[col] = row[col]
+        try:
+            eligibility_error = calibration_eligibility_error(exp_data)
+            if eligibility_error:
+                raise ValueError(eligibility_error)
+            eval_result = evaluate_fit(
+                params=params_to_use,
+                market_data=exp_data,
+                forward=forward,
+                delta_convention=UNDISCOUNTED_CALL_DELTA,
+            )
+            rmse = eval_result['rmse']
+        except Exception:
+            rmse = np.nan
+        params_list.append({'expiry': expiry, **params_to_use, 'rmse': rmse})
 
-        return sample_data.to_json(date_format='iso', orient='split'), params_df.to_json(date_format='iso', orient='split'), badge_component, tooltip_text
+    params_df = pd.DataFrame(params_list)
+    badge_component, tooltip_text = format_data_status(
+        data_source=data_source,
+        is_synthetic=is_synthetic,
+        last_update=last_update,
+        trade_date=trade_date,
+        commodity=COMMODITY,
+        message=result.get('message'),
+        error=result.get('error'),
+    )
+    if loaded_from_db:
+        tooltip_text += ' | Historical params loaded'
+
+    return (
+        market_data.to_json(date_format='iso', orient='split'),
+        params_df.to_json(date_format='iso', orient='split'),
+        badge_component,
+        tooltip_text,
+        not ready,
+        readiness_message,
+        not ready,
+        readiness_message,
+    )
 
 
 @callback(
@@ -272,21 +342,35 @@ def update_param_table(params_json, market_data_json, session_state, trade_date)
     [Input(f'{COMMODITY_LOWER}-market-data-store', 'data'),
      Input(f'{COMMODITY_LOWER}-param-table', 'data'),
      Input(f'{COMMODITY_LOWER}-x-axis-selector', 'value'),
-     Input(f'{COMMODITY_LOWER}-param-table', 'selected_rows')],
+     Input(f'{COMMODITY_LOWER}-param-table', 'selected_rows'),
+     Input(f'{COMMODITY_LOWER}-operational-surface-store', 'data')],
     prevent_initial_call=True
 )
-def update_smile_grid(market_data_json, table_data, x_axis, selected_rows):
-    if market_data_json is None or table_data is None:
+def update_smile_grid(
+    market_data_json,
+    table_data,
+    x_axis,
+    selected_rows,
+    operational_payload,
+):
+    if market_data_json is None and operational_payload is None:
         raise PreventUpdate
-    market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    params_df = parse_table_data(table_data)
+    market_data = (
+        pd.read_json(StringIO(market_data_json), orient='split')
+        if market_data_json
+        else pd.DataFrame()
+    )
+    params_df = parse_table_data(table_data or [])
     selected_row = selected_rows[0] if selected_rows else None
+    selected_axis = x_axis or 'delta'
     return create_smile_grid_figure(
         market_data,
         params_df,
-        x_axis or 'log_moneyness',
+        selected_axis,
         selected_row,
         model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
+        operational_surface=operational_surface_frame(operational_payload),
+        operational_metadata=operational_payload,
     )
 
 
