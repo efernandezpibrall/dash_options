@@ -15,6 +15,11 @@ class FrozenDate(dt.date):
 @pytest.fixture(autouse=True)
 def freeze_pricer_date(monkeypatch):
     monkeypatch.setattr(pricer, "date", FrozenDate)
+    monkeypatch.setattr(
+        component_by_id("pricer-valuation-date"),
+        "date",
+        FrozenDate.today().isoformat(),
+    )
 
 
 def walk(component):
