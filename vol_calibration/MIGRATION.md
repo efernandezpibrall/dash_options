@@ -3,10 +3,13 @@
 The contents of this package were imported into `dash_options` as a squashed
 Git subtree and then adapted to run inside the existing Dash application.
 
-- Source repository: `/Users/fernandezpibrall/Repositories/dash_vol_surface_calibration`
+- Archived source repository:
+  [`efernandezpibrall/dash_vol_surface_calibration`](https://github.com/efernandezpibrall/dash_vol_surface_calibration)
 - Source commit: `638463d775324e7494eda8a65241714e85e0ddc9`
 - Import destination: `vol_calibration/`
 - Import policy: one-time migration; there is no ongoing subtree synchronization
+- Retirement status: the standalone repository is retained only as a read-only
+  historical archive; no local clone is required
 
 The standalone Dash app, router, port 8056 server, and calibration navbar were
 removed. The root `dash_options` app is the sole callback owner and server.
