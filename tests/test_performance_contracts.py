@@ -2,17 +2,7 @@ import json
 
 import pandas as pd
 
-from pages import greeks, prices, slopes, spreads
-
-
-def test_initial_history_queries_are_three_months_not_four_years():
-    end = pd.Timestamp('2026-07-13')
-    slope_start = slopes._history_query_start(end, '3M')
-    spread_start = spreads._spread_history_query_start(end, '3M')
-    assert slope_start == pd.Timestamp('2026-04-13')
-    assert spread_start == pd.Timestamp('2026-04-13')
-    assert slopes._history_query_start(end, 'ALL') == pd.Timestamp('2022-07-13')
-    assert spreads._spread_history_query_start(end, 'ALL') == pd.Timestamp('2022-07-13')
+from pages import greeks, prices
 
 
 def test_prices_query_transfers_only_the_five_cobs_the_chart_can_render(monkeypatch):

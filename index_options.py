@@ -1,5 +1,6 @@
 # index.py
 import os
+from urllib.parse import parse_qs
 
 from dash import html, dcc, clientside_callback
 from dash.dependencies import Input, Output
@@ -12,8 +13,6 @@ import pages.trades
 import pages.vol_surface
 import pages.vol_calibration
 import pages.prices
-import pages.slopes
-import pages.spreads
 import pages.pricer
 import pages.correlations
 import pages.scenarios
@@ -21,6 +20,52 @@ import pages.pnl_explain
 
 
 server = app.server
+
+
+def _valuation_workspace(search=None, *, default_view='valuation'):
+    query = parse_qs((search or '').lstrip('?'))
+    requested_view = query.get('view', [default_view])[0]
+    active_view = (
+        'pnl-explain'
+        if requested_view in {'pnl-explain', 'pnl_explain'}
+        else 'valuation'
+    )
+
+    def workspace_link(label, href, view):
+        class_name = 'valuation-workspace-tab'
+        if active_view == view:
+            class_name += ' active'
+        return html.A(
+            label,
+            href=href,
+            className=class_name,
+            **({'aria-current': 'page'} if active_view == view else {}),
+        )
+
+    return html.Div(
+        [
+            html.Nav(
+                [
+                    workspace_link('Valuation', '/valuation', 'valuation'),
+                    workspace_link(
+                        'P&L Explain',
+                        '/valuation?view=pnl-explain',
+                        'pnl-explain',
+                    ),
+                ],
+                className='valuation-workspace-tabs',
+                **{'aria-label': 'Valuation views'},
+            ),
+            (
+                pages.pnl_explain.layout
+                if active_view == 'pnl-explain'
+                else pages.valuation.layout
+            ),
+        ],
+        className='valuation-workspace',
+        **{'data-active-view': active_view},
+    )
+
 
 # Professional Navigation Bar - Options Dashboard
 nav_links = html.Header([
@@ -33,22 +78,60 @@ nav_links = html.Header([
             
             # Secondary navigation group
             html.Div([
-                dcc.Link('Valuation', href='/valuation', className='nav-link-secondary'),
-                dcc.Link('Trades', href='/trades', className='nav-link-secondary'),
-                dcc.Link('Volatility Surface', href='/vol_surface', className='nav-link-secondary'),
+                dcc.Link(
+                    'Valuation',
+                    href='/valuation',
+                    id='nav-valuation',
+                    className='nav-link-secondary',
+                ),
+                dcc.Link(
+                    'Trades',
+                    href='/trades',
+                    id='nav-trades',
+                    className='nav-link-secondary',
+                ),
+                dcc.Link(
+                    'Underlying Prices',
+                    href='/prices',
+                    id='nav-prices',
+                    className='nav-link-secondary',
+                ),
+                dcc.Link(
+                    'Volatility Surface',
+                    href='/vol_surface',
+                    id='nav-vol-surface',
+                    className='nav-link-secondary',
+                ),
                 dcc.Link(
                     'Vol Calibration',
                     href='/vol_calibration?product=ttf',
+                    id='nav-vol-calibration',
                     className='nav-link-secondary',
                 ) if pages.vol_calibration.calibration_enabled() else None,
-                dcc.Link('Underlying Prices', href='/prices', className='nav-link-secondary'),
-                dcc.Link('Slopes', href='/slopes', className='nav-link-secondary'),
-                dcc.Link('Spreads', href='/spreads', className='nav-link-secondary'),
-                dcc.Link('Pricer', href='/pricer', className='nav-link-secondary'),
-                dcc.Link('Correlations', href='/correlations', className='nav-link-secondary'),
-                dcc.Link('Scenarios', href='/scenarios', className='nav-link-secondary'),
-                dcc.Link('P&L Explain', href='/pnl_explain', className='nav-link-secondary'),
-            ], className='nav-group-secondary')
+                dcc.Link(
+                    'Correlations',
+                    href='/correlations',
+                    id='nav-correlations',
+                    className='nav-link-secondary',
+                ),
+                dcc.Link(
+                    'Scenarios',
+                    href='/scenarios',
+                    id='nav-scenarios',
+                    className='nav-link-secondary',
+                ),
+            ], className='nav-group-secondary'),
+
+            # Terminal workflow - visually separated and always last
+            html.Div(
+                dcc.Link(
+                    'Pricer',
+                    href='/pricer',
+                    id='nav-pricer',
+                    className='nav-link-secondary',
+                ),
+                className='nav-group-pricer',
+            ),
         ], className='main-navigation'),
         
         # Professional Controls Section - Options Dashboard specific
@@ -118,7 +201,7 @@ def display_page(pathname, search):
     elif pathname == '/greeks':
         return pages.greeks.layout
     elif pathname == '/valuation':
-        return pages.valuation.layout
+        return _valuation_workspace(search)
     elif pathname == '/trades':
         return pages.trades.layout
     elif pathname == '/vol_surface':
@@ -127,10 +210,6 @@ def display_page(pathname, search):
         return pages.vol_calibration.create_layout(search)
     elif pathname == '/prices':
         return pages.prices.layout
-    elif pathname == '/slopes':
-        return pages.slopes.layout
-    elif pathname == '/spreads':
-        return pages.spreads.layout
     elif pathname == '/pricer':
         return pages.pricer.layout
     elif pathname == '/correlations':
@@ -138,7 +217,7 @@ def display_page(pathname, search):
     elif pathname == '/scenarios':
         return pages.scenarios.layout
     elif pathname == '/pnl_explain':
-        return pages.pnl_explain.layout
+        return _valuation_workspace(search, default_view='pnl-explain')
     else:
         return '404 - Page not found'
 
@@ -158,25 +237,19 @@ clientside_callback(
             activeLink = document.getElementById('nav-greeks');
         } else {
             var linkMap = {
-                '/valuation': 'Valuation',
-                '/trades': 'Trades',
-                '/vol_surface': 'Volatility Surface',
-                '/vol_calibration': 'Vol Calibration',
-                '/prices': 'Underlying Prices',
-                '/slopes': 'Slopes',
-                '/spreads': 'Spreads',
-                '/pricer': 'Pricer',
-                '/correlations': 'Correlations',
-                '/scenarios': 'Scenarios',
-                '/pnl_explain': 'P&L Explain'
+                '/valuation': 'nav-valuation',
+                '/trades': 'nav-trades',
+                '/prices': 'nav-prices',
+                '/vol_surface': 'nav-vol-surface',
+                '/vol_calibration': 'nav-vol-calibration',
+                '/correlations': 'nav-correlations',
+                '/scenarios': 'nav-scenarios',
+                '/pnl_explain': 'nav-valuation',
+                '/pricer': 'nav-pricer'
             };
             
             if (linkMap[pathname]) {
-                allLinks.forEach(function(link) {
-                    if (link.innerText === linkMap[pathname]) {
-                        activeLink = link;
-                    }
-                });
+                activeLink = document.getElementById(linkMap[pathname]);
             }
         }
         
@@ -199,8 +272,6 @@ app.validation_layout = html.Div([
     pages.vol_surface.layout,
     pages.vol_calibration.validation_layout(),
     pages.prices.layout,
-    pages.slopes.layout,
-    pages.spreads.layout,
     pages.pricer.layout,
     pages.correlations.layout,
     pages.scenarios.layout,

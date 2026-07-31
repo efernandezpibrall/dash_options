@@ -256,7 +256,7 @@ def test_host_app_registers_route_callbacks_without_overwriting_url_search():
     from app import app
 
     app._setup_server()
-    assert len(app.callback_map) >= 109
+    assert "page-content.children" in app.callback_map
     assert "nav-active-sink.children" in app.callback_map
     url_search_callbacks = [
         callback_id for callback_id in app.callback_map if callback_id.startswith("url.search")
