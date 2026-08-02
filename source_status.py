@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
+import json
 
 import numpy as np
 import pandas as pd
@@ -10,6 +12,16 @@ from sqlalchemy import text
 
 from db_fallback import DB_SCHEMA, safe_exception_message
 from runtime_config import get_database_engine
+from snapshot_cache import (
+    SnapshotReferenceError,
+    latest_snapshot,
+    publish_snapshot,
+    resolve_snapshot,
+)
+
+
+SOURCE_STATUS_SNAPSHOT_NAMESPACE = 'dashboard-source-status-v1'
+SOURCE_STATUS_CACHE_TTL_SECONDS = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -48,7 +60,7 @@ def make_source_status(source, latest_cob=None, fallback_used=False, error=None,
     )
 
 
-def load_dashboard_source_statuses(as_of=None):
+def _load_dashboard_source_statuses_uncached(as_of=None):
     sources = {
         'Portfolio': f'{DB_SCHEMA}.trades_options_valuation_current',
         'Vol Surface': f'{DB_SCHEMA}.implied_volatility_surface_from_prices',
@@ -84,6 +96,37 @@ def load_dashboard_source_statuses(as_of=None):
         | {'label': label}
         for label, source in sources.items()
     ]
+
+
+def load_dashboard_source_statuses(as_of=None, *, force=False):
+    """Load source alignment at most once per five minutes across workers."""
+    if as_of is None and not force:
+        reference = latest_snapshot(SOURCE_STATUS_SNAPSHOT_NAMESPACE)
+        if reference:
+            try:
+                return resolve_snapshot(
+                    reference,
+                    expected_namespace=SOURCE_STATUS_SNAPSHOT_NAMESPACE,
+                )
+            except SnapshotReferenceError:
+                pass
+
+    statuses = _load_dashboard_source_statuses_uncached(as_of=as_of)
+    if as_of is not None:
+        return statuses
+
+    revision_payload = json.dumps(statuses, sort_keys=True, separators=(',', ':'))
+    source_revision = hashlib.sha256(revision_payload.encode('utf-8')).hexdigest()
+    publish_snapshot(
+        SOURCE_STATUS_SNAPSHOT_NAMESPACE,
+        source_revision,
+        statuses,
+        metadata={'sources': len(statuses)},
+        group='source-status',
+        force=force,
+        ttl_seconds=SOURCE_STATUS_CACHE_TTL_SECONDS,
+    )
+    return statuses
 
 
 def summarize_alignment(statuses, stale_after_business_days=2):

@@ -2,7 +2,7 @@ import json
 
 import pandas as pd
 
-from pages import greeks, prices
+from pages import greeks, prices, vol_surface
 
 
 def test_prices_query_transfers_only_the_five_cobs_the_chart_can_render(monkeypatch):
@@ -34,3 +34,21 @@ def test_greeks_browser_reference_preserves_payload_and_is_small():
     reference = greeks._cache_greeks_payload(payload, 'test', ['snapshot'])
     assert greeks._resolve_greeks_payload(reference) == payload
     assert len(json.dumps(reference)) < len(json.dumps(payload))
+
+
+def test_vol_surface_queries_only_columns_used_by_normalization():
+    expected_columns = {
+        'cob_date',
+        'product',
+        'maturity_date',
+        'option_expiration_date',
+        'put_call',
+        'delta',
+        'value',
+    }
+
+    assert set(vol_surface.SURFACE_SOURCE_COLUMNS) == expected_columns
+    for _, query in vol_surface.SURFACE_POSTGRES_SOURCES:
+        normalized_query = ' '.join(query.lower().split())
+        assert 'select *' not in normalized_query
+        assert all(column in normalized_query for column in expected_columns)

@@ -1,5 +1,7 @@
 """Volatility surface dashboard page."""
+import hashlib
 import io
+import json
 import threading
 from urllib.parse import urlencode
 
@@ -15,6 +17,13 @@ from sqlalchemy import text
 from dataframe_utils import concat_dataframes
 from db_fallback import DB_SCHEMA, read_trino_query, safe_exception_message
 from runtime_config import get_database_engine
+from snapshot_cache import (
+    SnapshotReferenceError,
+    latest_snapshot,
+    publish_snapshot,
+    resolve_snapshot,
+    snapshot_lock,
+)
 
 
 _DATA_CACHE_LOCK = threading.Lock()
@@ -37,6 +46,16 @@ SURFACE_COLUMNS = [
 SURFACE_SOURCE_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF', 'NBP'}
 CALIBRATION_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF'}
 SURFACE_PRODUCT_DISPLAY_MAP = {'BRENT': 'Brent'}
+SURFACE_SOURCE_COLUMNS = [
+    'cob_date',
+    'product',
+    'maturity_date',
+    'option_expiration_date',
+    'put_call',
+    'delta',
+    'value',
+]
+SURFACE_SOURCE_SELECT = ', '.join(SURFACE_SOURCE_COLUMNS)
 
 SURFACE_POSTGRES_SOURCE_LABEL = f'{DB_SCHEMA}.implied_volatility_surface_from_prices'
 SURFACE_SOURCE_LABEL = 'raw.icap.implied_volatility_surface_from_prices'
@@ -45,7 +64,10 @@ SURFACE_TRINO_SOURCES = [
     ('raw.icap.implied_volatility_surface', 'implied_volatility_surface'),
 ]
 SURFACE_POSTGRES_SOURCES = [
-    (SURFACE_POSTGRES_SOURCE_LABEL, f'select * from {SURFACE_POSTGRES_SOURCE_LABEL}'),
+    (
+        SURFACE_POSTGRES_SOURCE_LABEL,
+        f'select {SURFACE_SOURCE_SELECT} from {SURFACE_POSTGRES_SOURCE_LABEL}',
+    ),
 ]
 TTF_COMPARISON_TABLE = (
     f'{DB_SCHEMA}.option_volatility_surface_comparison_current'
@@ -77,6 +99,8 @@ _SURFACE_SNAPSHOT_CACHE = {}
 _SURFACE_PIVOT_CACHE = {}
 _SURFACE_SNAPSHOT_GENERATION = 0
 _SURFACE_SNAPSHOT_CACHE_ATTR = '_surface_snapshot_cache_key'
+VOL_SURFACE_SNAPSHOT_NAMESPACE = 'vol-surface-v1'
+_ACTIVE_SURFACE_SNAPSHOT_ID = None
 DATA_CACHE_STATE = {
     'initialized': False,
     'last_refresh_token': None,
@@ -382,7 +406,11 @@ def load_surface_data():
         SURFACE_TRINO_SOURCES
     ):
         try:
-            surface_df = read_trino_query(f'select * from {table_name}', catalog='raw', schema='icap')
+            surface_df = read_trino_query(
+                f'select {SURFACE_SOURCE_SELECT} from {table_name}',
+                catalog='raw',
+                schema='icap',
+            )
             normalized_surface = _normalize_surface_data(surface_df)
             if normalized_surface.empty:
                 load_errors.append(f'{source_label}: no usable rows')
@@ -437,61 +465,160 @@ def _build_source_status(df, source_name, error_message=None, fallback_used=Fals
     }
 
 
-def _refresh_cached_data(refresh_token=None, force=False):
-    global atm_dataset, surface_dataset, DATA_CACHE_STATE, _SURFACE_SNAPSHOT_GENERATION
+def _surface_source_revision(surface_df, source_meta):
+    if surface_df.empty:
+        frame_digest = 'empty'
+        latest_cob = None
+    else:
+        frame_digest = hashlib.sha256(
+            pd.util.hash_pandas_object(surface_df, index=True).values.tobytes()
+        ).hexdigest()
+        latest_cob = pd.to_datetime(
+            surface_df['cob_date'], errors='coerce'
+        ).max()
+    revision = {
+        'schema_version': 1,
+        'source': source_meta.get('source'),
+        'latest_cob': str(latest_cob),
+        'rows': int(len(surface_df)),
+        'frame_sha256': frame_digest,
+    }
+    encoded = json.dumps(revision, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
-    with _DATA_CACHE_LOCK:
-        should_refresh = (
-            force or
-            not DATA_CACHE_STATE['initialized'] or
-            refresh_token != DATA_CACHE_STATE['last_refresh_token']
-        )
-        if not should_refresh:
-            return
 
-        loaded_surface_df = _empty_surface_df()
-        atm_error = None
-        surface_meta = _source_status_template(SURFACE_SOURCE_LABEL)
+def _build_surface_snapshot_payload(refresh_token=None):
+    loaded_surface_df = _empty_surface_df()
+    atm_error = None
+    surface_meta = _source_status_template(SURFACE_SOURCE_LABEL)
+    try:
+        loaded_surface_df, surface_loader_meta = load_surface_data()
+        surface_meta.update(surface_loader_meta)
+    except Exception as exc:
+        surface_meta.update({
+            'source': SURFACE_SOURCE_LABEL,
+            'error': safe_exception_message(exc),
+            'fallback_used': False,
+        })
 
-        try:
-            loaded_surface_df, surface_loader_meta = load_surface_data()
-            surface_meta.update(surface_loader_meta)
-        except Exception as exc:
-            loaded_surface_df = _empty_surface_df()
-            surface_meta.update({
-                'source': SURFACE_SOURCE_LABEL,
-                'error': safe_exception_message(exc),
-                'fallback_used': False,
-            })
+    try:
+        loaded_atm_df = load_surface_atm_data(loaded_surface_df)
+    except Exception as exc:
+        atm_error = f'surface-derived ATM build failed: {safe_exception_message(exc)}'
+        loaded_atm_df = _empty_unified_atm_df()
 
-        try:
-            atm_dataset = load_surface_atm_data(loaded_surface_df)
-        except Exception as exc:
-            atm_error = f'surface-derived ATM build failed: {exc}'
-            atm_dataset = _empty_unified_atm_df()
-
-        surface_dataset = loaded_surface_df
-        _SURFACE_SNAPSHOT_CACHE.clear()
-        _SURFACE_PIVOT_CACHE.clear()
-        _SURFACE_SNAPSHOT_GENERATION += 1
-        DATA_CACHE_STATE['atm'] = _build_source_status(
-            atm_dataset,
+    state = {
+        'initialized': True,
+        'last_refresh_token': refresh_token,
+        'atm': _build_source_status(
+            loaded_atm_df,
             surface_meta['source'],
             atm_error,
             fallback_used=surface_meta.get('fallback_used', False),
-        )
-        DATA_CACHE_STATE['surface'] = _build_source_status(
+        ),
+        'surface': _build_source_status(
             loaded_surface_df,
             surface_meta['source'],
             surface_meta['error'],
-            fallback_used=surface_meta.get('fallback_used', False)
+            fallback_used=surface_meta.get('fallback_used', False),
+        ),
+    }
+    payload = {
+        'atm_dataset': loaded_atm_df,
+        'surface_dataset': loaded_surface_df,
+        'data_cache_state': state,
+    }
+    return payload, _surface_source_revision(loaded_surface_df, surface_meta)
+
+
+def _activate_surface_snapshot(reference):
+    global atm_dataset, surface_dataset, DATA_CACHE_STATE
+    global _SURFACE_SNAPSHOT_GENERATION, _ACTIVE_SURFACE_SNAPSHOT_ID
+
+    snapshot_id = reference.get('snapshot_id') if isinstance(reference, dict) else None
+    if (
+        snapshot_id
+        and snapshot_id == _ACTIVE_SURFACE_SNAPSHOT_ID
+        and DATA_CACHE_STATE['initialized']
+    ):
+        return reference
+
+    payload = resolve_snapshot(
+        reference,
+        expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE,
+    )
+    loaded_atm = payload.get('atm_dataset')
+    loaded_surface = payload.get('surface_dataset')
+    loaded_state = payload.get('data_cache_state')
+    if not isinstance(loaded_atm, pd.DataFrame) or not isinstance(loaded_surface, pd.DataFrame):
+        raise SnapshotReferenceError('Volatility snapshot payload is invalid')
+    if not isinstance(loaded_state, dict):
+        raise SnapshotReferenceError('Volatility snapshot status is invalid')
+
+    with _DATA_CACHE_LOCK:
+        atm_dataset = loaded_atm
+        surface_dataset = loaded_surface
+        DATA_CACHE_STATE = loaded_state
+        _SURFACE_SNAPSHOT_CACHE.clear()
+        _SURFACE_PIVOT_CACHE.clear()
+        _SURFACE_SNAPSHOT_GENERATION += 1
+        _ACTIVE_SURFACE_SNAPSHOT_ID = snapshot_id
+    return reference
+
+
+def prepare_vol_surface_snapshot(*, force=False, refresh_token=None):
+    """Resolve or publish the immutable page dataset used by every renderer."""
+    if not force:
+        reference = latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
+        if reference:
+            try:
+                return _activate_surface_snapshot(reference)
+            except SnapshotReferenceError:
+                pass
+
+    with snapshot_lock('build-vol-surface-v1', expire=300):
+        if not force:
+            reference = latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
+            if reference:
+                try:
+                    return _activate_surface_snapshot(reference)
+                except SnapshotReferenceError:
+                    pass
+
+        payload, source_revision = _build_surface_snapshot_payload(refresh_token)
+        state = payload['data_cache_state']
+        reference = publish_snapshot(
+            VOL_SURFACE_SNAPSHOT_NAMESPACE,
+            source_revision,
+            payload,
+            metadata={
+                'source': state['surface']['source'],
+                'rows': state['surface']['rows'],
+                'latest_cob_date': state['surface']['latest_cob_date'],
+                'fallback_used': state['surface']['fallback_used'],
+                'error': state['surface']['error'],
+            },
+            group='vol-surface',
+            force=force,
         )
-        DATA_CACHE_STATE['initialized'] = True
-        DATA_CACHE_STATE['last_refresh_token'] = refresh_token
+        return _activate_surface_snapshot(reference)
 
 
-def _ensure_cached_data(refresh_token=None):
-    _refresh_cached_data(refresh_token=refresh_token, force=False)
+def _refresh_cached_data(refresh_token=None, force=False):
+    if isinstance(refresh_token, dict):
+        return _activate_surface_snapshot(refresh_token)
+    if force:
+        return prepare_vol_surface_snapshot(
+            force=True,
+            refresh_token=refresh_token,
+        )
+    if DATA_CACHE_STATE['initialized']:
+        return latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
+    return prepare_vol_surface_snapshot(force=False, refresh_token=refresh_token)
+
+
+def _ensure_cached_data(snapshot_reference=None):
+    return _refresh_cached_data(refresh_token=snapshot_reference, force=False)
 
 
 def _get_all_available_dates():
@@ -1810,6 +1937,8 @@ def _build_vol_surface_filter_bar():
                         options=[],
                         value=[],
                         multi=True,
+                        persistence=True,
+                        persistence_type='session',
                         placeholder='Select products...',
                         className=(
                             'filter-dropdown volatility-surface-filter-dropdown '
@@ -1832,6 +1961,8 @@ def _build_vol_surface_filter_bar():
                                 id='table-date-picker',
                                 display_format='YYYY-MM-DD',
                                 with_portal=True,
+                                persistence=True,
+                                persistence_type='session',
                                 className='volatility-surface-date-picker',
                             ),
                         ],
@@ -1844,6 +1975,8 @@ def _build_vol_surface_filter_bar():
                                 id='table-prev-date-picker',
                                 display_format='YYYY-MM-DD',
                                 with_portal=True,
+                                persistence=True,
+                                persistence_type='session',
                                 className='volatility-surface-date-picker',
                             ),
                         ],
@@ -1867,6 +2000,8 @@ def _build_vol_surface_filter_bar():
                             {'label': 'Calendar', 'value': 'calendar'},
                         ],
                         value='monthly',
+                        persistence=True,
+                        persistence_type='session',
                         inline=True,
                         className='volatility-surface-grouping-selector',
                         inputStyle={'display': 'none'},
@@ -1897,6 +2032,7 @@ def _build_volatility_section_header(title, actions=None):
 
 
 layout = html.Div([
+    dcc.Store(id='vol-surface-snapshot-ref', storage_type='session'),
     # Download component for table export
     dcc.Download(id="download-volatility-table"),
     dcc.Download(id="download-surface-table"),
@@ -2337,11 +2473,6 @@ def _build_surface_status_line(
     return _build_message_span(message, tone='success')
 
 
-@callback(
-    Output('options-refresh-message', 'children'),
-    Input('refresh-options-data', 'n_clicks'),
-    prevent_initial_call=False
-)
 def refresh_data_feedback(n_clicks):
     refresh_token = n_clicks or 0
     _ensure_cached_data(refresh_token)
@@ -2360,12 +2491,6 @@ def refresh_data_feedback(n_clicks):
     )
 
 
-@callback(
-    [Output('table-date-picker', 'date'),
-     Output('table-prev-date-picker', 'date')],
-    Input('refresh-options-data', 'n_clicks'),
-    prevent_initial_call=False
-)
 def init_date_pickers(n_clicks):
     _ensure_cached_data(n_clicks or 0)
     all_dates = _get_all_available_dates()
@@ -2377,12 +2502,6 @@ def init_date_pickers(n_clicks):
     return latest_date.strftime('%Y-%m-%d'), prev_date.strftime('%Y-%m-%d')
 
 
-@callback(
-    Output('table-prev-date-picker', 'date', allow_duplicate=True),
-    [Input('refresh-options-data', 'n_clicks'),
-     State('table-date-picker', 'date')],
-    prevent_initial_call=True
-)
 def set_prev_date(n_clicks, current_date):
     if current_date is None:
         raise dash.exceptions.PreventUpdate
@@ -2398,12 +2517,6 @@ def set_prev_date(n_clicks, current_date):
     return current_date
 
 
-@callback(
-    [Output('table-product-dropdown', 'options'),
-     Output('table-product-dropdown', 'value')],
-    Input('refresh-options-data', 'n_clicks'),
-    prevent_initial_call=False
-)
 def init_products(n_clicks):
     _ensure_cached_data(n_clicks or 0)
     product_codes = sorted(atm_dataset['code'].unique()) if not atm_dataset.empty else []
@@ -2412,26 +2525,92 @@ def init_products(n_clicks):
 
 
 @callback(
-    Output('atm-status-line', 'children'),
-    [Input('refresh-options-data', 'n_clicks'),
-     Input('table-date-picker', 'date'),
-     Input('table-product-dropdown', 'value'),
-     Input('table-grouping-dropdown', 'value')],
-    prevent_initial_call=False
+    Output('vol-surface-snapshot-ref', 'data'),
+    Output('options-refresh-message', 'children'),
+    Output('table-date-picker', 'date'),
+    Output('table-prev-date-picker', 'date'),
+    Output('table-product-dropdown', 'options'),
+    Output('table-product-dropdown', 'value'),
+    Output('table-grouping-dropdown', 'value'),
+    Input('refresh-options-data', 'n_clicks'),
+    State('vol-surface-snapshot-ref', 'data'),
+    State('table-date-picker', 'date'),
+    State('table-prev-date-picker', 'date'),
+    State('table-product-dropdown', 'value'),
+    State('table-grouping-dropdown', 'value'),
 )
+def initialize_vol_surface_page(
+    n_clicks,
+    current_reference,
+    current_date,
+    previous_date,
+    selected_products,
+    grouping_mode,
+):
+    refresh_count = int(n_clicks or 0)
+    previous_refresh_count = (
+        current_reference.get('refresh_count')
+        if isinstance(current_reference, dict)
+        else None
+    )
+    force = refresh_count > 0 and previous_refresh_count != refresh_count
+
+    reference = None
+    if not force and isinstance(current_reference, dict):
+        try:
+            reference = _activate_surface_snapshot(current_reference)
+        except SnapshotReferenceError:
+            reference = None
+    if reference is None:
+        reference = prepare_vol_surface_snapshot(
+            force=force,
+            refresh_token=refresh_count,
+        )
+
+    browser_reference = dict(reference)
+    browser_reference['refresh_count'] = refresh_count
+    all_dates = _get_all_available_dates()
+    date_values = [pd.Timestamp(value).strftime('%Y-%m-%d') for value in all_dates]
+    resolved_date = current_date if current_date in date_values else (
+        date_values[-1] if date_values else None
+    )
+    resolved_previous = previous_date if previous_date in date_values else None
+    if resolved_previous is None and date_values:
+        earlier_dates = [value for value in date_values if value < resolved_date]
+        resolved_previous = earlier_dates[-1] if earlier_dates else resolved_date
+
+    product_codes = sorted(atm_dataset['code'].unique()) if not atm_dataset.empty else []
+    product_options = [{'label': code, 'value': code} for code in product_codes]
+    had_reference = isinstance(current_reference, dict)
+    if had_reference and selected_products is not None:
+        resolved_products = [
+            product for product in selected_products if product in product_codes
+        ]
+    else:
+        resolved_products = product_codes
+
+    resolved_grouping = (
+        grouping_mode
+        if grouping_mode in {'monthly', 'quarterly', 'season', 'calendar'}
+        else 'monthly'
+    )
+    message = '' if n_clicks is None else refresh_data_feedback(n_clicks)
+    return (
+        browser_reference,
+        message,
+        resolved_date,
+        resolved_previous,
+        product_options,
+        resolved_products,
+        resolved_grouping,
+    )
+
+
 def update_atm_status_line(n_clicks, selected_date, selected_products, grouping_mode):
     _ensure_cached_data(n_clicks or 0)
     return _build_atm_status_line(selected_date, selected_products, grouping_mode or 'monthly')
 
 
-@callback(
-    Output('graphs-container', 'children'),
-    [Input('refresh-options-data', 'n_clicks'),
-     Input('table-date-picker', 'date'),
-     Input('table-product-dropdown', 'value'),
-     Input('table-grouping-dropdown', 'value')],
-    prevent_initial_call=False
-)
 def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
     _ensure_cached_data(n_clicks or 0)
 
@@ -2557,15 +2736,6 @@ def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
     return html.Div(chart_cards, className='volatility-atm-chart-grid')
 
 
-@callback(
-    Output('tables-container', 'children'),
-    [Input('refresh-options-data', 'n_clicks'),
-     Input('table-date-picker', 'date'),
-     Input('table-prev-date-picker', 'date'),
-     Input('table-product-dropdown', 'value'),
-     Input('table-grouping-dropdown', 'value')],
-    prevent_initial_call=False
-)
 def update_tables(n_clicks, selected_date, prev_selected_date, selected_products, grouping_mode):
     _ensure_cached_data(n_clicks or 0)
     if selected_date is None or not selected_products:
@@ -2630,18 +2800,50 @@ def update_tables(n_clicks, selected_date, prev_selected_date, selected_products
 
 
 @callback(
+    Output('atm-status-line', 'children'),
+    Output('graphs-container', 'children'),
+    Output('tables-container', 'children'),
+    Input('vol-surface-snapshot-ref', 'data'),
+    Input('table-date-picker', 'date'),
+    Input('table-prev-date-picker', 'date'),
+    Input('table-product-dropdown', 'value'),
+    Input('table-grouping-dropdown', 'value'),
+    prevent_initial_call=True,
+)
+def render_atm_section(
+    snapshot_reference,
+    selected_date,
+    prev_selected_date,
+    selected_products,
+    grouping_mode,
+):
+    _ensure_cached_data(snapshot_reference)
+    return (
+        update_atm_status_line(None, selected_date, selected_products, grouping_mode),
+        update_graphs(None, selected_date, selected_products, grouping_mode),
+        update_tables(
+            None,
+            selected_date,
+            prev_selected_date,
+            selected_products,
+            grouping_mode,
+        ),
+    )
+
+
+@callback(
     [Output('surface-product-tabs', 'children'),
      Output('surface-product-tabs', 'value'),
     Output('surface-content-wrapper', 'style'),
      Output('surface-empty-message', 'children')],
-    [Input('refresh-options-data', 'n_clicks'),
+    [Input('vol-surface-snapshot-ref', 'data'),
      Input('table-product-dropdown', 'value'),
      Input('table-date-picker', 'date')],
     State('surface-product-tabs', 'value'),
-    prevent_initial_call=False
+    prevent_initial_call=True
 )
-def update_surface_tabs(n_clicks, selected_products, selected_date, active_tab):
-    _ensure_cached_data(n_clicks or 0)
+def update_surface_tabs(snapshot_reference, selected_products, selected_date, active_tab):
+    _ensure_cached_data(snapshot_reference)
     supported_products = _get_supported_surface_products(selected_products, selected_date)
 
     if not supported_products:
@@ -2670,14 +2872,14 @@ def update_surface_tabs(n_clicks, selected_products, selected_date, active_tab):
     [Output('surface-expiry-dropdown', 'options'),
      Output('surface-expiry-dropdown', 'value'),
      Output('surface-expiry-controls', 'style')],
-    [Input('refresh-options-data', 'n_clicks'),
+    [Input('vol-surface-snapshot-ref', 'data'),
      Input('table-date-picker', 'date'),
      Input('surface-product-tabs', 'value')],
     State('surface-expiry-dropdown', 'value'),
-    prevent_initial_call=False
+    prevent_initial_call=True
 )
-def update_surface_expiry_dropdown(n_clicks, selected_date, active_product, current_expiry):
-    _ensure_cached_data(n_clicks or 0)
+def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_product, current_expiry):
+    _ensure_cached_data(snapshot_reference)
     hidden_style = {'display': 'none', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}
     visible_style = {'display': 'flex', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}
 
@@ -2723,15 +2925,15 @@ def update_calibration_link(active_product, selected_date, selected_expiry):
 @callback(
     [Output('surface-history-buckets-dropdown', 'options'),
      Output('surface-history-buckets-dropdown', 'value')],
-    [Input('refresh-options-data', 'n_clicks'),
+    [Input('vol-surface-snapshot-ref', 'data'),
      Input('table-date-picker', 'date'),
      Input('surface-product-tabs', 'value'),
      Input('surface-expiry-dropdown', 'value')],
     State('surface-history-buckets-dropdown', 'value'),
-    prevent_initial_call=False
+    prevent_initial_call=True
 )
-def update_surface_delta_dropdown(n_clicks, selected_date, active_product, selected_expiry, current_history_buckets):
-    _ensure_cached_data(n_clicks or 0)
+def update_surface_delta_dropdown(snapshot_reference, selected_date, active_product, selected_expiry, current_history_buckets):
+    _ensure_cached_data(snapshot_reference)
     if selected_date is None or not active_product or not selected_expiry:
         return [], []
 
@@ -2757,7 +2959,7 @@ def update_surface_delta_dropdown(n_clicks, selected_date, active_product, selec
      Output('surface-history-graph', 'figure'),
      Output('surface-table-container', 'children'),
      Output('surface-status-line', 'children')],
-    [Input('refresh-options-data', 'n_clicks'),
+    [Input('vol-surface-snapshot-ref', 'data'),
      Input('table-date-picker', 'date'),
      Input('table-prev-date-picker', 'date'),
      Input('surface-product-tabs', 'value'),
@@ -2766,10 +2968,10 @@ def update_surface_delta_dropdown(n_clicks, selected_date, active_product, selec
      Input('surface-lookback-dropdown', 'value'),
      Input('surface-heatmap-mode-dropdown', 'value'),
      Input('surface-history-mode-dropdown', 'value')],
-    prevent_initial_call=False
+    prevent_initial_call=True
 )
 def update_surface_section(
-    n_clicks,
+    snapshot_reference,
     selected_date,
     prev_selected_date,
     active_product,
@@ -2779,7 +2981,7 @@ def update_surface_section(
     heatmap_mode,
     history_mode
 ):
-    _ensure_cached_data(n_clicks or 0)
+    _ensure_cached_data(snapshot_reference)
 
     if selected_date is None or not active_product:
         status_line = _build_surface_status_line(selected_date, prev_selected_date, active_product)
@@ -2870,18 +3072,19 @@ def update_surface_section(
     Output('ttf-source-comparison-status', 'children'),
     Output('ttf-source-comparison-graph', 'figure'),
     Output('ttf-source-comparison-grid', 'rowData'),
-    Input('refresh-options-data', 'n_clicks'),
+    Input('vol-surface-snapshot-ref', 'data'),
     Input('table-date-picker', 'date'),
     Input('surface-product-tabs', 'value'),
     Input('surface-expiry-dropdown', 'value'),
+    prevent_initial_call=True,
 )
 def update_ttf_source_comparison(
-    n_clicks,
+    snapshot_reference,
     selected_date,
     active_product,
     selected_expiry,
 ):
-    del n_clicks
+    _ensure_cached_data(snapshot_reference)
     if str(active_product or '').upper() != 'TTF':
         return (
             {'display': 'none'},
@@ -2937,11 +3140,6 @@ def update_ttf_source_comparison(
     )
 
 
-@callback(
-    Output('table-grouping-dropdown', 'value'),
-    Input('refresh-options-data', 'n_clicks'),
-    prevent_initial_call=True
-)
 def reset_grouping(n_clicks):
     return 'monthly'
 
@@ -2951,15 +3149,22 @@ def reset_grouping(n_clicks):
     Input("export-volatility-table-btn", "n_clicks"),
     [State('table-date-picker', 'date'),
      State('table-product-dropdown', 'value'),
-     State('table-grouping-dropdown', 'value')],
+     State('table-grouping-dropdown', 'value'),
+     State('vol-surface-snapshot-ref', 'data')],
     prevent_initial_call=True
 )
-def export_volatility_table(n_clicks, selected_date, selected_products, grouping_mode):
+def export_volatility_table(
+    n_clicks,
+    selected_date,
+    selected_products,
+    grouping_mode,
+    snapshot_reference=None,
+):
     if not n_clicks or not selected_date or not selected_products:
         return None
 
     try:
-        _ensure_cached_data()
+        _ensure_cached_data(snapshot_reference)
 
         current_pivot, _, sorted_date_cols = _build_atm_table_frames(selected_date, None, selected_products, grouping_mode)
         if current_pivot.empty:
@@ -2983,7 +3188,8 @@ def export_volatility_table(n_clicks, selected_date, selected_products, grouping
     [State('table-date-picker', 'date'),
      State('table-prev-date-picker', 'date'),
      State('surface-product-tabs', 'value'),
-     State('surface-expiry-dropdown', 'value')],
+     State('surface-expiry-dropdown', 'value'),
+     State('vol-surface-snapshot-ref', 'data')],
     prevent_initial_call=True
 )
 def export_surface_table(
@@ -2992,12 +3198,13 @@ def export_surface_table(
     prev_selected_date,
     active_product,
     selected_expiry,
+    snapshot_reference=None,
 ):
     if not n_clicks or not selected_date or not active_product:
         return None
 
     try:
-        _ensure_cached_data()
+        _ensure_cached_data(snapshot_reference)
 
         current_surface = _get_surface_snapshot(active_product, selected_date)
         previous_surface = _get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else _empty_surface_df()

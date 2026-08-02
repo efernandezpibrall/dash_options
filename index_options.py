@@ -152,12 +152,10 @@ app.layout = html.Div([
 
 @app.callback(
     Output('dashboard-source-status-banner', 'children'),
-    Input('url', 'pathname'),
     Input('refresh-options-data', 'n_clicks'),
 )
-def update_dashboard_source_status(pathname, refresh_clicks):
-    del pathname, refresh_clicks
-    statuses = load_dashboard_source_statuses()
+def update_dashboard_source_status(refresh_clicks):
+    statuses = load_dashboard_source_statuses(force=bool(refresh_clicks))
     alignment = summarize_alignment(statuses)
     chips = []
     for status in statuses:

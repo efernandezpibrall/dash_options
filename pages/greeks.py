@@ -18,6 +18,13 @@ from sqlalchemy import text
 from dataframe_utils import concat_dataframes
 from db_fallback import DB_SCHEMA
 from runtime_config import config_bool, config_value, get_database_engine
+from snapshot_cache import (
+    SnapshotReferenceError,
+    bump_snapshot_generation,
+    publish_snapshot,
+    resolve_snapshot,
+    snapshot_generation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +56,6 @@ ASPECT_EXPORT_COLUMNS = [
 _GREEKS_SERVER_CACHE = OrderedDict()
 _GREEKS_SERVER_CACHE_LOCK = threading.Lock()
 _GREEKS_SERVER_CACHE_MAX_ENTRIES = 32
-_GREEKS_SERVER_CACHE_GENERATION = 0
 
 GREEK_DEFINITIONS = {
     'delta': {
@@ -189,7 +195,7 @@ def _greeks_cache_key(namespace, parts):
     payload = json.dumps(
         {
             'namespace': namespace,
-            'generation': _GREEKS_SERVER_CACHE_GENERATION,
+            'generation': snapshot_generation('greeks'),
             'parts': parts,
         },
         sort_keys=True,
@@ -201,12 +207,20 @@ def _greeks_cache_key(namespace, parts):
 
 def _cache_greeks_payload(payload, namespace, parts):
     cache_key = _greeks_cache_key(namespace, parts)
+    reference = publish_snapshot(
+        f'greeks-{namespace}-v1',
+        cache_key,
+        payload,
+        metadata=payload.get('meta', {}),
+        group='greeks',
+    )
+    snapshot_id = reference['snapshot_id']
     with _GREEKS_SERVER_CACHE_LOCK:
-        _GREEKS_SERVER_CACHE[cache_key] = payload
-        _GREEKS_SERVER_CACHE.move_to_end(cache_key)
+        _GREEKS_SERVER_CACHE[snapshot_id] = payload
+        _GREEKS_SERVER_CACHE.move_to_end(snapshot_id)
         while len(_GREEKS_SERVER_CACHE) > _GREEKS_SERVER_CACHE_MAX_ENTRIES:
             _GREEKS_SERVER_CACHE.popitem(last=False)
-    return {'cache_key': cache_key, 'meta': payload.get('meta', {})}
+    return reference
 
 
 def _resolve_greeks_payload(reference):
@@ -214,12 +228,29 @@ def _resolve_greeks_payload(reference):
         return _empty_store('No data available')
     if 'rows' in reference:
         return reference
-    cache_key = reference.get('cache_key')
+    snapshot_id = reference.get('snapshot_id')
+    namespace = reference.get('namespace')
+    if not isinstance(namespace, str) or not namespace.startswith('greeks-'):
+        return _empty_store('Server snapshot expired; refresh the page')
     with _GREEKS_SERVER_CACHE_LOCK:
-        payload = _GREEKS_SERVER_CACHE.get(cache_key)
+        payload = _GREEKS_SERVER_CACHE.get(snapshot_id)
         if payload is not None:
-            _GREEKS_SERVER_CACHE.move_to_end(cache_key)
-    return payload if payload is not None else _empty_store('Server snapshot expired; refresh the page')
+            _GREEKS_SERVER_CACHE.move_to_end(snapshot_id)
+    if payload is not None:
+        return payload
+    try:
+        payload = resolve_snapshot(
+            reference,
+            expected_namespace=namespace,
+        )
+    except SnapshotReferenceError:
+        return _empty_store('Server snapshot expired; refresh the page')
+    with _GREEKS_SERVER_CACHE_LOCK:
+        _GREEKS_SERVER_CACHE[snapshot_id] = payload
+        _GREEKS_SERVER_CACHE.move_to_end(snapshot_id)
+        while len(_GREEKS_SERVER_CACHE) > _GREEKS_SERVER_CACHE_MAX_ENTRIES:
+            _GREEKS_SERVER_CACHE.popitem(last=False)
+    return payload
 
 
 def _resolve_aspect_payload(reference):
@@ -233,9 +264,8 @@ def _resolve_aspect_payload(reference):
 
 
 def _clear_greeks_server_cache():
-    global _GREEKS_SERVER_CACHE_GENERATION
+    bump_snapshot_generation('greeks')
     with _GREEKS_SERVER_CACHE_LOCK:
-        _GREEKS_SERVER_CACHE_GENERATION += 1
         _GREEKS_SERVER_CACHE.clear()
 
 
@@ -2447,7 +2477,7 @@ def update_filtered_greeks_store(base_store, selected_strategies, selected_trade
         filtered_payload,
         'filtered',
         [
-            (base_store or {}).get('cache_key'),
+            (base_store or {}).get('snapshot_id'),
             sorted(selected_strategies or []),
             sorted(selected_trade_types or []),
             sorted(selected_buckets or []),
