@@ -18,4 +18,5 @@ config.ini
 *.pkl
 *.log
 *.html
+!docs/ttf_intraday_vol_surface_adjustment_guide.html
 *.png

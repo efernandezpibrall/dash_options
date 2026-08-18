@@ -50,5 +50,11 @@ server-side authorization helpers; UI visibility is not treated as
 authorization. Database credentials remain external configuration and no
 migration is applied during application import.
 
+Local workstation operation may instead use the explicit `local_loopback`
+authentication mode in the external `config.ini`. That mode takes its user and
+roles only from server configuration, rejects forwarded headers and non-loopback
+addresses, and is not supported behind a proxy. Assign `calibrator,publisher`
+only to a trader authorized to publish their own validated intraday surface.
+
 The analytics implementation remains in the separately managed `options`
 package and is not duplicated here.

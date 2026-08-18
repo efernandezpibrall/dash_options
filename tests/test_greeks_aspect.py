@@ -1,9 +1,11 @@
 import base64
 import datetime as dt
 import io
+from pathlib import Path
 
 import pandas as pd
 import pytest
+from dash._callback import GLOBAL_CALLBACK_LIST
 from openpyxl import load_workbook
 
 from pages import greeks
@@ -59,6 +61,41 @@ def _aspect_meta():
     }
 
 
+def _normalized_greek_row(
+    maturity,
+    exposure,
+    *,
+    risk_bucket='ICE_TTF',
+    unit='MWh',
+    greek='delta',
+    bucket_type='Instrument',
+    source_row_id=0,
+):
+    return {
+        'cob_date': '2026-07-30',
+        'source_row_id': source_row_id,
+        'source': 'Options valuation',
+        'strategy': 'Test strategy',
+        'trade_type': 'Financial Option',
+        'option_type': 'vanilla',
+        'put_call': 'call',
+        'currency': 'USD',
+        'greek': greek,
+        'greek_label': greeks.GREEK_DEFINITIONS[greek]['label'],
+        'bucket_type': bucket_type,
+        'risk_bucket': risk_bucket,
+        'instrument': risk_bucket if bucket_type == 'Instrument' else 'N/A',
+        'unit': unit,
+        'maturity_bucket': maturity,
+        'maturity_pair': maturity,
+        'asset_pair': risk_bucket,
+        'exposure': exposure,
+        'quantity': 1.0,
+        'value': 0.0,
+        'pnl': 0.0,
+    }
+
+
 def _walk(component):
     yield component
     children = getattr(component, 'children', None)
@@ -79,7 +116,402 @@ def test_layout_omits_current_greeks_summary_section():
         getattr(component, 'children', None) == 'Current Greeks Summary'
         for component in components
     )
-    assert len(greeks.update_monitor_tables(greeks._empty_store())) == 3
+    assert len(greeks.update_monitor_tables(
+        greeks._empty_store(),
+        {'meta': {'status': 'idle'}, 'rows': []},
+        'mixed',
+        None,
+        None,
+        'native',
+    )) == 6
+
+
+def test_common_maturity_axis_aligns_core_and_aspect_tables_with_blank_gaps():
+    core_rows = pd.DataFrame([
+        _normalized_greek_row('2026-10', 0.0, source_row_id=0),
+        _normalized_greek_row(
+            '2027-Q1',
+            20.0,
+            risk_bucket='ICE_HH',
+            unit='MMBtu',
+            source_row_id=1,
+        ),
+    ])
+    aspect_rows = pd.DataFrame([
+        _normalized_greek_row(
+            '2028',
+            5.0,
+            risk_bucket='ICE_BRENT_FUTURES',
+            unit='BBL',
+            source_row_id='aspect-0',
+        ),
+    ])
+
+    maturity_axis = greeks._common_maturity_axis(core_rows, aspect_rows)
+    assert maturity_axis == ['2026-10', '2027-Q1', '2028']
+
+    tables = greeks.build_display_tables(core_rows, maturity_axis)
+    expected_rows = maturity_axis + ['Total']
+    for bucket_table in tables['bucket_greek_tables']:
+        assert bucket_table['table']['Maturity'].tolist() == expected_rows
+    assert tables['delta_ladder']['Maturity'].tolist() == expected_rows
+    assert tables['delta_unit_ladder']['Maturity'].tolist() == expected_rows
+
+    aspect_delta = greeks.create_ladder_df(
+        aspect_rows,
+        'delta',
+        maturity_axis,
+    )
+    assert aspect_delta['Maturity'].tolist() == expected_rows
+
+    ttf_table = next(
+        item['table']
+        for item in tables['bucket_greek_tables']
+        if item['risk_bucket'] == 'TTF'
+    ).set_index('Maturity')
+    assert ttf_table.at['2026-10', 'Delta'] == 0.0
+    assert pd.isna(ttf_table.at['2027-Q1', 'Delta'])
+    assert pd.isna(ttf_table.at['2028', 'Delta'])
+    assert ttf_table.at['Total', 'Delta'] == 0.0
+
+
+def test_common_maturity_axis_preserves_business_labels_and_sort_order():
+    rows = pd.DataFrame({
+        'maturity_bucket': [
+            'Unknown',
+            '2028',
+            '2027-CAL',
+            '2027-Q2',
+            '2027-03 / 2027-04',
+        ],
+    })
+
+    assert greeks._common_maturity_axis(rows) == [
+        '2027-03 / 2027-04',
+        '2027-Q2',
+        '2027-CAL',
+        '2028',
+        'Unknown',
+    ]
+
+
+def test_grid_records_distinguish_real_zero_from_missing_data():
+    frame = pd.DataFrame([
+        {'Maturity': '2026-10', 'Delta': 0.0},
+        {'Maturity': '2026-11', 'Delta': None},
+    ])
+
+    records = greeks._format_grid_records(frame, ['Delta'])
+
+    assert records[0]['Delta'] == '0'
+    assert records[0]['__raw_Delta'] == 0.0
+    assert records[1]['Delta'] is None
+    assert '__raw_Delta' not in records[1]
+
+
+def test_comparison_grid_locks_chronology_and_enables_local_scrolling():
+    grid = greeks.build_compact_table(
+        'comparison-grid-test',
+        pd.DataFrame([
+            {'Maturity': '2026-10', 'Delta': 1.0, '_row_type': 'normal'},
+            {'Maturity': 'Total', 'Delta': 1.0, '_row_type': 'total'},
+        ]),
+        comparison_grid=True,
+        accessible_label='Delta by maturity and asset',
+    )
+
+    assert 'greeks-comparison-grid' in grid.className.split()
+    assert grid.dashGridOptions['rowHeight'] == 28
+    assert grid.dashGridOptions['headerHeight'] == 30
+    assert grid.dashGridOptions['groupHeaderHeight'] == 24
+    assert grid.dashGridOptions['suppressHorizontalScroll'] is False
+    assert grid.dashGridOptions['suppressMovableColumns'] is True
+    assert grid.dashGridOptions['getRowId'] == {
+        'function': "params.data['Maturity']",
+    }
+    assert grid.dashGridOptions['ariaLabel'] == 'Delta by maturity and asset'
+    assert grid.columnSize is None
+
+    maturity_column = next(
+        column for column in grid.columnDefs if column.get('field') == 'Maturity'
+    )
+    delta_column = next(
+        column for column in grid.columnDefs if column.get('field') == 'Delta'
+    )
+    assert maturity_column['pinned'] == 'left'
+    assert maturity_column['lockPinned'] is True
+    assert maturity_column['sortable'] is False
+    assert maturity_column['resizable'] is False
+    assert maturity_column['width'] == 68
+    assert maturity_column['minWidth'] == maturity_column['width']
+    assert maturity_column['maxWidth'] == maturity_column['width']
+    assert delta_column['sortable'] is False
+    assert delta_column['resizable'] is False
+    assert delta_column['minWidth'] == delta_column['width']
+    assert delta_column['maxWidth'] == delta_column['width']
+    assert grid.style['width'] == (
+        f"{maturity_column['width'] + delta_column['width'] + 2}px"
+    )
+
+
+def test_comparison_columns_expand_to_fit_the_longest_header_or_value():
+    short_grid = greeks.build_compact_table(
+        'comparison-short-grid-test',
+        pd.DataFrame([{'Maturity': '2026-10', 'Delta': 1.0}]),
+        comparison_grid=True,
+    )
+    long_grid = greeks.build_compact_table(
+        'comparison-long-grid-test',
+        pd.DataFrame([{'Maturity': '2027-CAL', 'Delta': -123456789.0}]),
+        comparison_grid=True,
+    )
+
+    short_delta = next(
+        column for column in short_grid.columnDefs if column.get('field') == 'Delta'
+    )
+    long_delta = next(
+        column for column in long_grid.columnDefs if column.get('field') == 'Delta'
+    )
+    assert long_delta['width'] > short_delta['width']
+    assert 'flex' not in long_delta
+
+
+def test_comparison_table_css_packs_tables_and_uses_dark_headers():
+    css = (
+        Path(__file__).resolve().parents[1] / 'assets' / 'styles.css'
+    ).read_text(encoding='utf-8')
+
+    assert '.greeks-bucket-greek-grid-wrap,' in css
+    assert 'display: flex;\n    flex-wrap: wrap;' in css
+    assert '--ag-header-background-color: #1e293b;' in css
+    assert '--ag-header-foreground-color: #ffffff;' in css
+    assert 'color: #ffffff !important;' in css
+
+
+def test_aggregation_and_unit_use_compact_segmented_controls():
+    components = list(_walk(greeks.layout))
+    aggregation = next(
+        component
+        for component in components
+        if getattr(component, 'id', None) == 'maturity-aggregation-mode-selector'
+    )
+    unit = next(
+        component
+        for component in components
+        if getattr(component, 'id', None) == 'unit-mode-selector'
+    )
+
+    assert aggregation.value == 'mixed'
+    assert unit.value == 'native'
+    assert aggregation.inline is True
+    assert unit.inline is True
+    assert 'greeks-segmented-control' in aggregation.className.split()
+    assert 'greeks-segmented-control' in unit.className.split()
+    assert getattr(aggregation, 'inputStyle', None) in (None, {})
+    assert getattr(unit, 'inputStyle', None) in (None, {})
+    assert any(
+        getattr(component, 'children', None) == 'Unit'
+        and 'inline-filter-label' in getattr(component, 'className', '').split()
+        for component in components
+    )
+    assert not any(
+        getattr(component, 'children', None) == 'Unit Mode'
+        for component in components
+    )
+
+
+def test_maturity_cutoff_labels_are_complete_and_compact():
+    assert greeks._month_through_label('2027-03-31') == '2027 Q1 · Mar'
+    assert greeks._month_through_label('2027-12-31') == '2027 Q4 · Dec'
+    assert greeks._quarter_through_label('2027-12-31') == '2027'
+
+
+def test_all_selectors_and_actions_share_one_toolbar_row():
+    selector_row = next(
+        component
+        for component in _walk(greeks.layout)
+        if 'greeks-monitor-selector-row'
+        in getattr(component, 'className', '').split()
+    )
+    selector_ids = [
+        next(
+            getattr(descendant, 'id', None)
+            for descendant in _walk(control_group)
+            if getattr(descendant, 'id', None)
+        )
+        for control_group in selector_row.children[:8]
+    ]
+    action_ids = {
+        getattr(component, 'id', None)
+        for component in _walk(selector_row.children[8])
+        if getattr(component, 'id', None)
+    }
+
+    assert selector_ids == [
+        'date-selector',
+        'maturity-aggregation-mode-selector',
+        'month-through-selector',
+        'quarter-through-selector',
+        'unit-mode-selector',
+        'strategy-selector',
+        'trade-type-selector',
+        'risk-bucket-selector',
+    ]
+    assert action_ids == {
+        'greeks-aspect-settlement-btn',
+        'greeks-aspect-live-btn',
+        'export-greeks-workbook-btn',
+    }
+    assert len(selector_row.children) == 10
+    assert 'greeks-control-actions' in selector_row.children[8].className.split()
+    assert selector_row.children[8].children[0].children == 'Aspect Actions'
+    assert 'greeks-inline-source-status' in selector_row.children[9].className.split()
+    inline_source_ids = {
+        getattr(component, 'id', None)
+        for component in _walk(selector_row.children[9])
+        if getattr(component, 'id', None)
+    }
+    assert inline_source_ids == {
+        'greeks-source-status-mount',
+        'greeks-source-status-inline',
+    }
+    assert not any(
+        'greeks-monitor-action-row' in getattr(component, 'className', '').split()
+        for component in _walk(greeks.layout)
+    )
+
+    action_buttons = {
+        getattr(component, 'id', None): component
+        for component in _walk(selector_row.children[8])
+        if getattr(component, 'id', None)
+    }
+    assert action_buttons['greeks-aspect-settlement-btn'].children == 'COB'
+    assert getattr(
+        action_buttons['greeks-aspect-settlement-btn'],
+        'aria-label',
+    ) == 'Load Aspect COB'
+    assert action_buttons['greeks-aspect-live-btn'].children == 'Live'
+    assert getattr(
+        action_buttons['greeks-aspect-live-btn'],
+        'aria-label',
+    ) == 'Load Aspect Live'
+    assert action_buttons['export-greeks-workbook-btn'].children == 'Export'
+    assert getattr(
+        action_buttons['export-greeks-workbook-btn'],
+        'aria-label',
+    ) == 'Export Workbook'
+
+
+def test_toolbar_css_reserves_dropdown_icon_space_and_collapses_before_squeezing():
+    css = (
+        Path(__file__).resolve().parents[1] / 'assets' / 'styles.css'
+    ).read_text(encoding='utf-8')
+
+    assert '100px\n        84px\n        198px' in css
+    assert '194px\n        159px\n        124px\n        minmax(260px, 1fr);' in css
+    assert (
+        'grid-template-columns: minmax(0, 1fr) 14px 16px !important;'
+        in css
+    )
+    assert '@media (max-width: 1329px)' in css
+    assert '@media (max-width: 1573px) and (min-width: 1330px)' in css
+    assert '124px\n            16px;' in css
+    assert 'grid-template-columns: repeat(5, minmax(0, 1fr));' in css
+    assert '@media (max-width: 900px)' in css
+    assert 'grid-template-columns: repeat(3, minmax(0, 1fr));' in css
+
+
+def test_strategy_filter_uses_compact_debounced_multi_picker():
+    strategy_filter = next(
+        component
+        for component in _walk(greeks.layout)
+        if getattr(component, 'id', None) == 'strategy-selector'
+    )
+
+    assert strategy_filter.multi is True
+    assert strategy_filter.closeOnSelect is False
+    assert strategy_filter.debounce is True
+    assert strategy_filter.optionHeight == 40
+    assert strategy_filter.maxHeight == 360
+    assert strategy_filter.labels['selected_count'] == '{num_selected} strategies selected'
+    assert strategy_filter.labels['search'] == 'Search strategies'
+    assert 'greeks-compact-multi-dropdown' in strategy_filter.className.split()
+    assert 'greeks-strategy-dropdown' in strategy_filter.className.split()
+    assert 'All strategies selected' in greeks.STRATEGY_DROPDOWN_LABELS_CLIENTSIDE
+    assert 'availableValues.every' in greeks.STRATEGY_DROPDOWN_LABELS_CLIENTSIDE
+
+    label_callback = next(
+        item
+        for item in GLOBAL_CALLBACK_LIST
+        if item.get('output') == 'strategy-selector.labels'
+    )
+    assert label_callback['inputs'] == [
+        {'id': 'strategy-selector', 'property': 'options'},
+        {'id': 'strategy-selector', 'property': 'value'},
+    ]
+    assert label_callback['clientside_function']
+
+
+def test_asset_pair_filter_uses_compact_debounced_multi_picker():
+    risk_filter = next(
+        component
+        for component in _walk(greeks.layout)
+        if getattr(component, 'id', None) == 'risk-bucket-selector'
+    )
+
+    assert risk_filter.multi is True
+    assert risk_filter.closeOnSelect is False
+    assert risk_filter.debounce is True
+    assert risk_filter.optionHeight == 40
+    assert risk_filter.maxHeight == 360
+    assert risk_filter.labels['selected_count'] == '{num_selected} assets / pairs'
+    assert risk_filter.labels['search'] == 'Search assets and pairs'
+    assert 'greeks-compact-multi-dropdown' in risk_filter.className.split()
+    assert 'greeks-risk-bucket-dropdown' in risk_filter.className.split()
+    assert 'All assets / pairs' in greeks.RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE
+    assert 'availableValues.every' in greeks.RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE
+
+    label_callback = next(
+        item
+        for item in GLOBAL_CALLBACK_LIST
+        if item.get('output') == 'risk-bucket-selector.labels'
+    )
+    assert label_callback['inputs'] == [
+        {'id': 'risk-bucket-selector', 'property': 'options'},
+        {'id': 'risk-bucket-selector', 'property': 'value'},
+    ]
+    assert label_callback['clientside_function']
+
+
+def test_trade_type_filter_uses_compact_debounced_multi_picker():
+    trade_type_filter = next(
+        component
+        for component in _walk(greeks.layout)
+        if getattr(component, 'id', None) == 'trade-type-selector'
+    )
+
+    assert trade_type_filter.multi is True
+    assert trade_type_filter.closeOnSelect is False
+    assert trade_type_filter.debounce is True
+    assert trade_type_filter.optionHeight == 40
+    assert trade_type_filter.maxHeight == 360
+    assert trade_type_filter.labels['selected_count'] == '{num_selected} trade types selected'
+    assert trade_type_filter.labels['search'] == 'Search trade types'
+    assert 'greeks-compact-multi-dropdown' in trade_type_filter.className.split()
+    assert 'greeks-trade-type-dropdown' in trade_type_filter.className.split()
+    assert 'All trade types selected' in greeks.TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE
+    assert 'availableValues.every' in greeks.TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE
+
+    label_callback = next(
+        item
+        for item in GLOBAL_CALLBACK_LIST
+        if item.get('output') == 'trade-type-selector.labels'
+    )
+    assert label_callback['inputs'] == [
+        {'id': 'trade-type-selector', 'property': 'options'},
+        {'id': 'trade-type-selector', 'property': 'value'},
+    ]
+    assert label_callback['clientside_function']
 
 
 def test_option_assets_use_contract_native_units(monkeypatch):
@@ -428,10 +860,71 @@ def test_aspect_only_export_contains_source_sheets(monkeypatch):
     )
 
 
-def test_quantity_greek_displays_retain_six_decimal_places():
+def test_export_uses_shared_maturity_axis_and_preserves_blank_vs_zero(monkeypatch):
+    prepared, _ = greeks._prepare_aspect_records(_aspect_frame())
+    monkeypatch.setattr(
+        greeks,
+        'fetch_instrument_unit_map',
+        lambda: {
+            'ICE_TTF': {
+                'native_unit': 'MWh',
+                'unit': 'MMBtu',
+                'conv_factor': 1.0,
+            },
+            'ICE_BRENT_FUTURES': {
+                'native_unit': 'BBL',
+                'unit': 'BBL',
+                'conv_factor': 1.0,
+            },
+        },
+    )
+    core_rows = pd.DataFrame([
+        _normalized_greek_row('2026-10', 0.0),
+    ])
+    core_store = {
+        'meta': {'cob_date': '2026-07-30'},
+        'rows': core_rows.to_dict('records'),
+    }
+
+    result = greeks.export_greeks_workbook(
+        1,
+        core_store,
+        {'meta': _aspect_meta(), 'rows': prepared.to_dict('records')},
+        'month',
+        None,
+        None,
+        'native',
+    )
+    workbook = load_workbook(
+        io.BytesIO(base64.b64decode(result['content'])),
+        read_only=True,
+        data_only=False,
+    )
+
+    bucket_rows = list(workbook['Bucket Greeks'].iter_rows(values_only=True))
+    bucket_headers = list(bucket_rows[0])
+    maturity_index = bucket_headers.index('Maturity')
+    delta_index = bucket_headers.index('Delta')
+    displayed = {
+        row[maturity_index]: row[delta_index]
+        for row in bucket_rows[1:]
+    }
+    assert list(displayed) == ['2026-09', '2026-10', 'Total']
+    assert displayed['2026-09'] is None
+    assert displayed['2026-10'] == 0
+    assert displayed['Total'] == 0
+
+    aspect_delta_rows = list(
+        workbook['Aspect Delta'].iter_rows(values_only=True)
+    )
+    aspect_maturities = [row[0] for row in aspect_delta_rows[1:]]
+    assert aspect_maturities == ['2026-09', '2026-10', 'Total']
+
+
+def test_quantity_greek_displays_show_no_decimal_places():
     frame = pd.DataFrame([{'Delta': 1234.1234567}])
     rounded = greeks._round_numeric(frame)
 
-    assert rounded.loc[0, 'Delta'] == pytest.approx(1234.123457)
-    assert greeks._format_grid_number(rounded.loc[0, 'Delta']) == '1,234.123457'
-    assert greeks._format_currency(-12.3456784) == '-$12.345678'
+    assert rounded.loc[0, 'Delta'] == pytest.approx(1234)
+    assert greeks._format_grid_number(rounded.loc[0, 'Delta']) == '1,234'
+    assert greeks._format_currency(-12.3456784) == '-$12'

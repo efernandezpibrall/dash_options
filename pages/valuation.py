@@ -15,6 +15,7 @@ _valuation_refresh_key = None
 _valuation_data_error = None
 _valuation_warning = None
 VALUATION_CURRENT_TABLE = f'{DB_SCHEMA}.trades_options_valuation_current'
+ASPECT_SOURCE_UNAVAILABLE_MESSAGE = 'Aspect data unavailable'
 
 
 
@@ -79,13 +80,12 @@ def _read_pnl_sources_for_date(selected_date, db_engine):
         if invalid_aspect_currency.any():
             df_aspect_pnl = pd.DataFrame()
             df_aspect_pnl.attrs['currency_warning'] = (
-                'Aspect YTD suppressed: its source does not provide a valid '
-                'currency for every amount.'
+                ASPECT_SOURCE_UNAVAILABLE_MESSAGE
             )
     except Exception:
         df_aspect_pnl = pd.DataFrame()
         df_aspect_pnl.attrs['currency_warning'] = (
-            'Aspect YTD suppressed: currency is unavailable from the source.'
+            ASPECT_SOURCE_UNAVAILABLE_MESSAGE
         )
 
     query = text(f"""
@@ -149,6 +149,19 @@ def fetch_ttf_source_comparison(db_engine, selected_date, selected_strategies):
 @lru_cache(maxsize=8)
 def _fetch_pnl_sources_for_date(selected_date):
     return _read_pnl_sources_for_date(selected_date, get_database_engine())
+
+
+def _build_aspect_source_status(warning):
+    if not warning:
+        return None
+    return {
+        'label': 'Aspect',
+        'source': f'{DB_SCHEMA}.pnl_aspect',
+        'latest_cob': None,
+        'business_day_age': None,
+        'fallback_used': False,
+        'error': ASPECT_SOURCE_UNAVAILABLE_MESSAGE,
+    }
 
 
 def fetch_pnl_data(db_engine, selected_date, selected_strategies):
@@ -340,8 +353,6 @@ COLUMN_NAME_MAPPING = {
 }
 
 COLUMN_GRID_HEADER_MAPPING = {
-    'intrinsic_value': 'Intrinsic',
-    'time_value': 'Time',
     'qty_value': 'Value Total',
     'qty_intrinsic_value': 'Intrinsic Total',
     'qty_time_value': 'Time Total',
@@ -356,9 +367,6 @@ VALUATION_COLUMN_WIDTHS = {
     'substrategy': 154,
     'year': 56,
     'unit_quantity': 64,
-    'price': 74,
-    'intrinsic_value': 92,
-    'time_value': 86,
     'qty_value': 96,
     'qty_intrinsic_value': 108,
     'qty_time_value': 108,
@@ -367,7 +375,18 @@ VALUATION_COLUMN_WIDTHS = {
     'ytd_hedging': 108,
 }
 
-VALUATION_DECIMAL_COLUMNS = {'price', 'intrinsic_value', 'time_value'}
+VALUATION_TABLE_COLUMNS = (
+    'currency',
+    'substrategy',
+    'year',
+    'unit_quantity',
+    'qty_value',
+    'qty_intrinsic_value',
+    'qty_time_value',
+    'qty_premium',
+    'qty_pnl',
+    'ytd_hedging',
+)
 VALUATION_TOTAL_COLUMNS = {
     'qty_value',
     'qty_intrinsic_value',
@@ -386,11 +405,16 @@ def build_valuation_column_defs(df):
     """Create compact AG Grid column definitions for the valuation table."""
     column_defs = []
 
-    for col in df.columns:
+    for col in VALUATION_TABLE_COLUMNS:
+        if col not in df.columns:
+            continue
         full_name = COLUMN_NAME_MAPPING.get(col, col)
         friendly_name = COLUMN_GRID_HEADER_MAPPING.get(col, full_name)
         width = VALUATION_COLUMN_WIDTHS.get(col, 98)
-        is_numeric = pd.api.types.is_numeric_dtype(df[col]) or col in VALUATION_DECIMAL_COLUMNS | VALUATION_TOTAL_COLUMNS
+        is_numeric = (
+            pd.api.types.is_numeric_dtype(df[col])
+            or col in VALUATION_TOTAL_COLUMNS
+        )
         is_text_column = col in {
             'currency',
             'substrategy',
@@ -454,18 +478,16 @@ def build_valuation_column_defs(df):
     return column_defs
 
 
-def _format_valuation_display_value(key, value, currency=None):
+def _format_valuation_display_value(key, value):
     if pd.isna(value):
         return None
-    if key in VALUATION_DECIMAL_COLUMNS:
-        return f"{float(value):,.2f} {currency}" if currency else f"{float(value):,.2f}"
     if key in VALUATION_TOTAL_COLUMNS:
-        return f"{float(value):,.2f} {currency}" if currency else f"{float(value):,.2f}"
+        return f"{float(value):,.0f}"
     return value
 
 
 def _raw_valuation_numeric_value(key, value):
-    if key not in VALUATION_DECIMAL_COLUMNS | VALUATION_TOTAL_COLUMNS or pd.isna(value):
+    if key not in VALUATION_TOTAL_COLUMNS or pd.isna(value):
         return None
     return float(value)
 
@@ -474,15 +496,10 @@ def _clean_valuation_records(df):
     records = []
     for row in df.to_dict('records'):
         clean_row = {}
-        currency = row.get('currency')
         for key, value in row.items():
-            clean_row[key] = _format_valuation_display_value(
-                key,
-                value,
-                currency,
-            )
+            clean_row[key] = _format_valuation_display_value(key, value)
             raw_value = _raw_valuation_numeric_value(key, value)
-            if key in VALUATION_DECIMAL_COLUMNS | VALUATION_TOTAL_COLUMNS:
+            if key in VALUATION_TOTAL_COLUMNS:
                 clean_row[f'__{key}_raw'] = raw_value
         records.append(clean_row)
     return records
@@ -528,6 +545,15 @@ def _apply_excel_number_formats(worksheet, frame, formats):
 # ------------------------------------------------------------------
 ERROR_STYLE_HIDDEN = {'display': 'none'}
 ERROR_STYLE_VISIBLE = {'display': 'block'}
+VALUATION_STRATEGY_DROPDOWN_LABELS = {
+    'select_all': 'Select all',
+    'deselect_all': 'Clear all',
+    'selected_count': '{num_selected} strategies selected',
+    'search': 'Search strategies',
+    'clear_search': 'Clear strategy search',
+    'clear_selection': 'Clear strategy selection',
+    'no_options_found': 'No strategies found',
+}
 
 TTF_COMPARISON_COLUMN_DEFS = [
     {'headerName': 'Strategy', 'field': 'substrategy', 'pinned': 'left', 'minWidth': 210},
@@ -593,33 +619,74 @@ def _build_valuation_filter_bar():
         [
             html.Div(
                 [
-                    html.Span('COB', className='filter-group-header'),
-                    dcc.Dropdown(
-                        id='pnl-date-dropdown',
-                        options=[],
-                        value=None,
-                        clearable=False,
-                        className='inline-dropdown-date valuation-filter-dropdown valuation-date-dropdown',
+                    html.Div(
+                        [
+                            html.Label('COB Date', className='inline-filter-label'),
+                            dcc.Dropdown(
+                                id='pnl-date-dropdown',
+                                options=[],
+                                value=None,
+                                clearable=False,
+                                className='inline-dropdown-date',
+                            ),
+                        ],
+                        className=(
+                            'greeks-monitor-control-group '
+                            'greeks-control-date valuation-control-date'
+                        ),
+                    ),
+                    html.Div(
+                        [
+                            html.Label('Strategies', className='inline-filter-label'),
+                            dcc.Dropdown(
+                                id='pnl-strategy-dropdown',
+                                options=[],
+                                value=[],
+                                multi=True,
+                                closeOnSelect=False,
+                                debounce=True,
+                                optionHeight=40,
+                                maxHeight=360,
+                                labels=VALUATION_STRATEGY_DROPDOWN_LABELS,
+                                placeholder='Select strategies',
+                                className=(
+                                    'greeks-inline-dropdown-multi '
+                                    'greeks-compact-multi-dropdown '
+                                    'greeks-strategy-dropdown '
+                                    'valuation-greeks-strategy-dropdown'
+                                ),
+                            ),
+                        ],
+                        className=(
+                            'greeks-monitor-control-group '
+                            'greeks-control-strategies valuation-control-strategies'
+                        ),
+                    ),
+                    html.Div(
+                        [
+                            dcc.Store(id='valuation-source-status-mount', data=True),
+                            dcc.Store(id='valuation-aspect-source-status'),
+                            html.Div(
+                                id='valuation-source-status-inline',
+                                className='greeks-source-status-inline-host',
+                            ),
+                        ],
+                        className=(
+                            'greeks-inline-source-status '
+                            'valuation-inline-source-status'
+                        ),
                     ),
                 ],
-                className='filter-group valuation-sticky-filter-group valuation-date-filter-group',
-            ),
-            html.Div(
-                [
-                    html.Span('Strategies', className='filter-group-header'),
-                    dcc.Dropdown(
-                        id='pnl-strategy-dropdown',
-                        options=[],
-                        value=[],
-                        multi=True,
-                        placeholder='Select strategies...',
-                        className='inline-dropdown-multi-strategies valuation-filter-dropdown valuation-strategy-dropdown',
-                    ),
-                ],
-                className='filter-group valuation-sticky-filter-group valuation-strategy-filter-group',
+                className=(
+                    'greeks-monitor-control-row greeks-monitor-selector-row '
+                    'valuation-monitor-selector-row'
+                ),
             ),
         ],
-        className='professional-section-header valuation-sticky-filter-bar',
+        className=(
+            'professional-section-header greeks-sticky-filter-bar '
+            'greeks-monitor-controls valuation-monitor-controls'
+        ),
     )
 
 
@@ -640,12 +707,6 @@ layout = html.Div(
     [
         dcc.Download(id='download-pnl-table'),
         _build_valuation_filter_bar(),
-        html.P(
-            'All values use native contract currency. Subtotals and totals are '
-            'calculated independently by currency; no FX conversion or mixed '
-            'portfolio total is shown.',
-            className='analytics-model-note',
-        ),
         html.Div(
             [
                 _build_valuation_section_header(
@@ -793,6 +854,7 @@ def update_strategy_options(selected_date, n_clicks):
     Output('pnl-table', 'columnDefs'),
     Output('pnl-error-message', 'children'),
     Output('pnl-error-message', 'style'),
+    Output('valuation-aspect-source-status', 'data'),
     Input('pnl-date-dropdown', 'value'),
     Input('pnl-strategy-dropdown', 'value'),
     Input('refresh-options-data', 'n_clicks')
@@ -809,25 +871,37 @@ def update_pnl_table(selected_date, selected_strategies, n_clicks):
         _valuation_refresh_key = n_clicks
 
     if not selected_date:
-        return [], [], "", ERROR_STYLE_HIDDEN
+        return [], [], "", ERROR_STYLE_HIDDEN, None
 
     df = fetch_pnl_data(get_database_engine(required=False), selected_date, selected_strategies)
     if df.empty:
         error_message = _valuation_data_error or "No P&L rows are available for the selected date and strategies."
-        return [], [], error_message, ERROR_STYLE_VISIBLE
-
-    data_records = _clean_valuation_records(df)
-
-    columns = build_valuation_column_defs(df)
-
-    if _valuation_warning:
         return (
-            data_records,
-            columns,
-            _valuation_warning,
+            [],
+            [],
+            error_message,
             ERROR_STYLE_VISIBLE,
+            _build_aspect_source_status(_valuation_warning),
         )
-    return data_records, columns, "", ERROR_STYLE_HIDDEN
+
+    table_df = df.reindex(
+        columns=[
+            column
+            for column in VALUATION_TABLE_COLUMNS
+            if column in df.columns
+        ]
+    )
+    data_records = _clean_valuation_records(table_df)
+
+    columns = build_valuation_column_defs(table_df)
+
+    return (
+        data_records,
+        columns,
+        "",
+        ERROR_STYLE_HIDDEN,
+        _build_aspect_source_status(_valuation_warning),
+    )
 
 
 @dash.callback(
@@ -930,11 +1004,8 @@ def export_pnl_table(
                 writer.sheets['P&L and Option Values'],
                 df_renamed,
                 {
-                    COLUMN_NAME_MAPPING.get(column, column): '#,##0.00'
-                    for column in (
-                        VALUATION_DECIMAL_COLUMNS
-                        | VALUATION_TOTAL_COLUMNS
-                    )
+                    COLUMN_NAME_MAPPING.get(column, column): '#,##0'
+                    for column in VALUATION_TOTAL_COLUMNS
                 },
             )
             if comparison_rows:

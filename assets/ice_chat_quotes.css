@@ -1,0 +1,520 @@
+.ice-chat-quotes-page {
+    width: 100%;
+    max-width: none;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 20px 24px 32px;
+    color: var(--color-text-primary);
+    background: var(--color-bg-light);
+}
+
+.ice-chat-page-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 14px;
+}
+
+.ice-chat-page-header h1 {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+}
+
+.ice-chat-page-subtitle,
+.ice-chat-section-hint {
+    margin: 0;
+    color: var(--color-text-tertiary);
+    font-size: 12px;
+}
+
+.ice-chat-service-strip {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 9px;
+    background: var(--color-bg-white);
+    box-shadow: var(--shadow-sm);
+}
+
+.ice-chat-status-item {
+    display: flex;
+    min-width: 94px;
+    flex-direction: column;
+    padding: 3px 9px;
+    border-right: 1px solid var(--color-border-light);
+    font-variant-numeric: tabular-nums;
+}
+
+.ice-chat-status-item:last-child { border-right: 0; }
+
+.ice-chat-status-item strong {
+    overflow: hidden;
+    color: var(--color-text-primary);
+    font-size: 11px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ice-chat-service-strip-success .ice-chat-status-item:first-child strong::before,
+.ice-chat-service-strip-warning .ice-chat-status-item:first-child strong::before,
+.ice-chat-service-strip-danger .ice-chat-status-item:first-child strong::before {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: var(--color-success);
+    content: "";
+}
+
+.ice-chat-service-strip-warning .ice-chat-status-item:first-child strong::before {
+    background: var(--color-warning);
+}
+
+.ice-chat-service-strip-danger .ice-chat-status-item:first-child strong::before {
+    background: var(--color-danger);
+}
+
+.ice-chat-status-label {
+    color: var(--color-text-tertiary);
+    font-size: 9px;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.ice-chat-filter-bar {
+    position: sticky;
+    top: 97px;
+    z-index: 20;
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    margin-bottom: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: var(--shadow-sm);
+}
+
+.ice-chat-filter-group {
+    flex: 1 1 130px;
+    min-width: 112px;
+}
+
+.ice-chat-filter-group > label {
+    display: block;
+    margin-bottom: 3px;
+    color: var(--color-text-secondary);
+    font-size: 10px;
+    font-weight: 650;
+}
+
+.ice-chat-filter-window { flex: 0 0 auto; min-width: 210px; }
+.ice-chat-positive-filter { flex: 0 0 auto; padding-bottom: 4px; }
+.ice-chat-window-control label,
+.ice-chat-positive-filter label { margin-right: 9px; font-size: 11px; }
+
+.ice-chat-section-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 7px;
+}
+
+.ice-chat-section-header h2 { margin: 0; font-size: 16px; font-weight: 650; }
+
+.ice-chat-card {
+    margin-bottom: 14px;
+    padding: 12px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 9px;
+    background: var(--color-bg-white);
+    box-shadow: var(--shadow-sm);
+}
+
+.ice-chat-edge-card {
+    padding: 0;
+    border-color: #d7e3ef;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.85),
+        0 8px 24px rgba(15, 23, 42, 0.045);
+    overflow: hidden;
+}
+
+.ice-chat-edge-card > .ice-chat-section-header {
+    align-items: center;
+    margin: 0;
+    padding: 12px 16px;
+    border-bottom: 1px solid #d7e3ef;
+    border-left: 4px solid #0f766e;
+    background: linear-gradient(180deg, #ffffff 0%, #f5faf9 100%);
+}
+
+.ice-chat-edge-card > .ice-chat-section-header h2 {
+    color: #0f172a;
+    font-size: 17px;
+    font-weight: 750;
+    letter-spacing: -0.01em;
+}
+
+.ice-chat-edge-card .ice-chat-section-hint {
+    padding: 4px 8px;
+    border: 1px solid #a7d7c9;
+    border-radius: 999px;
+    color: #16604f;
+    background: #effaf6;
+    font-size: 10.5px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.ice-chat-chart-shell {
+    min-width: 0;
+    padding: 2px 8px 0;
+    background: #ffffff;
+}
+
+.ice-chat-table-card {
+    padding: 0;
+    border-color: #d7e3ef;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.85),
+        0 8px 24px rgba(15, 23, 42, 0.045);
+    overflow: hidden;
+}
+
+.ice-chat-table-card > .ice-chat-section-header {
+    align-items: center;
+    margin: 0;
+    padding: 12px 16px;
+    border-bottom: 1px solid #d7e3ef;
+    border-left: 4px solid #334155;
+    background: linear-gradient(180deg, #ffffff 0%, #f7fafc 100%);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+}
+
+.ice-chat-table-card > .ice-chat-section-header h2 {
+    color: #0f172a;
+    font-size: 17px;
+    font-weight: 750;
+    letter-spacing: -0.01em;
+}
+
+#ice-chat-table-status {
+    padding: 4px 8px;
+    border: 1px solid #d7e3ef;
+    border-radius: 999px;
+    color: #475569;
+    background: #ffffff;
+    font-size: 10.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+.ice-chat-grid-shell {
+    min-width: 0;
+    background: #ffffff;
+    overflow: hidden;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid {
+    --ag-font-family: var(--font-family-primary, "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif);
+    --ag-font-size: 11px;
+    --ag-grid-size: 2px;
+    --ag-row-height: 30px;
+    --ag-header-height: 34px;
+    --ag-cell-horizontal-padding: 5px;
+    --ag-border-color: #d7e3ef;
+    --ag-row-border-color: #e8eef5;
+    --ag-odd-row-background-color: #f8fafc;
+    --ag-row-hover-color: #edf5ff;
+    --ag-selected-row-background-color: #e7f0fb;
+    width: 100%;
+    font-variant-numeric: tabular-nums;
+    background: #ffffff;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-root-wrapper {
+    border: 0;
+    border-radius: 0;
+    background: #ffffff;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell {
+    border-color: #475569 !important;
+    color: #ffffff !important;
+    background: #26364d !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-instrument {
+    background: #172033 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-context {
+    background: #26364d !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-valuation {
+    background: #1e3a5f !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-edge {
+    background: #115e59 !important;
+    box-shadow: inset 0 -3px 0 #5eead4;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-iv,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-workflow,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell.ice-chat-group-reference {
+    background: #334155 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-text {
+    color: #ffffff !important;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.055em;
+    text-transform: uppercase;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell-label {
+    justify-content: center;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell {
+    border-color: #d7e3ef !important;
+    color: #334155 !important;
+    background: #eef3f8 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell-text {
+    color: #334155 !important;
+    font-size: 10.5px;
+    font-weight: 750;
+    line-height: 1.05;
+    letter-spacing: 0.01em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell-label {
+    padding: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell.ice-chat-text-header .ag-header-cell-label {
+    justify-content: flex-start;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell.ice-chat-number-header .ag-header-cell-label {
+    justify-content: flex-end;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-cell {
+    display: flex !important;
+    align-items: center;
+    min-height: 30px;
+    padding: 2px 5px !important;
+    border-right: 0;
+    border-bottom: 1px solid #e8eef5;
+    color: #1f2937;
+    font-size: 11px;
+    font-weight: 550;
+    line-height: 1.1;
+    overflow: hidden !important;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-cell-wrapper,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-cell-value {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-row-odd .ag-cell {
+    background: #f8fafc;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-row-even .ag-cell {
+    background: #ffffff;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-row-hover .ag-cell {
+    background: #edf5ff !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-row-selected .ag-cell {
+    box-shadow: inset 0 1px 0 #bfdbfe, inset 0 -1px 0 #bfdbfe;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-cell-focus {
+    border-color: transparent !important;
+    box-shadow: inset 0 0 0 2px #2563eb !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-text-cell {
+    justify-content: flex-start;
+    text-align: left;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-number-cell {
+    justify-content: flex-end;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-time-cell {
+    color: #475569;
+    font-size: 10.5px;
+    font-weight: 650;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-product-cell,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-instrument-cell {
+    color: #0f172a;
+    font-weight: 750;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-unit-cell,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-size-cell {
+    color: #64748b;
+    font-size: 10.5px;
+    font-weight: 650;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-market-price-cell {
+    color: #172033;
+    font-weight: 750;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-theo-cell {
+    color: #1e3a8a;
+    background: #eff6ff !important;
+    font-weight: 800;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-our-iv-cell {
+    color: #1e40af;
+    font-weight: 750;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-action-cell {
+    justify-content: center;
+    text-align: center;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.025em;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-cell-buy {
+    color: #047857;
+    background: #ecfdf5 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-cell-sell {
+    color: #b42318;
+    background: #fff1f2 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-cell-neutral {
+    color: #64748b;
+    background: #f1f5f9 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-edge-metric {
+    font-weight: 800;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-edge-positive {
+    color: #047857;
+    background: #f0fdf4 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-edge-negative {
+    color: #b42318;
+    background: #fff7f7 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-edge-flat {
+    color: #64748b;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-cell-delivered {
+    color: #047857;
+    font-weight: 750;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-cell-delivery-error {
+    color: #b42318;
+    font-weight: 800;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-row-blocked .ag-cell {
+    background: #fffbeb !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-row-error .ag-cell {
+    background: #fef2f2 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell.ice-chat-group-start,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-cell.ice-chat-group-start {
+    border-left: 1px solid #cbd5e1 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-pinned-left-header,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-pinned-left-cols-container {
+    border-right: 1px solid #94a3b8;
+    box-shadow: 4px 0 10px rgba(15, 23, 42, 0.06);
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-body-horizontal-scroll {
+    min-height: 12px !important;
+    height: 12px !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-paging-panel {
+    display: none !important;
+}
+
+@media (max-width: 1100px) {
+    .ice-chat-page-header { align-items: flex-start; flex-direction: column; }
+    .ice-chat-service-strip { width: 100%; flex-wrap: wrap; }
+    .ice-chat-filter-bar { position: static; flex-wrap: wrap; }
+    .ice-chat-filter-group { flex: 1 1 170px; }
+}
+
+@media (max-width: 640px) {
+    .ice-chat-quotes-page { padding: 16px; }
+    .ice-chat-status-item { flex: 1 1 42%; border-right: 0; }
+    .ice-chat-filter-group,
+    .ice-chat-filter-window,
+    .ice-chat-positive-filter { flex: 1 1 100%; min-width: 100%; }
+    .ice-chat-section-header { align-items: flex-start; flex-direction: column; gap: 2px; }
+    .ice-chat-edge-card > .ice-chat-section-header { align-items: flex-start; gap: 6px; }
+    .ice-chat-edge-card .ice-chat-section-hint { white-space: normal; }
+    .ice-chat-table-card > .ice-chat-section-header { align-items: flex-start; }
+}
+
+@media (max-width: 360px) {
+    .ice-chat-quotes-page { padding: 12px; }
+    .ice-chat-status-item { flex-basis: 100%; }
+}

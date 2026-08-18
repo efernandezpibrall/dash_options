@@ -2,31 +2,46 @@
 
 from __future__ import annotations
 
-import os
-
 from flask import jsonify
 from sqlalchemy import text
 
 from runtime_config import get_database_engine
-from vol_calibration.feature_flags import background_jobs_enabled, writes_enabled
-
-
-def _enabled(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
+from brent_option_chain_refresh import (
+    enabled_products,
+    intraday_refresh_enabled,
+    settlement_refresh_enabled,
+)
+from vol_calibration.auth import AuthenticationError, validate_auth_configuration
+from vol_calibration.feature_flags import (
+    background_jobs_enabled,
+    ttf_intraday_writes_enabled,
+    ttf_publication_enabled,
+    writes_enabled,
+)
 def readiness_status() -> tuple[bool, dict]:
     """Return fail-closed readiness details without exposing credentials."""
     details = {
         "writes_enabled": writes_enabled(),
+        "ttf_intraday_writes_enabled": ttf_intraday_writes_enabled(),
+        "ttf_publication_enabled": ttf_publication_enabled(),
         "background_jobs_enabled": background_jobs_enabled(),
+        "bbg_option_chain_intraday_refresh_enabled": intraday_refresh_enabled(),
+        "bbg_option_chain_settlement_refresh_enabled": settlement_refresh_enabled(),
+        "bbg_option_chain_enabled_products": sorted(enabled_products()),
     }
-    if not details["writes_enabled"]:
+    if not (
+        details["writes_enabled"]
+        or details["ttf_intraday_writes_enabled"]
+        or details["bbg_option_chain_intraday_refresh_enabled"]
+        or details["bbg_option_chain_settlement_refresh_enabled"]
+    ):
         details["mode"] = "read-only"
         return True, details
 
-    if not _enabled("OPTIONS_TRUSTED_PROXY_AUTH_ENABLED"):
-        details["error"] = "trusted proxy authentication is not enabled"
+    try:
+        details["auth_mode"] = validate_auth_configuration()
+    except AuthenticationError as exc:
+        details["error"] = str(exc)
         return False, details
 
     engine = get_database_engine(required=False)
@@ -34,9 +49,31 @@ def readiness_status() -> tuple[bool, dict]:
         details["error"] = "database configuration is unavailable"
         return False, details
 
-    required_relations = ["at_lng.vol_calibration_runs"]
+    required_relations = []
+    if details["writes_enabled"] or details["ttf_intraday_writes_enabled"]:
+        required_relations.append("at_lng.vol_calibration_runs")
+    if details["ttf_intraday_writes_enabled"]:
+        required_relations.extend(
+            [
+                "at_lng.vol_surface_publications",
+                "at_lng.implied_volatility_surface_calibrated",
+                "at_lng.vol_calibration_intraday_trades",
+                "at_lng.vol_calibration_run_trade_inputs",
+            ]
+        )
     if details["background_jobs_enabled"]:
         required_relations.append("at_lng.vol_calibration_jobs")
+    if (
+        details["bbg_option_chain_intraday_refresh_enabled"]
+        or details["bbg_option_chain_settlement_refresh_enabled"]
+    ):
+        required_relations.extend(
+            [
+                "at_lng.vol_market_snapshots",
+                "at_lng.bbg_option_chain",
+                "at_lng.bbg_option_chain_refresh_jobs",
+            ]
+        )
 
     try:
         with engine.connect() as connection:

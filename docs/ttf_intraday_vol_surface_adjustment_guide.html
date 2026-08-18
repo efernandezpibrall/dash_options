@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Trader guide to intraday TTF volatility-surface adjustments using the Basic node editor and Advanced Wing-v2 tail table.">
+  <title>TTF Intraday Vol Surface Adjustment Guide</title>
+  <style>
+    :root {
+      --ink: #172033;
+      --muted: #5f6b7a;
+      --navy: #132a46;
+      --navy-2: #1c3e65;
+      --teal: #087f79;
+      --teal-soft: #e6f6f3;
+      --blue-soft: #eaf2fb;
+      --amber: #a15c00;
+      --amber-soft: #fff4dc;
+      --red: #a53a32;
+      --red-soft: #fdebea;
+      --green: #23704a;
+      --green-soft: #eaf6ef;
+      --line: #d8e0e8;
+      --paper: #ffffff;
+      --canvas: #f3f6f9;
+      --code: #edf2f7;
+      --shadow: 0 12px 30px rgba(19, 42, 70, 0.08);
+      --radius: 14px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.62;
+    }
+    a { color: #0868a8; text-underline-offset: 3px; }
+    a:hover { color: #064c7a; }
+    code, .math {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      background: var(--code);
+      border-radius: 5px;
+      padding: 0.12rem 0.32rem;
+      font-size: 0.92em;
+    }
+
+    .hero {
+      color: #fff;
+      background:
+        radial-gradient(circle at 88% 10%, rgba(30, 190, 170, 0.22), transparent 34%),
+        linear-gradient(135deg, #10243d 0%, #173a5e 64%, #0b6968 132%);
+      padding: 3.8rem 1.5rem 3.2rem;
+    }
+    .hero-inner { max-width: 1180px; margin: 0 auto; }
+    .eyebrow {
+      margin: 0 0 0.9rem;
+      color: #9fe0d6;
+      font-weight: 750;
+      font-size: 0.78rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      font-size: clamp(2.1rem, 5vw, 4.2rem);
+      line-height: 1.04;
+      letter-spacing: -0.045em;
+    }
+    .hero-copy {
+      max-width: 790px;
+      margin: 1.35rem 0 0;
+      color: #d7e3ef;
+      font-size: clamp(1.02rem, 2vw, 1.22rem);
+    }
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+      margin-top: 1.7rem;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.42rem;
+      padding: 0.38rem 0.72rem;
+      border: 1px solid rgba(255,255,255,0.24);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.08);
+      color: #f4f8fb;
+      font-size: 0.82rem;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-columns: minmax(210px, 260px) minmax(0, 1fr);
+      gap: 2rem;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem 5rem;
+    }
+    .toc {
+      position: sticky;
+      top: 1rem;
+      align-self: start;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      padding: 1.05rem;
+    }
+    .toc-title {
+      margin: 0 0 0.65rem;
+      color: var(--navy);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .toc ol { margin: 0; padding-left: 1.3rem; }
+    .toc li { margin: 0.34rem 0; color: var(--muted); font-size: 0.88rem; }
+    .toc a { color: inherit; text-decoration: none; }
+    .toc a:hover { color: var(--teal); text-decoration: underline; }
+    main { min-width: 0; }
+    section {
+      scroll-margin-top: 1rem;
+      margin-bottom: 1.6rem;
+      padding: clamp(1.25rem, 3vw, 2.2rem);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+    h2 {
+      margin: 0 0 1rem;
+      color: var(--navy);
+      font-size: clamp(1.45rem, 3vw, 2rem);
+      line-height: 1.2;
+      letter-spacing: -0.025em;
+    }
+    h3 { margin: 1.5rem 0 0.55rem; color: var(--navy-2); line-height: 1.3; }
+    h4 { margin: 1.2rem 0 0.4rem; color: var(--ink); }
+    p { margin: 0.65rem 0 1rem; }
+    ul, ol { padding-left: 1.35rem; }
+    li + li { margin-top: 0.38rem; }
+    .lead { color: #344054; font-size: 1.07rem; }
+
+    .rule {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      overflow: hidden;
+      margin: 1.25rem 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+    .rule > div { padding: 1.25rem; }
+    .rule .basic { background: var(--teal-soft); }
+    .rule .advanced { background: var(--blue-soft); border-left: 1px solid var(--line); }
+    .rule strong { display: block; margin-bottom: 0.3rem; color: var(--navy); font-size: 1.08rem; }
+
+    .callout {
+      margin: 1.1rem 0;
+      padding: 1rem 1.1rem;
+      border-left: 5px solid;
+      border-radius: 8px;
+    }
+    .callout strong { color: inherit; }
+    .callout.info { border-color: #1779ba; background: var(--blue-soft); color: #193e5a; }
+    .callout.good { border-color: var(--green); background: var(--green-soft); color: #1b563a; }
+    .callout.warn { border-color: #d58a16; background: var(--amber-soft); color: #714303; }
+    .callout.danger { border-color: var(--red); background: var(--red-soft); color: #772b26; }
+
+    .model-flow {
+      margin: 1.35rem 0;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f9fbfc;
+    }
+    .model-flow svg { display: block; width: 100%; height: auto; }
+    .caption { margin: 0.55rem 0 0; color: var(--muted); font-size: 0.86rem; }
+
+    .equations {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+      margin: 1.1rem 0;
+    }
+    .equation {
+      padding: 0.9rem;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fafcfe;
+      text-align: center;
+    }
+    .equation .math { display: block; margin-bottom: 0.35rem; background: transparent; font-size: 1rem; }
+    .equation small { color: var(--muted); }
+
+    .workflow { counter-reset: desk-step; padding: 0; list-style: none; }
+    .workflow > li {
+      counter-increment: desk-step;
+      position: relative;
+      margin: 0 0 0.85rem;
+      padding: 1rem 1rem 1rem 3.65rem;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fbfcfd;
+    }
+    .workflow > li::before {
+      content: counter(desk-step);
+      position: absolute;
+      top: 0.88rem;
+      left: 0.9rem;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      background: var(--navy);
+      color: #fff;
+      font-weight: 800;
+      line-height: 2rem;
+      text-align: center;
+    }
+    .workflow strong { color: var(--navy); }
+
+    .table-wrap { overflow-x: auto; margin: 1rem 0 1.25rem; }
+    table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 0.91rem; }
+    th, td { padding: 0.72rem 0.75rem; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: #fff; background: var(--navy); font-size: 0.8rem; letter-spacing: 0.02em; }
+    tbody tr:nth-child(even) { background: #f8fafc; }
+    td:first-child { font-weight: 720; color: var(--navy); }
+    .compact table { min-width: 620px; }
+    .tag {
+      display: inline-block;
+      white-space: nowrap;
+      padding: 0.12rem 0.43rem;
+      border-radius: 999px;
+      background: var(--code);
+      color: #344054;
+      font-size: 0.76rem;
+      font-weight: 750;
+    }
+    .tag.use { background: var(--green-soft); color: var(--green); }
+    .tag.caution { background: var(--amber-soft); color: var(--amber); }
+    .tag.avoid { background: var(--red-soft); color: var(--red); }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.9rem;
+      margin: 1rem 0;
+    }
+    .card { padding: 1rem; border: 1px solid var(--line); border-radius: 11px; background: #fbfcfd; }
+    .card h3 { margin-top: 0; font-size: 1.04rem; }
+    .card p:last-child { margin-bottom: 0; }
+
+    .decision {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 1rem;
+      align-items: center;
+      margin: 1rem 0;
+    }
+    .decision-box { height: 100%; padding: 1.1rem; border-radius: 11px; }
+    .decision-box.basic { border: 1px solid #8bcec4; background: var(--teal-soft); }
+    .decision-box.advanced { border: 1px solid #a8c9e8; background: var(--blue-soft); }
+    .decision-arrow { color: var(--muted); font-size: 1.5rem; }
+
+    .checklist { columns: 2; column-gap: 2rem; }
+    .checklist li { break-inside: avoid; margin-bottom: 0.45rem; }
+    .footer {
+      max-width: 1180px;
+      margin: 0 auto 3rem;
+      padding: 0 1.5rem;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+    .footer code { overflow-wrap: anywhere; }
+
+    @media (max-width: 940px) {
+      .shell { grid-template-columns: 1fr; }
+      .toc { position: static; }
+      .toc ol { columns: 2; }
+      .equations { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 650px) {
+      .hero { padding: 2.8rem 1rem 2.4rem; }
+      .shell { padding: 1rem 0.75rem 3rem; }
+      section { padding: 1.1rem; }
+      .toc ol { columns: 1; }
+      .rule, .cards, .decision { grid-template-columns: 1fr; }
+      .rule .advanced { border-left: 0; border-top: 1px solid var(--line); }
+      .decision-arrow { transform: rotate(90deg); justify-self: center; }
+      .checklist { columns: 1; }
+    }
+    @media print {
+      body { background: #fff; color: #000; font-size: 10pt; }
+      .hero { background: #fff; color: #000; padding: 0 0 1rem; }
+      .hero-copy, .eyebrow { color: #222; }
+      .hero-meta, .toc { display: none; }
+      .shell { display: block; max-width: none; padding: 0; }
+      section { box-shadow: none; break-inside: avoid; margin-bottom: 0.8rem; padding: 1rem; }
+      h2, h3, h4, td:first-child { color: #000; }
+      th { background: #ddd; color: #000; }
+      .footer { max-width: none; margin: 1rem 0 0; padding: 0; }
+      a { color: #000; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">TTF volatility calibration · desk operating guide</p>
+      <h1>Adjusting the volatility surface during the trading day</h1>
+      <p class="hero-copy">
+        A practical guide to deciding what to change in the <strong>Basic 11-node smile</strong>, what belongs in the
+        <strong>Advanced Wing-v2 tail model</strong>, and when the safest action is to leave the surface alone.
+      </p>
+      <div class="hero-meta" aria-label="Guide scope">
+        <span class="pill">Scope: TTF page</span>
+        <span class="pill">Model: PCHIP core + Wing-v2 tails</span>
+        <span class="pill">State: session and export only</span>
+        <span class="pill">Implementation reviewed: 6 Aug 2026</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <nav class="toc" aria-label="Contents">
+      <p class="toc-title">On this page</p>
+      <ol>
+        <li><a href="#golden-rule">The golden rule</a></li>
+        <li><a href="#model">How the model works</a></li>
+        <li><a href="#workflow">Intraday workflow</a></li>
+        <li><a href="#basic">Using the Basic table</a></li>
+        <li><a href="#advanced">Using the Advanced table</a></li>
+        <li><a href="#diagnostics">Diagnostics and gates</a></li>
+        <li><a href="#examples">Trading examples</a></li>
+        <li><a href="#drawbacks">Drawbacks and complexity</a></li>
+        <li><a href="#policy">Recommended desk policy</a></li>
+        <li><a href="#quick-check">Pre-export checklist</a></li>
+      </ol>
+    </nav>
+
+    <main>
+      <section id="golden-rule">
+        <h2>1. The golden rule</h2>
+        <p class="lead">
+          <strong>Use Basic to mark the market. Use Advanced only to control extrapolation.</strong>
+          A trade inside the quoted strike range is evidence about a node or a group of nodes—not a reason to reshape an unquoted tail.
+        </p>
+        <div class="rule">
+          <div class="basic">
+            <strong>Basic · 11-node smile editor</strong>
+            Changes the actual operational smile between the lowest and highest official strikes. This is the normal intraday tool.
+          </div>
+          <div class="advanced">
+            <strong>Advanced · Wing tail model</strong>
+            Changes only the unquoted low- and high-strike tails and their joins to the core. This is an expert/reviewer tool.
+          </div>
+        </div>
+        <div class="callout warn">
+          <strong>Do not fit every print.</strong> Check time, size, bid/ask, strategy context, option type, contract month, forward and stale-market risk. A single small trade can be a bad surface mark even when its implied volatility is mathematically valid.
+        </div>
+        <p>
+          ICE traded options are displayed as an independent diagnostic overlay from <code>gas_options_activity</code>. They are not automatic calibration targets. The official 11-node smile remains the starting surface; the trader decides whether a new trade contains enough information to change the session Final.
+        </p>
+      </section>
+
+      <section id="model">
+        <h2>2. How the operational model works</h2>
+        <p>
+          Each expiry is built in <strong>total variance versus log-moneyness</strong>. The page first converts the 11 governed call-delta observations into strikes and then into the coordinates below.
+        </p>
+        <div class="equations" aria-label="Core model equations">
+          <div class="equation"><span class="math">T = DTE / 365</span><small>time to expiry in years</small></div>
+          <div class="equation"><span class="math">x = ln(K / F)</span><small>log-moneyness</small></div>
+          <div class="equation"><span class="math">w(x) = T × σ(x)²</span><small>total variance</small></div>
+        </div>
+
+        <div class="model-flow">
+          <svg viewBox="0 0 980 292" role="img" aria-labelledby="flow-title flow-desc">
+            <title id="flow-title">PCHIP-core and Wing-tail hybrid</title>
+            <desc id="flow-desc">Official nodes define a PCHIP core, cubic Hermite regions blend it to Wing-v2 tails on both sides.</desc>
+            <defs>
+              <linearGradient id="coreFill" x1="0" x2="1"><stop offset="0" stop-color="#d9f2ed"/><stop offset="1" stop-color="#bce5dc"/></linearGradient>
+              <linearGradient id="blendFill" x1="0" x2="1"><stop offset="0" stop-color="#eaf2fb"/><stop offset="1" stop-color="#d5e7f8"/></linearGradient>
+            </defs>
+            <rect x="25" y="37" width="190" height="165" rx="14" fill="#eef2f6" stroke="#aebac7"/>
+            <rect x="215" y="37" width="120" height="165" fill="url(#blendFill)" stroke="#8bb2d5"/>
+            <rect x="335" y="37" width="310" height="165" fill="url(#coreFill)" stroke="#67ad9e"/>
+            <rect x="645" y="37" width="120" height="165" fill="url(#blendFill)" stroke="#8bb2d5"/>
+            <rect x="765" y="37" width="190" height="165" rx="14" fill="#eef2f6" stroke="#aebac7"/>
+            <path d="M45,147 C104,139 164,134 215,129 C254,126 295,122 335,118 C420,111 520,100 645,82 C690,76 729,68 765,61 C829,49 890,42 935,39" fill="none" stroke="#087f79" stroke-width="5" stroke-linecap="round"/>
+            <g fill="#132a46" stroke="#fff" stroke-width="2">
+              <circle cx="345" cy="117" r="6"/><circle cx="373" cy="114" r="6"/><circle cx="402" cy="111" r="6"/>
+              <circle cx="432" cy="108" r="6"/><circle cx="463" cy="104" r="6"/><circle cx="494" cy="101" r="6"/>
+              <circle cx="526" cy="97" r="6"/><circle cx="558" cy="93" r="6"/><circle cx="590" cy="89" r="6"/>
+              <circle cx="618" cy="85" r="6"/><circle cx="638" cy="82" r="6"/>
+            </g>
+            <text x="120" y="225" text-anchor="middle" font-size="16" font-weight="700" fill="#132a46">Wing-v2 put tail</text>
+            <text x="275" y="225" text-anchor="middle" font-size="15" font-weight="700" fill="#1c3e65">C1 blend</text>
+            <text x="490" y="225" text-anchor="middle" font-size="17" font-weight="800" fill="#065f5b">PCHIP core</text>
+            <text x="705" y="225" text-anchor="middle" font-size="15" font-weight="700" fill="#1c3e65">C1 blend</text>
+            <text x="860" y="225" text-anchor="middle" font-size="16" font-weight="700" fill="#132a46">Wing-v2 call tail</text>
+            <text x="490" y="261" text-anchor="middle" font-size="14" fill="#5f6b7a">lowest official strike ← quoted range → highest official strike</text>
+          </svg>
+          <p class="caption">Conceptual diagram, not a market curve. The 11 dots are reproduced exactly by the PCHIP core.</p>
+        </div>
+
+        <h3>The four layers</h3>
+        <ol>
+          <li><strong>Governed inputs.</strong> One expiry must contain the complete 11-node call-delta grid, one positive forward, positive DTE and homogeneous provenance. The Basis is either Observed or Extrapolated.</li>
+          <li><strong>Authoritative PCHIP core.</strong> A shape-preserving cubic interpolation is built through all 11 total-variance nodes. It is used exactly between the minimum and maximum official strikes.</li>
+          <li><strong>Wing-v2 tail fit.</strong> Wing-v2 is fitted to 201 samples of the PCHIP core. This gives a smooth, economically bounded base from which to extrapolate; it does <em>not</em> replace the core.</li>
+          <li><strong>C1 Hermite joins.</strong> Outside each core boundary, a cubic-Hermite blend connects PCHIP value and slope to Wing value and slope. Automatic calibration tries widths <code>0.10</code>, <code>0.15</code>, <code>0.20</code> and <code>0.30</code> in log-moneyness until the full surface passes.</li>
+        </ol>
+
+        <div class="callout info">
+          <strong>Two different meanings of “tail”.</strong> An <em>Extrapolated Basis</em> is a later expiry whose 11 input nodes come from the governed term-structure template. A <em>Wing tail</em> is the unquoted strike region outside the 11 nodes of any single expiry. They are not the same thing.
+        </div>
+
+        <h3>What Wing-v2 describes</h3>
+        <p>Inside its central regions, the Wing base is:</p>
+        <div class="equations">
+          <div class="equation"><span class="math">σ(x&lt;0) = vr + sr·x + pc·x²</span><small>lower-strike / put side</small></div>
+          <div class="equation"><span class="math">σ(x≥0) = vr + sr·x + cc·x²</span><small>higher-strike / call side</small></div>
+          <div class="equation"><span class="math">0 ≤ βput, βcall &lt; 2</span><small>Lee-compatible far-tail slopes</small></div>
+        </div>
+        <p>
+          The raw Wing model has six regions: deep put tail, put smoothing, central put, central call, call smoothing and deep call tail. Wing-v2 makes the deep tails C1-continuous and asymptotically linear in total variance. The database names <code>put_wing_power</code> and <code>call_wing_power</code> are legacy names; on the page they appear as <strong>PTVS</strong> and <strong>CTVS</strong>, and in Wing-v2 they are total-variance slopes—not power exponents.
+        </p>
+      </section>
+
+      <section id="workflow">
+        <h2>3. A disciplined intraday workflow</h2>
+        <ol class="workflow">
+          <li><strong>Lock the context.</strong> Confirm COB date, TTF expiry, forward, DTE and Basis. Do not compare a live trade with a stale-forward surface as if the difference were pure volatility.</li>
+          <li><strong>Establish a valid starting surface.</strong> Use Calibrate for one expiry or Calibrate All Expiries for the governed set. Confirm <em>Arb = Pass</em> before making a discretionary edit.</li>
+          <li><strong>Read the trade, not only the marker.</strong> Check timestamp, volume, price quality, strategy/leg context and whether the option belongs to the displayed expiry. Recompute the implied vol using the same forward and convention.</li>
+          <li><strong>Choose the right control.</strong> If the evidence is within the 11-node strike range, change Basic. If the issue exists only beyond the outer nodes, review Advanced.</li>
+          <li><strong>Make the smallest coherent change.</strong> Adjust one node only when the evidence is truly local. Otherwise move adjacent nodes to express level, skew or curvature without creating a saw-tooth smile.</li>
+          <li><strong>Let the gate decide feasibility.</strong> Every Basic or Advanced Final rebuild is checked across the full hybrid. If rejected, reduce or broaden the change; do not defeat the gate.</li>
+          <li><strong>Review in three coordinates.</strong> Check Delta for trader intuition, log-moneyness for model geometry and moneyness/strike for economic placement. Inspect neighboring expiries as a separate calendar sanity check.</li>
+          <li><strong>Export before handover.</strong> The TTF hybrid is session-only and is not saved to the ordinary Wing parameter store. Export is the handover/audit artifact until a governed publication path exists.</li>
+        </ol>
+
+        <div class="callout danger">
+          <strong>Forward consistency is non-negotiable.</strong> Delta, strike and implied volatility move together. If the intraday trade was interpreted with a different forward from the page, apparent skew changes can be coordinate changes rather than new volatility information.
+        </div>
+      </section>
+
+      <section id="basic">
+        <h2>4. Using the Basic 11-node smile editor</h2>
+        <p class="lead">
+          The Basic table is the trader’s mark sheet. <strong>Settlement IV (%)</strong> is the immutable reference loaded for the selected COB; <strong>Final IV (%)</strong> is the editable in-session mark.
+        </p>
+
+        <div class="table-wrap compact">
+          <table>
+            <thead><tr><th>Column</th><th>Meaning</th><th>How to use it</th></tr></thead>
+            <tbody>
+              <tr><td>Call Delta</td><td>The governed raw call delta, from 0.01 to 0.99.</td><td>Use it to identify the quoted node. A lower call delta is a higher-strike call-wing node; a higher call delta is a lower-strike put-wing node.</td></tr>
+              <tr><td>Strike</td><td>The strike implied by the node’s delta, IV, DTE and forward under the governed convention.</td><td>Match trade economics here. It is read-only because the grid is governed by delta.</td></tr>
+              <tr><td>Settlement IV (%)</td><td>The original official/reference node for the selected COB.</td><td>Use as the audit baseline. It is not overwritten by a session edit.</td></tr>
+              <tr><td>Final IV (%)</td><td>The operational node used to rebuild the session PCHIP core.</td><td>Enter volatility in percentage points: <code>74.25</code> means 74.25%, not 0.7425%.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>How the node grid maps to trader language</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Raw Call Delta</th><th>Economic region</th><th>Typical information</th><th>Editing guidance</th></tr></thead>
+            <tbody>
+              <tr><td>0.01 / 0.10</td><td>Far / outer high-strike call wing</td><td>Price-spike insurance, thin liquidity, large inversion sensitivity.</td><td>Require strong evidence. Prefer a coherent move across 1D–10D rather than chasing one extreme print.</td></tr>
+              <tr><td>0.20 / 0.30</td><td>Liquid call-side shoulder</td><td>Call skew and convexity.</td><td>A good place to express a call-skew repricing; check 10D and 40D for continuity.</td></tr>
+              <tr><td>0.40 / 0.50 / 0.60</td><td>Core / near ATM</td><td>Level, local skew and the highest-vega information.</td><td>Use multiple nearby nodes for a broad level move; use asymmetric changes for skew only when supported.</td></tr>
+              <tr><td>0.70 / 0.80</td><td>Put-side shoulder</td><td>Downside skew and curvature.</td><td>Check consistency with adjacent puts and with the forward used to invert the trade.</td></tr>
+              <tr><td>0.90 / 0.99</td><td>Outer / far low-strike put wing</td><td>Tail insurance, often sparse or stale.</td><td>Use small moves and demand robust price evidence; these nodes strongly influence the core-boundary derivative.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout info">
+          <strong>Delta chart convention.</strong> The Basic table shows raw <em>Call Delta</em>. The chart’s Delta view uses a trader-style put-to-ATM-to-call coordinate: roughly 0.10 = 10Δ put, 0.50 = ATM and 0.90 = 10Δ call. Therefore a 0.10 raw Call Delta node appears near 0.90 on that chart.
+        </div>
+
+        <h3>What happens after an edit</h3>
+        <ol>
+          <li>The entered Final IV is converted back to decimal IV and total variance.</li>
+          <li>The PCHIP core is rebuilt through all 11 Final nodes.</li>
+          <li>The Wing tail is refitted from the current row as its starting geometry.</li>
+          <li>The complete PCHIP/blend/Wing hybrid is validated.</li>
+          <li>If valid, the session Final and chart update. If invalid, the edit is blocked and the accepted rows are restored.</li>
+        </ol>
+        <p>
+          The PCHIP core passes exactly through the edited nodes. This is useful because the desk mark is preserved; it is also dangerous because the model does not average away a poor mark. PCHIP is shape-preserving, not a noise filter and not an automatic arbitrage projection.
+        </p>
+      </section>
+
+      <section id="advanced">
+        <h2>5. Using the Advanced Wing tail table</h2>
+        <p class="lead">
+          Advanced fields describe the internal Wing approximation, the unquoted tails and the joins. They do <strong>not</strong> alter the authoritative PCHIP core inside the official strike range.
+        </p>
+
+        <div class="decision">
+          <div class="decision-box basic"><strong>Trade is inside quoted range?</strong><br>Adjust Basic nodes.</div>
+          <div class="decision-arrow" aria-hidden="true">→</div>
+          <div class="decision-box advanced"><strong>Problem exists only outside quoted range?</strong><br>Consider Advanced tail controls.</div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Field</th><th>Role in Wing-v2</th><th>Effect of increasing it</th><th>Desk guidance</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Basis</td><td>Immutable input provenance: Observed or Extrapolated.</td><td>No numeric effect.</td><td><span class="tag">Read only</span> Never relabel an extrapolated expiry as observed.</td></tr>
+              <tr><td>vr</td><td>Wing reference volatility at <code>x=0</code>.</td><td>Raises the raw Wing base broadly.</td><td><span class="tag caution">Coupled</span> Operational impact is in joins/tails only. Use Basic near 50D to change the actual core level.</td></tr>
+              <tr><td>sr</td><td>Wing slope at <code>x=0</code>.</td><td>Raises the high-strike side and lowers the low-strike side of the raw Wing base.</td><td><span class="tag caution">Coupled</span> Use Basic shoulder nodes for market skew. Adjust here only to repair tail geometry.</td></tr>
+              <tr><td>pc</td><td>Quadratic curvature for <code>x&lt;0</code>, the lower-strike/put side.</td><td>Bends that side upward faster away from ATM.</td><td><span class="tag caution">Coupled</span> Strong interaction with <code>dc</code>, <code>dsm</code> and PTVS.</td></tr>
+              <tr><td>cc</td><td>Quadratic curvature for <code>x≥0</code>, the higher-strike/call side.</td><td>Bends that side upward faster away from ATM.</td><td><span class="tag caution">Coupled</span> Strong interaction with <code>uc</code>, <code>usm</code> and CTVS.</td></tr>
+              <tr><td>dc</td><td>Negative log-moneyness cutoff where the central put section ends.</td><td>Because it is negative, moving it upward (less negative) brings the put transition closer to ATM.</td><td><span class="tag caution">Expert</span> Moving it more negative pushes the tail onset farther out.</td></tr>
+              <tr><td>uc</td><td>Positive log-moneyness cutoff where the central call section ends.</td><td>Moves the call transition farther from ATM.</td><td><span class="tag caution">Expert</span> Reducing it brings tail behavior closer to the quoted boundary.</td></tr>
+              <tr><td>dsm</td><td>Multiplier controlling the raw Wing put smoothing zone, from <code>dc×(1+dsm)</code> to <code>dc</code>.</td><td>Widens the internal put smoothing zone.</td><td><span class="tag avoid">Usually freeze</span> This is not the same as Left Blend.</td></tr>
+              <tr><td>usm</td><td>Multiplier controlling the raw Wing call smoothing zone, from <code>uc</code> to <code>uc×(1+usm)</code>.</td><td>Widens the internal call smoothing zone.</td><td><span class="tag avoid">Usually freeze</span> This is not the same as Right Blend.</td></tr>
+              <tr><td>VCR</td><td>Potential ATM-vol response to a move from reference forward to current forward.</td><td>Changes the direction/magnitude of that dynamic response.</td><td><span class="tag avoid">Inactive here</span> The current static page supplies no separate reference forward, so <code>Fref = Fcurrent</code> and this has no same-snapshot effect.</td></tr>
+              <tr><td>SCR</td><td>Potential Wing-skew response to a forward move.</td><td>Changes the direction/magnitude of dynamic skew response.</td><td><span class="tag avoid">Inactive here</span> Same reason as VCR.</td></tr>
+              <tr><td>SSR</td><td>Swimmingness between sticky strike (<code>0</code>) and sticky delta (<code>1</code>).</td><td>Makes the smile move more with the current forward in a dynamic evaluation.</td><td><span class="tag avoid">Inactive here</span> It needs distinct reference and current forwards to matter.</td></tr>
+              <tr><td>PTVS</td><td>Far put-wing asymptotic total-variance slope <code>βput</code>.</td><td>Makes far low-strike total variance grow faster. Zero is a flat asymptotic tail.</td><td><span class="tag use">Useful tail control</span> Keep in <code>[0,2)</code>; governed UI bounds are tighter.</td></tr>
+              <tr><td>CTVS</td><td>Far call-wing asymptotic total-variance slope <code>βcall</code>.</td><td>Makes far high-strike total variance grow faster. Zero is a flat asymptotic tail.</td><td><span class="tag use">Useful tail control</span> This is the main extreme call-tail slope control.</td></tr>
+              <tr><td>Left Blend</td><td>External C1 transition width from the lowest core strike to the Wing put tail.</td><td>Creates a wider, gentler transition and delays pure Wing behavior.</td><td><span class="tag use">Useful join control</span> Auto-calibration tests 0.10, 0.15, 0.20 and 0.30.</td></tr>
+              <tr><td>Right Blend</td><td>External C1 transition width from the highest core strike to the Wing call tail.</td><td>Creates a wider, gentler transition and delays pure Wing behavior.</td><td><span class="tag use">Useful join control</span> Too narrow can create a kink or fail the butterfly margin.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout warn">
+          <strong>Automatic versus manual freedom.</strong> Automatic TTF fitting moves <code>vr</code>, <code>sr</code>, <code>pc</code>, <code>cc</code>, <code>dc</code>, <code>uc</code>, PTVS and CTVS. It carries <code>dsm</code>, <code>usm</code>, VCR, SCR and SSR from the starting row. The table permits manual edits to more fields than a normal trader should need.
+        </div>
+
+        <h3>Calibrate, Copy Candidate and Reset</h3>
+        <ul>
+          <li><strong>Calibrate</strong> fits a candidate for the selected expiry and opens the Current / Candidate / Final comparison.</li>
+          <li><strong>Copy Candidate to Final</strong> copies the fitted tail parameters into the in-session Final, subject to the complete hybrid validation.</li>
+          <li><strong>Reset Final to Current</strong> abandons the proposed tail change and restores the row that was Current when the comparison opened.</li>
+          <li><strong>Manual Final edits</strong> in the comparison table rebuild and validate the complete hybrid immediately.</li>
+          <li><strong>Database persistence is blocked.</strong> The TTF Save Final handler refuses hybrid publication and Save All is disabled. Copying to Final is session state, not a database write.</li>
+        </ul>
+
+        <h3>What Calibrate All Expiries does</h3>
+        <p>
+          Observed expiries are fitted from their own editable rows. Extrapolated expiries are processed chronologically: the first one starts from the latest accepted earlier fit, and each later one starts from the last successful result. The extrapolated fit uses three deterministic starts and retries with nine only when the first run produces no accepted candidate. An isolated failure leaves that row unchanged and the chain continues from the last accepted seed. “Skip good fits” applies only to Observed rows.
+        </p>
+      </section>
+
+      <section id="diagnostics">
+        <h2>6. Reading diagnostics and validation gates</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Display</th><th>What it really measures</th><th>What it does not prove</th></tr></thead>
+            <tbody>
+              <tr><td>Core TV RMSE</td><td>Total-variance error of the operational PCHIP core against its own 11 nodes. For an unchanged valid core it is numerically zero by construction.</td><td>It does not prove the input nodes are tradable, current or economically correct.</td></tr>
+              <tr><td>Wing Tail TV RMSE</td><td>Total-variance RMSE of the internal Wing approximation against 201 PCHIP samples over the core range.</td><td>It is not the operational core fit—the PCHIP remains authoritative there—and it is not directly a quoted-vol error.</td></tr>
+              <tr><td>IV Diagnostic</td><td>The Wing approximation error translated into implied-volatility terms.</td><td>It is a secondary diagnostic, not the primary optimization target or a market-quality score.</td></tr>
+              <tr><td>Arb = Pass</td><td>The full hybrid passed finite positive variance, Lee-compatible slopes, decreasing and convex Black call prices, and the <code>g ≥ 0.006</code> butterfly margin on 4,001 points.</td><td>It does not check calendar arbitrage between expiries, liquidity, bid/ask or whether a discretionary mark is defensible.</td></tr>
+              <tr><td>Observed / Extrapolated Basis</td><td>Provenance of the 11 input nodes for that expiry.</td><td>It does not describe whether a plotted strike is inside or outside the core; that is the core/blend/tail classification.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>
+          Validation covers at least <code>min(-0.50, xmin−0.30)</code> to <code>max(0.50, xmax+0.30)</code> in log-moneyness. A rejected edit is not necessarily “wrong” as a market view; it means the proposed nodes and chosen tail geometry cannot produce an accepted static cross-strike surface under the current gate.
+        </p>
+        <div class="callout good">
+          <strong>Interpret zero correctly.</strong> Core TV RMSE of zero means “the PCHIP reproduces the entered nodes exactly.” It does not mean “the surface has zero uncertainty.”
+        </div>
+      </section>
+
+      <section id="examples">
+        <h2>7. Common intraday situations</h2>
+        <div class="cards">
+          <article class="card">
+            <h3>A liquid ATM strip reprices higher</h3>
+            <p><strong>Action:</strong> raise the 40D, 50D and 60D Final IV nodes coherently; include 30D/70D if the repricing is broad.</p>
+            <p><strong>Avoid:</strong> raising <code>vr</code> in Advanced. That changes only the Wing approximation/tails, not the operational PCHIP core.</p>
+          </article>
+          <article class="card">
+            <h3>Calls richen versus puts</h3>
+            <p><strong>Action:</strong> adjust the relevant low raw-call-delta nodes—typically 10D, 20D and 30D call—while preserving a smooth progression into ATM.</p>
+            <p><strong>Check:</strong> remember these appear on the right-hand side of the chart’s trader Delta axis.</p>
+          </article>
+          <article class="card">
+            <h3>One small 1D call trades at an extreme IV</h3>
+            <p><strong>Action:</strong> treat it as diagnostic until size, bid/ask, time and inversion inputs are verified. Consider no change or a small 1D/10D paired move.</p>
+            <p><strong>Avoid:</strong> forcing CTVS to match a noisy print; the print is still inside the core if it is one of the governed nodes.</p>
+          </article>
+          <article class="card">
+            <h3>The core is right but the far call tail turns oddly</h3>
+            <p><strong>Action:</strong> inspect Right Blend and CTVS. A wider blend can soften the join; CTVS controls asymptotic total-variance growth.</p>
+            <p><strong>Check:</strong> review log-moneyness and keep the complete arbitrage gate. Do not alter Basic nodes merely to repair an unquoted tail.</p>
+          </article>
+          <article class="card">
+            <h3>A trade is between two official nodes</h3>
+            <p><strong>Action:</strong> infer the smallest adjacent-node changes that make the PCHIP pass reasonably through the trade while respecting its bid/ask.</p>
+            <p><strong>Avoid:</strong> inserting a twelfth node ad hoc; the governed editor requires the complete fixed 11-node grid.</p>
+          </article>
+          <article class="card">
+            <h3>A later extrapolated expiry trades</h3>
+            <p><strong>Action:</strong> verify contract and forward, then use the trade as evidence to replace or reshape its Extrapolated Basis Final nodes in session.</p>
+            <p><strong>Keep visible:</strong> provenance remains Extrapolated until a governed observed-source process changes it.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="drawbacks">
+        <h2>8. Drawbacks and where the implementation is overcomplicated</h2>
+        <ol>
+          <li><strong>Too many raw controls for a tail-only job.</strong> The Advanced table exposes 13 Wing parameters plus two blend widths. Because the PCHIP core is authoritative, most traders need only tail slope, tail onset and blend width on each side.</li>
+          <li><strong>Several parameters are weakly identified.</strong> Different combinations of <code>vr/sr/pc/cc/dc/uc</code> can approximate the same core yet produce different unquoted tails. A low tail-fit RMSE does not make the parameters unique.</li>
+          <li><strong>There are two smoothing systems.</strong> <code>dsm/usm</code> smooth internal Wing regions; Left/Right Blend joins PCHIP to Wing. Both are mathematically legitimate, but exposing both encourages accidental double-tuning.</li>
+          <li><strong>VCR, SCR and SSR add no same-snapshot value here.</strong> They matter only when the model is evaluated with a current forward different from a reference forward. The current static TTF page defaults the reference to the same forward, neutralizing them.</li>
+          <li><strong>Exact interpolation preserves noise.</strong> PCHIP exactly respects all 11 edits. This is transparent and controllable, but one poor node becomes part of the operational core instead of being smoothed away.</li>
+          <li><strong>Static arbitrage is not calendar arbitrage.</strong> Each expiry is checked across strike. The page does not enforce total-variance ordering, forward consistency or smoothness across maturities.</li>
+          <li><strong>Delta grids move with market inputs.</strong> A node is governed by delta, while traders often discuss a fixed strike. When the forward moves, comparing the same delta can compare different economic strikes.</li>
+          <li><strong>Far tails have limited observability.</strong> Wing-v2 gives disciplined extrapolation and Lee-compatible slopes, but beyond the quoted strikes the answer remains a model judgment.</li>
+          <li><strong>Session-only state limits auditability.</strong> The hybrid is deliberately blocked from ordinary database saving. A refresh/process restart or handover should never be assumed to preserve an unexported surface.</li>
+        </ol>
+
+        <div class="callout warn">
+          <strong>Recommended simplification.</strong> Keep the complete Wing-v2 engine underneath, but present a trader Advanced view with only six governed controls: left/right tail onset, left/right total-variance slope, and left/right blend width. Freeze <code>dsm/usm</code>, VCR, SCR and SSR; keep <code>vr/sr/pc/cc</code> optimizer-managed. The full raw table can remain in an expert/audit view.
+        </div>
+      </section>
+
+      <section id="policy">
+        <h2>9. Recommended desk operating policy</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>User / event</th><th>Permitted action</th><th>Required review</th></tr></thead>
+            <tbody>
+              <tr><td>Trader · normal intraday mark</td><td>Basic Final IV nodes only; small coherent changes backed by observable market evidence.</td><td>Arb Pass, chart in three axes, forward consistency and neighboring-expiry sanity.</td></tr>
+              <tr><td>Senior trader / vol owner · tail issue</td><td>PTVS/CTVS and Left/Right Blend; cutoff changes only when the tail onset is demonstrably wrong.</td><td>Compare Current/Candidate/Final, inspect join annotations and document rationale.</td></tr>
+              <tr><td>Quant / model owner</td><td>Full Advanced parameter review, bounds, optimizer behavior and validation policy.</td><td>Regression tests and cross-expiry/calendar diagnostics outside the page.</td></tr>
+              <tr><td>Handover / end of day</td><td>Export Parameters, Operational Surface, Market Data, Traded Options and Summary.</td><td>Reconcile Basis/source, accepted Final nodes, Arb status and any failed expiries.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Governance principles</h3>
+        <ul>
+          <li>Preserve Settlement and source provenance; only Final is discretionary.</li>
+          <li>Never turn an ICE diagnostic marker into an automatic target without trade-quality controls.</li>
+          <li>Never use Advanced to disguise an incorrect Basic node.</li>
+          <li>Never accept “Arb Pass” as sufficient evidence that a surface is a fair market mark.</li>
+          <li>Record why a node moved, which trade/quote supported it, the forward used and who reviewed it.</li>
+        </ul>
+      </section>
+
+      <section id="quick-check">
+        <h2>10. Pre-export and handover checklist</h2>
+        <ul class="checklist">
+          <li>Correct COB, expiry, forward and DTE</li>
+          <li>Observed/Extrapolated Basis understood</li>
+          <li>Trade time, volume and bid/ask checked</li>
+          <li>Trade implied vol uses the page forward/convention</li>
+          <li>Basic changes are coherent across adjacent nodes</li>
+          <li>No Advanced change used to repair a core mark</li>
+          <li>Core TV RMSE interpreted as an exact-fit metric</li>
+          <li>Wing Tail TV RMSE treated as diagnostic only</li>
+          <li>Arb = Pass on the final hybrid</li>
+          <li>Delta, moneyness and log-moneyness views reviewed</li>
+          <li>Neighboring expiries checked manually</li>
+          <li>ICE markers treated as diagnostic evidence</li>
+          <li>Export created before closing/handover</li>
+          <li>No assumption of database persistence</li>
+        </ul>
+        <div class="callout good">
+          <strong>Desk summary:</strong> change the 11 nodes when your view of the quoted smile changes; change Wing tail controls only when your view of unquoted extrapolation changes. Keep the edit small, preserve provenance, and let the full arbitrage gate reject impossible geometry.
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer">
+    <p>
+      Implementation references: <code>vol_calibration/pages/ttf.py</code>,
+      <code>vol_calibration/ttf_hybrid_surface.py</code>,
+      <code>vol_calibration/components/parameter_table.py</code> and
+      <code>options/calibration_engine/models/wing_model.py</code>.
+      This guide explains the reviewed implementation as of 6 Aug 2026; it is an operating aid, not a replacement for desk limits, model governance or independent price verification.
+    </p>
+  </footer>
+</body>
+</html>

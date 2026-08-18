@@ -7,6 +7,7 @@ from vol_calibration.auth import (
     Permission,
     Role,
     authorize,
+    resolve_request_identity,
     resolve_trusted_proxy_identity,
 )
 
@@ -79,7 +80,7 @@ def test_unknown_proxy_roles_fail_closed():
         "OPTIONS_TRUSTED_PROXY_AUTH_ENABLED": "true",
         "OPTIONS_TRUSTED_PROXY_SHARED_SECRET": "expected-secret",
     }
-    with pytest.raises(AuthenticationError, match="Unsupported proxy role"):
+    with pytest.raises(AuthenticationError, match="Unsupported authorization role"):
         resolve_trusted_proxy_identity(
             {
                 "X-Options-Proxy-Secret": "expected-secret",
@@ -87,4 +88,51 @@ def test_unknown_proxy_roles_fail_closed():
                 "X-Forwarded-Roles": "administrator",
             },
             environ=environment,
+        )
+
+
+def test_local_loopback_identity_is_server_configured_and_fail_closed():
+    environment = {
+        "OPTIONS_AUTH_MODE": "local_loopback",
+        "OPTIONS_LOCAL_AUTH_USER": "trader@example.com",
+        "OPTIONS_LOCAL_AUTH_ROLES": "calibrator,publisher",
+    }
+    identity = resolve_request_identity(
+        {}, remote_addr="127.0.0.1", environ=environment
+    )
+
+    assert identity.subject == "trader@example.com"
+    assert identity.roles == frozenset({Role.CALIBRATOR, Role.PUBLISHER})
+    assert identity.auth_source == "local_loopback"
+    authorize(
+        identity,
+        Permission.PUBLISH,
+        resource_creator="trader@example.com",
+    )
+
+    with pytest.raises(AuthenticationError, match="loopback request"):
+        resolve_request_identity(
+            {}, remote_addr="10.0.0.10", environ=environment
+        )
+    with pytest.raises(AuthenticationError, match="rejects forwarded"):
+        resolve_request_identity(
+            {"X-Forwarded-For": "127.0.0.1"},
+            remote_addr="127.0.0.1",
+            environ=environment,
+        )
+
+
+def test_publisher_does_not_bypass_self_approval_policy():
+    identity = Identity(
+        subject="trader@example.com",
+        roles=frozenset({Role.CALIBRATOR, Role.PUBLISHER, Role.APPROVER}),
+        authenticated=True,
+        auth_source="local_loopback",
+    )
+
+    with pytest.raises(AuthorizationError, match="their own run"):
+        authorize(
+            identity,
+            Permission.APPROVE,
+            resource_creator="trader@example.com",
         )

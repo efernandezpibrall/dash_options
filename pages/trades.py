@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 
 ERROR_STYLE_HIDDEN = {"display": "none"}
 ERROR_STYLE_VISIBLE = {"display": "block"}
+TRADES_STRATEGY_DROPDOWN_LABELS = {
+    "select_all": "Select all",
+    "deselect_all": "Clear all",
+    "selected_count": "{num_selected} strategies selected",
+    "search": "Search strategies",
+    "clear_search": "Clear strategy search",
+    "clear_selection": "Clear strategy selection",
+    "no_options_found": "No strategies found",
+}
 
 DATE_FIELDS = {
     "cob_date",
@@ -506,43 +515,85 @@ def _build_filter_bar():
         [
             html.Div(
                 [
-                    html.Label("COB", htmlFor="trades-date-dropdown", className="filter-group-header"),
-                    dcc.Dropdown(
-                        id="trades-date-dropdown",
-                        options=[],
-                        value=None,
-                        clearable=False,
-                        className="trades-filter-dropdown trades-date-dropdown",
+                    html.Div(
+                        [
+                            html.Label(
+                                "COB Date",
+                                htmlFor="trades-date-dropdown",
+                                className="inline-filter-label",
+                            ),
+                            dcc.Dropdown(
+                                id="trades-date-dropdown",
+                                options=[],
+                                value=None,
+                                clearable=False,
+                                className=(
+                                    "inline-dropdown-date trades-filter-dropdown "
+                                    "trades-date-dropdown"
+                                ),
+                            ),
+                        ],
+                        className=(
+                            "greeks-monitor-control-group greeks-control-date "
+                            "trades-control-date"
+                        ),
+                    ),
+                    html.Div(
+                        [
+                            html.Label(
+                                "Strategies",
+                                htmlFor="trades-strategy-dropdown",
+                                className="inline-filter-label",
+                            ),
+                            dcc.Dropdown(
+                                id="trades-strategy-dropdown",
+                                options=[],
+                                value=[],
+                                multi=True,
+                                closeOnSelect=False,
+                                debounce=True,
+                                optionHeight=40,
+                                maxHeight=360,
+                                labels=TRADES_STRATEGY_DROPDOWN_LABELS,
+                                placeholder="All active substrategies",
+                                className=(
+                                    "greeks-inline-dropdown-multi "
+                                    "greeks-compact-multi-dropdown "
+                                    "greeks-strategy-dropdown "
+                                    "trades-filter-dropdown trades-strategy-dropdown "
+                                    "trades-greeks-strategy-dropdown"
+                                ),
+                            ),
+                        ],
+                        className=(
+                            "greeks-monitor-control-group greeks-control-strategies "
+                            "trades-control-strategies"
+                        ),
+                    ),
+                    html.Div(
+                        [
+                            dcc.Store(id="trades-source-status-mount", data=True),
+                            html.Div(
+                                id="trades-dashboard-source-status-inline",
+                                className="greeks-source-status-inline-host",
+                            ),
+                        ],
+                        className=(
+                            "greeks-inline-source-status "
+                            "trades-inline-source-status"
+                        ),
                     ),
                 ],
-                className="filter-group trades-sticky-filter-group trades-date-filter-group",
-            ),
-            html.Div(
-                [
-                    html.Label(
-                        "Substrategies",
-                        htmlFor="trades-strategy-dropdown",
-                        className="filter-group-header",
-                    ),
-                    dcc.Dropdown(
-                        id="trades-strategy-dropdown",
-                        options=[],
-                        value=[],
-                        multi=True,
-                        placeholder="All active substrategies",
-                        className="trades-filter-dropdown trades-strategy-dropdown",
-                    ),
-                ],
-                className="filter-group trades-sticky-filter-group trades-strategy-filter-group",
-            ),
-            html.Button(
-                "Export",
-                id="export-trades-table-btn",
-                className="custom-export-btn trades-export-button",
-                title="Export the grid's current filtered and sorted rows",
+                className=(
+                    "greeks-monitor-control-row greeks-monitor-selector-row "
+                    "trades-monitor-selector-row"
+                ),
             ),
         ],
-        className="professional-section-header trades-sticky-filter-bar",
+        className=(
+            "professional-section-header greeks-sticky-filter-bar "
+            "greeks-monitor-controls trades-monitor-controls"
+        ),
     )
 
 
@@ -552,16 +603,9 @@ layout = html.Main(
         dcc.Store(id="trades-date-state", storage_type="memory"),
         dcc.Store(id="trades-strategy-state", storage_type="memory"),
         dcc.Store(id="trades-snapshot-meta", storage_type="memory"),
-        html.Header(
-            [
-                html.H1("Trade ledger", className="trades-page-title"),
-                html.P(
-                    "Every active option trade leg with its booked economics and "
-                    "published valuation and Greeks for the selected COB.",
-                    className="trades-page-subtitle",
-                ),
-            ],
-            className="trades-page-header",
+        html.H1(
+            "Trade ledger",
+            className="trades-visually-hidden-heading",
         ),
         _build_filter_bar(),
         html.Div(
@@ -581,16 +625,37 @@ layout = html.Main(
             [
                 html.Div(
                     [
-                        html.H2(
-                            "Active trade legs",
-                            id="trades-active-ledger-heading",
-                            className="trades-section-title",
+                        html.Div(
+                            [
+                                html.H2(
+                                    "Active trade legs",
+                                    id="trades-active-ledger-heading",
+                                    className="trades-section-title",
+                                ),
+                            ],
+                            className="trades-section-title-row",
                         ),
                         html.Div(
-                            id="trades-export-status",
-                            className="trades-export-status",
-                            role="status",
-                            **{"aria-live": "polite"},
+                            [
+                                html.Div(
+                                    id="trades-export-status",
+                                    className="trades-export-status",
+                                    role="status",
+                                    **{"aria-live": "polite"},
+                                ),
+                                html.Button(
+                                    "Export",
+                                    id="export-trades-table-btn",
+                                    className=(
+                                        "custom-export-btn trades-export-button"
+                                    ),
+                                    title=(
+                                        "Export the grid's current filtered and "
+                                        "sorted rows"
+                                    ),
+                                ),
+                            ],
+                            className="trades-section-actions",
                         ),
                     ],
                     className="trades-section-header",

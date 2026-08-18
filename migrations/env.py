@@ -15,6 +15,7 @@ if alembic_config.config_file_name is not None:
     fileConfig(alembic_config.config_file_name)
 
 target_metadata = None
+VERSION_TABLE_SCHEMA = "at_lng"
 
 
 def _database_url() -> str:
@@ -34,6 +35,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=True,
+        version_table_schema=VERSION_TABLE_SCHEMA,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -52,6 +54,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_schemas=True,
+            version_table_schema=VERSION_TABLE_SCHEMA,
         )
         with context.begin_transaction():
             context.run_migrations()

@@ -34,7 +34,22 @@ def _uuid_column(name, *, primary_key=False, nullable=False):
 
 
 def upgrade() -> None:
-    op.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+    # PostgreSQL checks CREATE SCHEMA privilege even when IF NOT EXISTS finds
+    # the configured schema.  Avoid requiring database-level CREATE from the
+    # normal application role when ``at_lng`` is already provisioned.
+    op.execute(
+        f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_namespace WHERE nspname = '{SCHEMA}'
+            ) THEN
+                EXECUTE 'CREATE SCHEMA {SCHEMA}';
+            END IF;
+        END;
+        $$;
+        """
+    )
 
     op.create_table(
         "vol_calibration_runs",

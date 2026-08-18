@@ -11,7 +11,11 @@ from typing import Dict, List, Optional
 from vol_calibration.feature_flags import writes_enabled
 
 
-def create_batch_calibration_confirm_modal(commodity: str) -> dbc.Modal:
+def create_batch_calibration_confirm_modal(
+    commodity: str,
+    *,
+    hybrid: bool = False,
+) -> dbc.Modal:
     """
     Create confirmation modal for batch calibration.
 
@@ -55,7 +59,7 @@ def create_batch_calibration_confirm_modal(commodity: str) -> dbc.Modal:
                             {
                                 "label": " Auto-save calibrated parameters to database",
                                 "value": "auto_save",
-                                "disabled": not writes_enabled(),
+                                "disabled": hybrid or not writes_enabled(),
                             }
                         ],
                         value=[],
@@ -65,7 +69,14 @@ def create_batch_calibration_confirm_modal(commodity: str) -> dbc.Modal:
                     dbc.Checklist(
                         id=f"{prefix}-batch-skip-good-fit",
                         options=[
-                            {"label": " Skip expiries with RMSE < 1% (already well-calibrated)", "value": "skip_good"}
+                            {
+                                "label": (
+                                    " Skip already-valid observed hybrids"
+                                    if hybrid
+                                    else " Skip expiries with RMSE < 1% (already well-calibrated)"
+                                ),
+                                "value": "skip_good",
+                            }
                         ],
                         value=[],
                         className="mb-2",
@@ -188,6 +199,19 @@ def create_batch_results_table(results: List[Dict]) -> dash_table.DataTable:
         {'id': 'new_rmse', 'name': 'New RMSE'},
         {'id': 'improvement', 'name': 'Improvement'},
     ]
+    if any(row.get('basis') for row in results):
+        columns.insert(1, {'id': 'basis', 'name': 'Basis'})
+    hybrid_columns = [
+        ('core_tv_rmse', 'Core TV RMSE'),
+        ('tail_fit_tv_rmse', 'Wing Tail TV RMSE'),
+        ('iv_rmse', 'IV Diagnostic'),
+        ('blend_width', 'Blend Width'),
+        ('min_g', 'Min g'),
+        ('method', 'Method'),
+    ]
+    for column_id, label in hybrid_columns:
+        if any(column_id in row for row in results):
+            columns.append({'id': column_id, 'name': label})
 
     return dash_table.DataTable(
         columns=columns,
@@ -229,6 +253,7 @@ def format_batch_result_row(
     status: str,
     old_rmse: Optional[float] = None,
     new_rmse: Optional[float] = None,
+    basis: Optional[str] = None,
 ) -> Dict:
     """
     Format a single batch calibration result.
@@ -256,6 +281,8 @@ def format_batch_result_row(
         'new_rmse': f"{new_rmse*100:.2f}%" if new_rmse is not None else "-",
         'improvement': "-",
     }
+    if basis:
+        row['basis'] = str(basis).strip().title()
 
     if old_rmse is not None and new_rmse is not None and old_rmse > 0:
         improvement = (old_rmse - new_rmse) / old_rmse * 100
@@ -282,6 +309,33 @@ def create_batch_summary(results: List[Dict]) -> html.Div:
     success = sum(1 for r in results if r['status'] == 'Success')
     skipped = sum(1 for r in results if r['status'] == 'Skipped')
     failed = sum(1 for r in results if r['status'] == 'Failed')
+    observed = sum(
+        1 for row in results if str(row.get('basis', '')).lower() == 'observed'
+    )
+    extrapolated = sum(
+        1
+        for row in results
+        if str(row.get('basis', '')).lower() == 'extrapolated'
+    )
+
+    basis_badges = []
+    if observed or extrapolated:
+        basis_badges = [
+            dbc.Col([
+                dbc.Badge(
+                    f"{observed} Observed",
+                    color="primary",
+                    className="me-2",
+                ),
+            ], width="auto"),
+            dbc.Col([
+                dbc.Badge(
+                    f"{extrapolated} Extrapolated",
+                    color="secondary",
+                    className="me-2",
+                ),
+            ], width="auto"),
+        ]
 
     return html.Div([
         dbc.Row([
@@ -306,5 +360,6 @@ def create_batch_summary(results: List[Dict]) -> html.Div:
             dbc.Col([
                 html.Span(f"Total: {total}", className="text-muted"),
             ], width="auto"),
+            *basis_badges,
         ], className="mb-3 justify-content-center"),
     ])

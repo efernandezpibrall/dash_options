@@ -13,16 +13,25 @@ import plotly.graph_objects as go
 import dash_bootstrap_components as dbc
 from dash import html, dcc, dash_table
 from typing import Dict, Optional, List
-from options.calibration_engine.converters.delta import strike_to_delta
 from vol_calibration.feature_flags import writes_enabled
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
+from vol_calibration.components.smile_grid import delta_curve_to_strike_iv
 
 
 # Parameter columns for comparison table
 COMPARISON_PARAMS = ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']
 
 
-def create_comparison_modal(commodity: str) -> dbc.Modal:
+def create_comparison_modal(
+    commodity: str,
+    comparison_params: Optional[List[str]] = None,
+    param_labels: Optional[Dict[str, str]] = None,
+    save_label: str = "Save Final",
+    save_disabled: Optional[bool] = None,
+    save_title: Optional[str] = None,
+    show_basis: bool = False,
+    show_hybrid_metrics: bool = False,
+) -> dbc.Modal:
     """
     Create the three-way comparison modal.
 
@@ -37,6 +46,42 @@ def create_comparison_modal(commodity: str) -> dbc.Modal:
         Modal component for calibration comparison
     """
     modal_id = f"{commodity.lower()}-comparison-modal"
+    save_is_disabled = (
+        not writes_enabled() if save_disabled is None else bool(save_disabled)
+    )
+    resolved_save_title = save_title or (
+        "Database writes are disabled during the read/calibrate/export release."
+        if save_is_disabled
+        else "Save final parameters"
+    )
+    info_columns = [
+        dbc.Col([
+            html.H5(id=f"{commodity.lower()}-comparison-expiry", className="mb-0"),
+        ], width=4 if show_basis else 6),
+    ]
+    if show_basis:
+        info_columns.append(
+            dbc.Col([
+                html.Div([
+                    html.Span("Basis: ", className="text-muted"),
+                    html.Span(
+                        id=f"{commodity.lower()}-comparison-basis",
+                        className="fw-bold",
+                    ),
+                ]),
+            ], width=4, className="text-center")
+        )
+    info_columns.append(
+        dbc.Col([
+            html.Div([
+                html.Span("Forward: ", className="text-muted"),
+                html.Span(
+                    id=f"{commodity.lower()}-comparison-forward",
+                    className="fw-bold",
+                ),
+            ]),
+        ], width=4 if show_basis else 6, className="text-end")
+    )
 
     modal = dbc.Modal(
         [
@@ -46,45 +91,84 @@ def create_comparison_modal(commodity: str) -> dbc.Modal:
             ),
             dbc.ModalBody([
                 # Expiry info row
-                dbc.Row([
-                    dbc.Col([
-                        html.H5(id=f"{commodity.lower()}-comparison-expiry", className="mb-0"),
-                    ], width=6),
-                    dbc.Col([
-                        html.Div([
-                            html.Span("Forward: ", className="text-muted"),
-                            html.Span(id=f"{commodity.lower()}-comparison-forward", className="fw-bold"),
-                        ]),
-                    ], width=6, className="text-end"),
-                ], className="mb-3"),
+                dbc.Row(info_columns, className="mb-3"),
 
                 # Three-column parameter comparison table
                 html.H6("Parameter Comparison", className="mb-2"),
-                create_comparison_table(commodity),
+                create_comparison_table(
+                    commodity,
+                    comparison_params=comparison_params,
+                    param_labels=param_labels,
+                ),
 
-                # RMSE comparison row
+                # Primary fit-metric comparison row
                 dbc.Row([
                     dbc.Col([
                         dbc.Card([
                             dbc.CardBody([
-                                html.P("Current RMSE", className="text-muted mb-1 small"),
+                                html.P(
+                                    "Current Core TV RMSE"
+                                    if show_hybrid_metrics
+                                    else "Current RMSE",
+                                    className="text-muted mb-1 small",
+                                ),
                                 html.H4(id=f"{commodity.lower()}-current-rmse", className="mb-0 text-secondary"),
+                                html.Div(
+                                    [
+                                        html.Small("Wing tail TV: ", className="text-muted"),
+                                        html.Small(id=f"{commodity.lower()}-current-tail-tv-rmse"),
+                                        html.Br(),
+                                        html.Small("IV diagnostic: ", className="text-muted"),
+                                        html.Small(id=f"{commodity.lower()}-current-iv-rmse"),
+                                    ],
+                                    className="mt-2",
+                                ) if show_hybrid_metrics else None,
                             ], className="text-center py-2"),
                         ], className="h-100"),
                     ], width=4),
                     dbc.Col([
                         dbc.Card([
                             dbc.CardBody([
-                                html.P("Candidate RMSE", className="text-muted mb-1 small"),
+                                html.P(
+                                    "Candidate Core TV RMSE"
+                                    if show_hybrid_metrics
+                                    else "Candidate RMSE",
+                                    className="text-muted mb-1 small",
+                                ),
                                 html.H4(id=f"{commodity.lower()}-candidate-rmse", className="mb-0 text-primary"),
+                                html.Div(
+                                    [
+                                        html.Small("Wing tail TV: ", className="text-muted"),
+                                        html.Small(id=f"{commodity.lower()}-candidate-tail-tv-rmse"),
+                                        html.Br(),
+                                        html.Small("IV diagnostic: ", className="text-muted"),
+                                        html.Small(id=f"{commodity.lower()}-candidate-iv-rmse"),
+                                    ],
+                                    className="mt-2",
+                                ) if show_hybrid_metrics else None,
                             ], className="text-center py-2"),
                         ], className="h-100"),
                     ], width=4),
                     dbc.Col([
                         dbc.Card([
                             dbc.CardBody([
-                                html.P("Final RMSE", className="text-muted mb-1 small"),
+                                html.P(
+                                    "Final Core TV RMSE"
+                                    if show_hybrid_metrics
+                                    else "Final RMSE",
+                                    className="text-muted mb-1 small",
+                                ),
                                 html.H4(id=f"{commodity.lower()}-final-rmse", className="mb-0 text-success"),
+                                html.Div(
+                                    [
+                                        html.Small("Wing tail TV: ", className="text-muted"),
+                                        html.Small(id=f"{commodity.lower()}-final-tail-tv-rmse"),
+                                        html.Br(),
+                                        html.Small("IV diagnostic: ", className="text-muted"),
+                                        html.Small(id=f"{commodity.lower()}-final-iv-rmse"),
+                                    ],
+                                    className="mt-2",
+                                ) if show_hybrid_metrics else None,
                             ], className="text-center py-2"),
                         ], className="h-100 border-success"),
                     ], width=4),
@@ -125,15 +209,11 @@ def create_comparison_modal(commodity: str) -> dbc.Modal:
                     className="me-2",
                 ),
                 dbc.Button(
-                    "Save Final",
+                    save_label,
                     id=f"{commodity.lower()}-comparison-save-btn",
                     color="success",
-                    disabled=not writes_enabled(),
-                    title=(
-                        "Database writes are disabled during the read/calibrate/export release."
-                        if not writes_enabled()
-                        else "Save final parameters"
-                    ),
+                    disabled=save_is_disabled,
+                    title=resolved_save_title,
                 ),
             ]),
         ],
@@ -146,7 +226,11 @@ def create_comparison_modal(commodity: str) -> dbc.Modal:
     return modal
 
 
-def create_comparison_table(commodity: str) -> html.Div:
+def create_comparison_table(
+    commodity: str,
+    comparison_params: Optional[List[str]] = None,
+    param_labels: Optional[Dict[str, str]] = None,
+) -> html.Div:
     """
     Create the three-column comparison table.
 
@@ -162,14 +246,25 @@ def create_comparison_table(commodity: str) -> html.Div:
     """
     # Create column definitions
     columns = [
-        {'id': 'param', 'name': 'Parameter', 'editable': False},
+        {'id': 'label', 'name': 'Parameter', 'editable': False},
         {'id': 'current', 'name': 'Current', 'editable': False, 'type': 'numeric'},
         {'id': 'candidate', 'name': 'Candidate', 'editable': False, 'type': 'numeric'},
         {'id': 'final', 'name': 'Final', 'editable': True, 'type': 'numeric'},
     ]
 
     # Create initial data structure
-    data = [{'param': p, 'current': 0, 'candidate': 0, 'final': 0} for p in COMPARISON_PARAMS]
+    parameter_names = comparison_params or COMPARISON_PARAMS
+    labels = param_labels or {}
+    data = [
+        {
+            'param': parameter,
+            'label': labels.get(parameter, parameter),
+            'current': 0,
+            'candidate': 0,
+            'final': 0,
+        }
+        for parameter in parameter_names
+    ]
 
     table = dash_table.DataTable(
         id=f"{commodity.lower()}-comparison-table",
@@ -197,7 +292,7 @@ def create_comparison_table(commodity: str) -> html.Div:
             'minWidth': '80px',
         },
         style_cell_conditional=[
-            {'if': {'column_id': 'param'}, 'textAlign': 'left', 'fontWeight': 'bold'},
+            {'if': {'column_id': 'label'}, 'textAlign': 'left', 'fontWeight': 'bold'},
             {'if': {'column_id': 'current'}, 'backgroundColor': '#f5f5f5', 'color': '#6c757d'},
             {'if': {'column_id': 'candidate'}, 'backgroundColor': '#e7f1ff', 'color': '#0d6efd'},
             {'if': {'column_id': 'final'}, 'backgroundColor': '#d1e7dd', 'color': '#0f5132'},
@@ -253,6 +348,7 @@ def create_comparison_plot(
         return fig
 
     forward = market_data['forward'].iloc[0]
+    dte = float(market_data['dte'].iloc[0])
     market_data = market_data.copy()
 
     # Calculate x values
@@ -302,108 +398,81 @@ def create_comparison_plot(
 
     # Helper to get wing params
     def get_wing_params(params):
-        wp = {k: params.get(k, 0) for k in ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']}
-        if wp['ssr'] == 0:
+        wp = {k: params.get(k, np.nan) for k in ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']}
+        if pd.isna(wp.get('ssr')):
             wp['ssr'] = 1.0
-        if wp.get('put_wing_power', 0) == 0:
+        if pd.isna(wp.get('put_wing_power')):
             wp['put_wing_power'] = 0.5
-        if wp.get('call_wing_power', 0) == 0:
+        if pd.isna(wp.get('call_wing_power')):
             wp['call_wing_power'] = 0.5
         return wp
-
-    # Helper to solve for strike given target delta (reverse-delta mapping)
-    def delta_to_strike_iv(target_delta, wing_params, is_put=True, tol=1e-6, max_iter=50):
-        """
-        Solve for strike and IV given a target delta using Newton-Raphson iteration.
-        This guarantees monotonicity in delta space.
-        """
-        dte = market_data['dte'].iloc[0]
-
-        # Initial guess based on option type
-        if is_put:
-            strike = forward * 0.9
-        else:
-            strike = forward * 1.1
-
-        option_type = 'put' if is_put else 'call'
-
-        for _ in range(max_iter):
-            iv = wing_model_iv(
-                strike=np.array([strike]),
-                forward=forward,
-                model_version=model_version,
-                **wing_params,
-            )[0]
-            current_delta = strike_to_delta(strike, forward, iv, dte, option_type)
-
-            if is_put:
-                current_delta = -current_delta
-
-            error = current_delta - target_delta
-
-            if abs(error) < tol:
-                break
-
-            dk = strike * 0.001
-            iv_up = wing_model_iv(
-                strike=np.array([strike + dk]),
-                forward=forward,
-                model_version=model_version,
-                **wing_params,
-            )[0]
-            delta_up = strike_to_delta(strike + dk, forward, iv_up, dte, option_type)
-            if is_put:
-                delta_up = -delta_up
-
-            d_delta_d_strike = (delta_up - current_delta) / dk
-
-            if abs(d_delta_d_strike) < 1e-10:
-                break
-
-            step = -error / d_delta_d_strike
-            strike = strike + 0.5 * step
-            strike = max(forward * 0.05, min(forward * 5.0, strike))
-
-        final_iv = wing_model_iv(
-            strike=np.array([strike]),
-            forward=forward,
-            model_version=model_version,
-            **wing_params,
-        )[0]
-        return strike, final_iv
 
     # Helper to compute model curve for delta axis using reverse-delta mapping
     def get_delta_model_curve(wing_params):
         """Generate model curve using reverse-delta mapping for guaranteed monotonicity."""
         # PUT wing: display x from 0.005 to 0.48 (extended to show extreme OTM puts)
         x_put_grid = np.linspace(0.005, 0.48, 60)
-        iv_put = []
-        x_put = []
-        for d in x_put_grid:
-            try:
-                strike, iv = delta_to_strike_iv(d, wing_params, is_put=True)
-                iv_put.append(iv)
-                x_put.append(d)
-            except Exception:
-                continue
+        x_put, _, iv_put = delta_curve_to_strike_iv(
+            x_put_grid,
+            forward,
+            dte,
+            wing_params,
+            wing_model_iv,
+            is_put=True,
+            model_version=model_version,
+        )
 
         # CALL wing: display x from 0.52 to 0.995 (extended to show extreme OTM calls)
         x_call_grid = np.linspace(0.52, 0.995, 60)
-        iv_call = []
-        x_call = []
-        for display_x in x_call_grid:
-            call_delta = 1 - display_x
-            try:
-                strike, iv = delta_to_strike_iv(call_delta, wing_params, is_put=False)
-                iv_call.append(iv)
-                x_call.append(display_x)
-            except Exception:
-                continue
+        call_delta_grid = 1.0 - x_call_grid
+        call_deltas, _, iv_call = delta_curve_to_strike_iv(
+            call_delta_grid,
+            forward,
+            dte,
+            wing_params,
+            wing_model_iv,
+            is_put=False,
+            model_version=model_version,
+        )
+        x_call = 1.0 - call_deltas
 
         # Combine (already monotonic by construction)
-        x_vals = np.array(x_put + x_call)
-        iv_vals = np.array(iv_put + iv_call)
+        x_vals = np.concatenate([x_put, x_call])
+        iv_vals = np.concatenate([iv_put, iv_call])
         return x_vals, iv_vals
+
+    def get_hybrid_curve(params):
+        """Return the TTF operational hybrid when accepted join widths exist."""
+        left_width = pd.to_numeric(
+            pd.Series([params.get('left_blend_width')]), errors='coerce'
+        ).iloc[0]
+        right_width = pd.to_numeric(
+            pd.Series([params.get('right_blend_width')]), errors='coerce'
+        ).iloc[0]
+        if not np.isfinite(left_width) or not np.isfinite(right_width):
+            return None
+        try:
+            from vol_calibration.ttf_hybrid_surface import (
+                operational_surface_frame as ttf_operational_surface_frame,
+            )
+
+            frame = ttf_operational_surface_frame(
+                market_data,
+                params,
+                left_blend_width=float(left_width),
+                right_blend_width=float(right_width),
+                n_points=401,
+            )
+            if x_axis == 'log_moneyness':
+                frame['plot_x'] = frame['log_moneyness']
+            elif x_axis == 'moneyness':
+                frame['plot_x'] = frame['strike'] / forward
+            else:
+                frame['plot_x'] = 1.0 - frame['delta']
+            frame = frame.sort_values('plot_x')
+            return frame
+        except Exception:
+            return None
 
     # Helper to get x values for plotting (for non-delta axes)
     def get_plot_x(model_iv_values):
@@ -415,13 +484,18 @@ def create_comparison_plot(
     if current_params:
         try:
             wp = get_wing_params(current_params)
-            if x_axis == 'delta':
+            hybrid_frame = get_hybrid_curve(current_params)
+            if hybrid_frame is not None:
+                x_plot = hybrid_frame['plot_x'].to_numpy()
+                iv_plot = hybrid_frame['iv'].to_numpy()
+            elif x_axis == 'delta':
                 x_plot, iv_plot = get_delta_model_curve(wp)
             else:
                 model_iv = wing_model_iv(
                     strike=strikes_model,
                     forward=forward,
                     model_version=model_version,
+                    dte=dte,
                     **wp,
                 )
                 x_plot, iv_plot = get_plot_x(model_iv)
@@ -441,13 +515,18 @@ def create_comparison_plot(
     if candidate_params:
         try:
             wp = get_wing_params(candidate_params)
-            if x_axis == 'delta':
+            hybrid_frame = get_hybrid_curve(candidate_params)
+            if hybrid_frame is not None:
+                x_plot = hybrid_frame['plot_x'].to_numpy()
+                iv_plot = hybrid_frame['iv'].to_numpy()
+            elif x_axis == 'delta':
                 x_plot, iv_plot = get_delta_model_curve(wp)
             else:
                 model_iv = wing_model_iv(
                     strike=strikes_model,
                     forward=forward,
                     model_version=model_version,
+                    dte=dte,
                     **wp,
                 )
                 x_plot, iv_plot = get_plot_x(model_iv)
@@ -467,13 +546,18 @@ def create_comparison_plot(
     if final_params:
         try:
             wp = get_wing_params(final_params)
-            if x_axis == 'delta':
+            hybrid_frame = get_hybrid_curve(final_params)
+            if hybrid_frame is not None:
+                x_plot = hybrid_frame['plot_x'].to_numpy()
+                iv_plot = hybrid_frame['iv'].to_numpy()
+            elif x_axis == 'delta':
                 x_plot, iv_plot = get_delta_model_curve(wp)
             else:
                 model_iv = wing_model_iv(
                     strike=strikes_model,
                     forward=forward,
                     model_version=model_version,
+                    dte=dte,
                     **wp,
                 )
                 x_plot, iv_plot = get_plot_x(model_iv)
@@ -519,7 +603,9 @@ def create_comparison_plot(
 def format_comparison_data(
     current_params: Dict,
     candidate_params: Dict,
-    final_params: Optional[Dict] = None
+    final_params: Optional[Dict] = None,
+    comparison_params: Optional[List[str]] = None,
+    param_labels: Optional[Dict[str, str]] = None,
 ) -> List[Dict]:
     """
     Format parameters for the comparison table.
@@ -542,9 +628,11 @@ def format_comparison_data(
         final_params = current_params.copy() if current_params else {}
 
     data = []
-    for param in COMPARISON_PARAMS:
+    labels = param_labels or {}
+    for param in comparison_params or COMPARISON_PARAMS:
         data.append({
             'param': param,
+            'label': labels.get(param, param),
             'current': current_params.get(param, 0),
             'candidate': candidate_params.get(param, 0),
             'final': final_params.get(param, 0),

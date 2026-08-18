@@ -239,6 +239,13 @@ def load_data(trade_date, reload_clicks):
             matching = historical_params[
                 historical_params['expiry'] == expiry_date
             ]
+            if 'model_version' in matching.columns:
+                matching = matching[
+                    matching['model_version']
+                    == DEFAULT_CALIBRATION_MODEL_VERSION
+                ]
+            else:
+                matching = matching.iloc[0:0]
             if not matching.empty:
                 loaded_from_db = True
                 row = matching.iloc[0]
@@ -437,6 +444,7 @@ def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks
                         forward=forward,
                         source=source,
                         user_id='dashboard',
+                        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
                         overwrite=True
                     )
 
@@ -750,8 +758,15 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
                             updated_table_data[i][param_key] = param_val
                     updated_table_data[i]['rmse'] = f"{new_rmse*100:.2f}%"
                     # Recalculate arbitrage status with new params
+                    expiry_dte = (
+                        float(exp_data['dte'].iloc[0])
+                        if 'dte' in exp_data.columns and pd.notna(exp_data['dte'].iloc[0])
+                        else None
+                    )
                     updated_table_data[i]['arb_status'] = update_arb_status_in_row(
-                        updated_table_data[i], forward=forward
+                        updated_table_data[i],
+                        forward=forward,
+                        dte=expiry_dte,
                     )
 
                 # Auto-save if enabled
@@ -768,6 +783,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
                             forward=forward,
                             source=SOURCE_FULL_OPT,
                             user_id='dashboard_batch',
+                            model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
                             overwrite=True
                         )
                     except Exception:

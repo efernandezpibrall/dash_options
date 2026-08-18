@@ -48,7 +48,37 @@ VOL_CALIBRATION_WRITES_ENABLED=false
 VOL_CALIBRATION_PUBLISH_ENABLED=false
 VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED=false
 OPTIONS_TRUSTED_PROXY_AUTH_ENABLED=false
+BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED=false
+BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED=false
 ```
+
+For a workstation process bound directly to loopback, the same settings may be
+provided in the external `config.ini` without putting credentials in the
+repository:
+
+```ini
+[VOL_CALIBRATION]
+WRITES_ENABLED = false
+PUBLISH_ENABLED = false
+BACKGROUND_JOBS_ENABLED = false
+TTF_INTRADAY_WRITES_ENABLED = true
+TTF_PUBLICATION_ENABLED = true
+
+[OPTIONS_AUTH]
+MODE = local_loopback
+LOCAL_USER = workstation-user
+LOCAL_ROLES = calibrator,publisher
+
+[BLOOMBERG_OPTIONS]
+INTRADAY_REFRESH_ENABLED = false
+SETTLEMENT_REFRESH_ENABLED = false
+```
+
+`local_loopback` rejects non-loopback and forwarded requests. It must not be
+used behind a reverse proxy. Shared deployments must use `trusted_proxy` with a
+server-held shared secret and proxy-injected user and role headers. The explicit
+`publisher` role permits an accountable trader to publish their own validated
+surface; `approver` retains maker-checker self-publication protection.
 
 Trino TLS verification defaults to enabled. An internal environment that
 explicitly requires otherwise must set `TRINOS_VERIFY_SSL=false`.
@@ -62,10 +92,27 @@ alembic upgrade head --sql
 alembic upgrade head
 ```
 
-Do not enable writes until the migration is applied, trusted proxy identity is
-verified, role mappings are tested, and the background worker is deployed.
+Do not enable writes until the migration is applied, the selected server-side
+identity mode is verified, and role mappings are tested. Background jobs remain
+independently disabled until their worker is deployed.
 Publication remains disabled until verified option-expiry calendars and source
 eligibility rules are complete for every enabled product.
+
+The Brent market-data refreshes have separate fail-closed intake flags. Apply
+BBG `migrations/003_bbg_option_chain_intraday.sql` and
+`migrations/008_bbg_option_settlement_refresh.sql`, start the Bloomberg-host
+worker, and verify `/health/ready` before enabling either
+`BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED` or
+`BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED` (or their `config.ini`
+equivalents). The web process only queues jobs; Bloomberg calls, persistence,
+and IV pricing run in the warmed worker:
+
+```bash
+python option_chain_refresh_worker.py --poll-seconds 1 --config /path/to/config.ini
+```
+
+Rollback by disabling both flags before stopping the worker. Existing snapshots
+and the additive audit tables remain immutable.
 
 ## Serving and health
 
@@ -73,8 +120,8 @@ The `Procfile` serves `index_options:server` through Gunicorn.
 
 - `/health/live` verifies the web process without touching the database.
 - `/health/ready` is immediately ready in read-only mode.
-- When writes are enabled, readiness also requires trusted proxy auth and the
-  required database relations.
+- When writes or Bloomberg refresh intake are enabled, readiness also requires
+  configured authentication and the required database relations.
 
 Rollback by disabling write/publication/job intake first, restoring the prior
 web artifact, and leaving additive audit tables intact.

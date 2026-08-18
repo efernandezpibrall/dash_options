@@ -1,0 +1,910 @@
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+import pytest
+from dash import html
+
+import index_options
+from pages import brent_vol_history as history
+
+
+def _walk(component):
+    yield component
+    children = getattr(component, "children", None)
+    if children is None:
+        return
+    if not isinstance(children, (list, tuple)):
+        children = [children]
+    for child in children:
+        if child is not None:
+            yield from _walk(child)
+
+
+def _chain_frame():
+    rows = []
+    for security, put_call, strike, settlement, volume, open_interest, iv in (
+        ("COZ6P 70 Comdty", "P", 70.0, 1.25, 20, 250, 0.31),
+        ("COZ6C 90 Comdty", "C", 90.0, 1.10, 0, 180, 0.29),
+        ("COZ6P 50 Comdty", "P", 50.0, None, None, 10, None),
+    ):
+        rows.append(
+            {
+                "snapshot_id": "00000000-0000-0000-0000-000000000001",
+                "product": "BRENT",
+                "business_date": "2026-08-10",
+                "observed_at": "2026-08-10T12:00:00Z",
+                "discovery_method": "OPT_CHAIN",
+                "bloomberg_description": "Brent option",
+                "underlying_type": "FUTURE",
+                "underlying_security": "COZ6 Comdty",
+                "underlying_global_id": "BBG-FUTURE",
+                "underlying_contract_month": "2026-12-01",
+                "underlying_last_tradeable_date": "2026-10-30",
+                "underlying_price": 80.0,
+                "option_security": security,
+                "option_global_id": f"BBG-{security}",
+                "put_call": put_call,
+                "strike": strike,
+                "option_expiration_date": "2026-10-27",
+                "option_last_tradeable_date": "2026-10-27",
+                "option_style": "AMERICAN",
+                "premium_style": "FUTURES_STYLE",
+                "exchange_code": "ICE",
+                "currency": "USD",
+                "price_unit": "USD/BBL",
+                "contract_multiplier": 1000,
+                "settlement_price": settlement,
+                "volume": volume,
+                "open_interest": open_interest,
+                "implied_volatility": iv,
+                "pricing_model": "american_on_futures_futures_style",
+                "pricing_model_version": "american_futures_crr_margin_style_v2",
+                "iv_status": "resolved" if iv is not None else "missing_settlement",
+                "iv_exclusion_reason": None if iv is not None else "missing settlement",
+                "ingested_at": "2026-08-10T12:00:00Z",
+                "input_fingerprint": "abc123",
+                "source_name": "Bloomberg option-chain settlement",
+                "source_revision": "v1",
+                "snapshot_metadata": {},
+            }
+        )
+    return history._normalize_chain_frame(pd.DataFrame(rows))
+
+
+def _published_frame():
+    return pd.DataFrame(
+        {
+            "cob_date": pd.to_datetime(["2026-08-10", "2026-08-10"]),
+            "contract_date": pd.to_datetime(["2026-12-01", "2026-12-01"]),
+            "option_expiration_date": pd.to_datetime(["2026-10-27", "2026-10-27"]),
+            "put_call": ["put", "call"],
+            "delta": [0.25, 0.25],
+            "volatility": [0.32, 0.28],
+            "forward_value": [80.0, 80.0],
+            "source_name": ["published", "published"],
+        }
+    )
+
+
+def _intraday_missing_quote_frame():
+    frame = _chain_frame().iloc[[0]].copy()
+    frame["snapshot_metadata"] = [{"snapshot_kind": "INTRADAY"}]
+    frame["business_date"] = pd.Timestamp("2026-08-12")
+    frame["observed_at"] = pd.Timestamp("2026-08-12T07:28:55Z")
+    frame["underlying_security"] = "COM8 Comdty"
+    frame["underlying_contract_month"] = pd.Timestamp("2028-06-01")
+    frame["underlying_price"] = 73.795
+    frame["underlying_mid"] = 73.795
+    frame["option_security"] = "COM8P 60 Comdty"
+    frame["put_call"] = "P"
+    frame["strike"] = 60.0
+    frame["option_expiration_date"] = pd.Timestamp("2028-04-25")
+    frame["settlement_price"] = None
+    frame["last_price"] = 4.67
+    frame["last_trade_date"] = pd.NaT
+    frame["option_bid"] = None
+    frame["option_ask"] = None
+    frame["option_mid"] = None
+    frame["volume"] = 500
+    frame["open_interest"] = 2_625
+    frame["implied_volatility"] = None
+    frame["executable_iv_mid"] = None
+    frame["executable_iv_status"] = "unavailable"
+    frame["executable_iv_exclusion_reason"] = "missing_two_sided_quote"
+    return history._normalize_chain_frame(frame)
+
+
+def test_layout_has_one_semantic_h1_and_auditable_components():
+    items = list(_walk(history.layout))
+    headings = [item for item in items if isinstance(item, html.H1)]
+    ids = {getattr(item, "id", None) for item in items}
+    trade_slider = next(
+        item
+        for item in items
+        if getattr(item, "id", None) == "brent-vol-history-trade-start"
+    )
+    assert len(headings) == 1
+    assert headings[0].children == "Vol trades"
+    assert headings[0].className == "brent-vol-history-visually-hidden-heading"
+    assert trade_slider.allow_direct_input is False
+    assert "brent-vol-history-summary" not in ids
+    assert "brent-vol-history-trade-status" not in ids
+    assert "brent-vol-history-status" not in ids
+    assert {
+        "brent-vol-history-product",
+        "brent-vol-history-date",
+        "brent-vol-history-x-axis",
+        "brent-vol-history-refresh-button",
+        "brent-vol-history-settlement-refresh-button",
+        "brent-vol-history-trade-start",
+        "brent-vol-history-market-data-status",
+        "brent-vol-history-trade-grid",
+        "brent-vol-history-plots",
+        "brent-vol-history-grid",
+        "brent-vol-history-detail-expiry",
+    }.issubset(ids)
+
+    refresh_control = next(
+        item
+        for item in items
+        if "brent-vol-history-refresh-control"
+        in str(getattr(item, "className", ""))
+    )
+    refresh_items = list(_walk(refresh_control))
+    refresh_ids = [getattr(item, "id", None) for item in refresh_items]
+    assert refresh_ids.index("brent-vol-history-refresh-button") < refresh_ids.index(
+        "brent-vol-history-settlement-refresh-button"
+    )
+    assert refresh_ids.index(
+        "brent-vol-history-settlement-refresh-button"
+    ) < refresh_ids.index(
+        "brent-vol-history-refresh-status"
+    )
+
+
+def test_refresh_buttons_have_primary_secondary_focus_and_mobile_contracts():
+    items = list(_walk(history.layout))
+    intraday = next(
+        item
+        for item in items
+        if getattr(item, "id", None) == "brent-vol-history-refresh-button"
+    )
+    settlement = next(
+        item
+        for item in items
+        if getattr(item, "id", None)
+        == "brent-vol-history-settlement-refresh-button"
+    )
+    assert intraday.children == "Refresh Bloomberg"
+    assert settlement.children == "Refresh settlements"
+    assert "refresh-button-primary" in intraday.className
+    assert "refresh-button-secondary" in settlement.className
+    assert intraday.title and settlement.title
+
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert ".brent-vol-history-refresh-button:focus-visible" in css
+    assert ".brent-vol-history-refresh-button-secondary" in css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+
+
+def test_layout_includes_sourced_ice_open_interest_timing_note():
+    items = list(_walk(history.layout))
+    note = next(
+        item
+        for item in items
+        if getattr(item, "className", None)
+        == "brent-vol-history-methodology-note"
+    )
+    note_items = list(_walk(note))
+    heading = next(
+        item
+        for item in note_items
+        if getattr(item, "id", None)
+        == "brent-vol-history-oi-methodology-title"
+    )
+    paragraph = next(item for item in note_items if isinstance(item, html.P))
+    source = next(item for item in note_items if isinstance(item, html.A))
+
+    assert note.role == "note"
+    assert (
+        note.to_plotly_json()["props"]["aria-labelledby"]
+        == "brent-vol-history-oi-methodology-title"
+    )
+    assert heading.children == "ICE open-interest timing"
+    assert "10:00 UK position-maintenance cutoff" in paragraph.children
+    assert "does not carry forward a prior-day figure" in paragraph.children
+    assert "does not revise settlement prices or reported volume" in paragraph.children
+    assert source.children == "ICE Futures Europe position-maintenance guidance"
+    assert source.href.startswith("https://www.ice.com/publicdocs/futures/")
+    assert source.rel == "noopener noreferrer"
+
+
+def test_intraday_universe_is_policy_filtered_while_settlement_stays_complete():
+    months = pd.date_range("2026-08-01", "2028-12-01", freq="MS")
+    frame = pd.DataFrame(
+        {
+            "business_date": ["2026-08-10"] * len(months),
+            "underlying_contract_month": months,
+            "option_security": [f"OPTION-{index}" for index in range(len(months))],
+            "snapshot_metadata": [{} for _ in months],
+        }
+    )
+    expected = {
+        "2026-08-01", "2026-09-01", "2026-10-01", "2026-11-01",
+        "2026-12-01", "2027-01-01", "2027-06-01", "2027-12-01",
+        "2028-06-01", "2028-12-01",
+    }
+
+    intraday, legacy_info = history.select_history_universe(frame, "INTRADAY")
+    settlement, settlement_info = history.select_history_universe(
+        frame, "SETTLEMENT"
+    )
+    assert set(
+        pd.to_datetime(intraday["underlying_contract_month"])
+        .dt.date.astype(str)
+    ) == expected
+    assert legacy_info["legacy_fallback"] is True
+    assert len(settlement) == len(frame)
+    assert settlement_info["scope"] == "ALL_AVAILABLE"
+
+    governed = frame.copy()
+    governed["snapshot_metadata"] = [
+        {
+            "intraday_universe": {
+                "policy_version": "custom-product-policy-v1",
+                "requested_contract_months": ["2026-10-01", "2027-06-01"],
+                "selected_underlying_count": 2,
+                "future_chain_count": len(months),
+            }
+        }
+        for _ in months
+    ]
+    selected, governed_info = history.select_history_universe(
+        governed, "INTRADAY"
+    )
+    assert set(
+        pd.to_datetime(selected["underlying_contract_month"])
+        .dt.date.astype(str)
+    ) == {"2026-10-01", "2027-06-01"}
+    assert governed_info["legacy_fallback"] is False
+    assert governed_info["policy_version"] == "custom-product-policy-v1"
+
+
+def test_tfo_intraday_universe_is_front_twelve_plus_quarters_to_year_two():
+    months = pd.date_range("2026-08-01", "2028-12-01", freq="MS")
+    frame = pd.DataFrame(
+        {
+            "business_date": ["2026-08-10"] * len(months),
+            "underlying_contract_month": months,
+            "option_security": [f"FJS-{index}" for index in range(len(months))],
+            "snapshot_metadata": [{} for _ in months],
+        }
+    )
+    selected, info = history.select_history_universe(
+        frame, "INTRADAY", product="TFO"
+    )
+    selected_months = set(
+        pd.to_datetime(selected["underlying_contract_month"])
+        .dt.date.astype(str)
+    )
+    assert {f"2026-{month:02d}-01" for month in range(8, 13)} <= selected_months
+    assert {f"2027-{month:02d}-01" for month in range(1, 8)} <= selected_months
+    assert {
+        "2027-09-01", "2027-12-01",
+        "2028-03-01", "2028-06-01", "2028-09-01", "2028-12-01",
+    } <= selected_months
+    assert info["policy_version"] == "tfo-front12-quarterly-y2-v1"
+
+
+def test_trade_tape_loader_is_snapshot_and_product_scoped(monkeypatch):
+    captured = {}
+
+    def fake_read_sql(query, engine, params):
+        captured["sql"] = str(query)
+        captured["params"] = params
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    history.load_trade_tape("00000000-0000-0000-0000-000000000001", engine=object())
+    assert "e.snapshot_id = CAST(:snapshot_id AS uuid)" in captured["sql"]
+    assert "e.product = :product" in captured["sql"]
+    assert "metadata ->> 'snapshot_kind'" in captured["sql"]
+    assert captured["params"]["product"] == "BRENT"
+    assert captured["params"]["snapshot_kind"] == "INTRADAY"
+
+
+def test_navigation_routes_to_history_page():
+    assert index_options.display_page("/brent_vol_history", None) is history.layout
+
+
+def test_available_snapshot_query_is_product_scoped_and_latest_per_date(monkeypatch):
+    captured = {}
+
+    def fake_read_sql(query, engine, params):
+        captured["sql"] = str(query)
+        captured["params"] = params
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    history.load_available_snapshots(engine=object(), limit=20)
+    assert "PARTITION BY s.business_date" in captured["sql"]
+    assert "c.product = :product" in captured["sql"]
+    assert captured["params"] == {
+        "product": "BRENT",
+        "limit": 20,
+        "settlement_kind": "SETTLEMENT",
+        "intraday_kind": "INTRADAY",
+    }
+
+
+def test_snapshot_selector_fails_closed_when_database_is_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        history, "load_available_snapshots",
+        lambda _product: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+    assert history.update_history_dates(0, None, "BRENT", None) == ([], None)
+
+
+def test_published_surface_query_requires_exact_cob(monkeypatch):
+    captured = {}
+
+    def fake_read_sql(query, engine, params):
+        captured["sql"] = str(query)
+        captured["params"] = params
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    history.load_published_surface("2026-08-10", engine=object())
+    assert "cob_date = :cob_date" in captured["sql"]
+    assert "<=" not in captured["sql"]
+    assert captured["params"]["cob_date"] == date(2026, 8, 10)
+    assert captured["params"]["snapshot_kind"] == "SETTLEMENT"
+
+
+def test_tfo_published_overlay_queries_ttf_without_merging_products(monkeypatch):
+    captured = []
+
+    def fake_read_sql(query, engine, params):
+        captured.append((str(query), dict(params)))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    history.load_published_surface(
+        "2026-08-10", engine=object(), product="TFO", snapshot_kind="SETTLEMENT"
+    )
+    assert captured[0][1]["product"] == "TTF"
+    assert captured[0][1]["snapshot_kind"] == "SETTLEMENT"
+    assert history.load_published_surface(
+        "2026-08-10", engine=object(), product="TFO", snapshot_kind="INTRADAY"
+    ).empty
+    assert len(captured) == 1
+
+
+def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
+    captured = []
+
+    def fake_read_sql(query, engine, params):
+        captured.append((str(query), dict(params)))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    history.load_chain_snapshot(
+        "00000000-0000-0000-0000-000000000001",
+        engine=object(),
+        product="TFO",
+        snapshot_kind="INTRADAY",
+    )
+    assert captured[0][1] == {
+        "snapshot_id": "00000000-0000-0000-0000-000000000001",
+        "product": "TFO",
+        "snapshot_kind": "INTRADAY",
+    }
+    assert "metadata ->> 'snapshot_kind'" in captured[0][0]
+
+
+def test_published_delta_nodes_convert_to_strike():
+    nodes = history.published_strike_nodes(
+        _published_frame(),
+        {pd.Timestamp("2026-12-01"): 80.0},
+        pd.Timestamp("2026-08-10"),
+    )
+    assert len(nodes) == 2
+    assert nodes["strike"].notna().all()
+    assert nodes["forward"].tolist() == [80.0, 80.0]
+    assert nodes.iloc[0]["strike"] < 80.0
+    assert nodes.iloc[1]["strike"] > 80.0
+
+
+def test_expiry_figure_overlays_smile_volume_and_open_interest():
+    chain = _chain_frame()
+    prepared = history.prepare_market_observations(chain)
+    published = history.published_strike_nodes(
+        _published_frame(),
+        {pd.Timestamp("2026-12-01"): 80.0},
+        pd.Timestamp("2026-08-10"),
+    )
+    figure = history.build_expiry_figure(
+        chain,
+        prepared,
+        published,
+        pd.Timestamp("2026-12-01"),
+    )
+    trace_names = {trace.name for trace in figure.data}
+    assert "Settlement eligible" in trace_names
+    assert "Bloomberg settlement IV" in trace_names
+    assert "Published Brent exact COB" in trace_names
+    assert "Volume · calls" in trace_names
+    assert "Volume · puts" in trace_names
+    assert "Open interest · calls" in trace_names
+    assert "Open interest · puts" in trace_names
+    assert figure.layout.barmode == "overlay"
+    assert figure.layout.xaxis.title.text == "Strike (USD/bbl)"
+    assert figure.layout.yaxis.title.text == "IV (%)"
+    assert figure.layout.yaxis2.title.text == "Activity (contracts)"
+    assert figure.layout.yaxis2.overlaying == "y"
+    assert figure.layout.showlegend is False
+    traces = {trace.name: trace for trace in figure.data}
+    assert traces["Open interest · calls"].width > traces["Volume · calls"].width
+    assert traces["Open interest · calls"].opacity < traces["Volume · calls"].opacity
+    assert traces["Open interest · calls"].yaxis == "y2"
+    assert traces["Volume · calls"].yaxis == "y2"
+    assert traces["Settlement eligible"].yaxis == "y"
+    for trace_name in (
+        "Open interest · calls",
+        "Volume · calls",
+        "Bloomberg settlement IV",
+        "Settlement eligible",
+    ):
+        assert "Underlying" in traces[trace_name].hovertemplate
+        assert "Volume / OI" in traces[trace_name].hovertemplate
+    assert "Underlying" in traces["Published Brent exact COB"].hovertemplate
+    assert figure.layout.hovermode == "closest"
+    assert figure.layout.hoverlabel.bgcolor == "#0F172A"
+    assert figure.layout.hoverlabel.font.color == "#F8FAFC"
+    assert set(traces["Open interest · calls"].customdata[:, 4]) == {80.0}
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 5]) == [80.0, 80.0]
+    assert list(traces["Settlement eligible"].customdata[:, 3]) == [80.0, 80.0]
+    assert list(traces["Settlement eligible"].customdata[:, 4]) == [
+        "COZ6P 70 Comdty",
+        "COZ6C 90 Comdty",
+    ]
+    assert list(traces["Settlement eligible"].customdata[:, 5]) == [
+        "1.2500",
+        "1.1000",
+    ]
+    assert (
+        "Premium <b>%{customdata[2]:.4f} USD/bbl</b>"
+        in traces["Bloomberg settlement IV"].hovertemplate
+    )
+    assert (
+        "Premium <b>%{customdata[5]} USD/bbl</b>"
+        in traces["Settlement eligible"].hovertemplate
+    )
+    assert list(traces["Published Brent exact COB"].customdata[:, 4]) == [80.0, 80.0]
+    trace_order = [trace.name for trace in figure.data]
+    assert trace_order.index("Open interest · calls") < trace_order.index("Volume · calls")
+    assert trace_order.index("Volume · calls") < trace_order.index("Settlement eligible")
+
+
+def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
+    chain = _chain_frame().copy()
+    chain["product"] = "TFO"
+    chain["underlying_security"] = "FJSZ6 Comdty"
+    chain["pricing_underlying_security"] = "TZTZ6 Comdty"
+    chain["option_style"] = "EUROPEAN"
+    chain["currency"] = "EUR"
+    chain["price_unit"] = "EUR/MWH"
+    published = history.published_strike_nodes(
+        _published_frame(),
+        {pd.Timestamp("2026-12-01"): 80.0},
+        pd.Timestamp("2026-08-10"),
+    )
+    figure = history.build_expiry_figure(
+        chain,
+        history.prepare_market_observations(chain, product="TFO"),
+        published,
+        pd.Timestamp("2026-12-01"),
+        product="TFO",
+    )
+    traces = {trace.name: trace for trace in figure.data}
+    assert figure.layout.xaxis.title.text == "Strike (EUR/MWh)"
+    assert "Published TTF exact COB" in traces
+    assert "Bloomberg settlement IV" in traces
+    assert "Settlement eligible" not in traces
+    assert "TZT %{customdata[4]:.3f}" in traces["Published TTF exact COB"].hovertemplate
+    assert "TZT %{customdata[5]:.3f}" in traces["Bloomberg settlement IV"].hovertemplate
+    assert "Volume / OI" in traces["Bloomberg settlement IV"].hovertemplate
+    assert (
+        "Premium <b>%{customdata[2]:.4f} EUR/MWh</b>"
+        in traces["Bloomberg settlement IV"].hovertemplate
+    )
+    detail = history._detail_rows(chain, "2026-12-01")
+    assert {row["native_option_underlier"] for row in detail} == {"FJSZ6 Comdty"}
+    assert {row["pricing_future"] for row in detail} == {"TZTZ6 Comdty"}
+
+
+def test_tfo_settlement_axis_includes_full_exchange_strike_range_without_overlay():
+    chain = _chain_frame().copy()
+    low_strike = chain.iloc[[0]].copy()
+    low_strike["option_security"] = "FJSZ6P 5 Comdty"
+    low_strike["option_global_id"] = "BBG-FJSZ6P-5"
+    low_strike["put_call"] = "P"
+    low_strike["strike"] = 5.0
+    low_strike["settlement_price"] = 0.01
+    low_strike["implied_volatility"] = 1.50
+    high_strike = chain.iloc[[1]].copy()
+    high_strike["option_security"] = "FJSZ6C 300 Comdty"
+    high_strike["option_global_id"] = "BBG-FJSZ6C-300"
+    high_strike["put_call"] = "C"
+    high_strike["strike"] = 300.0
+    high_strike["settlement_price"] = 0.01
+    high_strike["implied_volatility"] = 1.50
+    chain = pd.concat([chain, low_strike, high_strike], ignore_index=True)
+    chain["product"] = "TFO"
+    chain["underlying_security"] = "FJSZ6 Comdty"
+    chain["pricing_underlying_security"] = "TZTZ6 Comdty"
+    chain["option_style"] = "EUROPEAN"
+    chain["currency"] = "EUR"
+    chain["price_unit"] = "EUR/MWH"
+
+    figure = history.build_expiry_figure(
+        chain,
+        history.prepare_market_observations(chain, product="TFO"),
+        pd.DataFrame(),
+        pd.Timestamp("2026-12-01"),
+        product="TFO",
+    )
+
+    settlement = next(
+        trace for trace in figure.data if trace.name == "Bloomberg settlement IV"
+    )
+    assert list(settlement.customdata[:, 0]) == [5.0, 70.0, 90.0, 300.0]
+    assert figure.layout.xaxis.range[0] <= 5.0
+    assert figure.layout.xaxis.range[1] > 300.0
+
+
+def test_settlement_smile_never_substitutes_intrinsic_itm_option_for_unresolved_otm():
+    chain = _chain_frame().copy()
+    high_call = chain.iloc[[1]].copy()
+    high_call["option_security"] = "FJSZ6C 200 Comdty"
+    high_call["option_global_id"] = "BBG-FJSZ6C-200"
+    high_call["put_call"] = "C"
+    high_call["strike"] = 200.0
+    high_call["settlement_price"] = 0.001
+    high_call["implied_volatility"] = None
+    high_call["iv_status"] = "unresolved"
+    high_call["iv_exclusion_reason"] = (
+        "ICE settlement does not imply a Black-76 volatility in (0.5%, 200%)"
+    )
+    high_put = high_call.copy()
+    high_put["option_security"] = "FJSZ6P 200 Comdty"
+    high_put["option_global_id"] = "BBG-FJSZ6P-200"
+    high_put["put_call"] = "P"
+    high_put["settlement_price"] = 120.0
+    high_put["implied_volatility"] = 0.005
+    high_put["iv_status"] = "resolved"
+    high_put["iv_exclusion_reason"] = None
+    chain = pd.concat([chain, high_call, high_put], ignore_index=True)
+    chain["product"] = "TFO"
+    chain["underlying_security"] = "FJSZ6 Comdty"
+    chain["pricing_underlying_security"] = "TZTZ6 Comdty"
+    chain["option_style"] = "EUROPEAN"
+    chain["currency"] = "EUR"
+    chain["price_unit"] = "EUR/MWH"
+    chain = history._normalize_chain_frame(chain)
+
+    selected, excluded = history._settlement_reference_selection(chain, "strike")
+
+    assert 200.0 not in set(selected["strike"])
+    exclusion = excluded.loc[excluded["strike"].eq(200.0)].iloc[0]
+    assert exclusion["put_call"] == "C"
+    assert exclusion["option_security"] == "FJSZ6C 200 Comdty"
+    assert exclusion["settlement_price"] == pytest.approx(0.001)
+    assert exclusion["reason_code"] == "otm_iv_outside_supported_range"
+
+    cards = history.build_plot_cards(
+        chain,
+        pd.DataFrame(),
+        product="TFO",
+    )
+    note = cards[-1]
+    note_text = " ".join(item for item in _walk(note) if isinstance(item, str))
+    assert note.className == "brent-vol-history-settlement-exclusion-note"
+    assert note.role == "note"
+    assert "Excluded from settlement IV charts" in note_text
+    assert "2 excluded" in note_text
+    assert "1 expiry" in note_text
+    assert "OTM premium does not imply IV within 0.5%–200%" in note_text
+    assert "Dec-26" in note_text
+    assert "Puts" in note_text
+    assert "Calls" in note_text
+    assert "50" in note_text
+    assert "200" in note_text
+    assert "Official premiums remain available in Option-chain detail" in note_text
+    note_items = list(_walk(note))
+    strike_chips = [
+        item
+        for item in note_items
+        if getattr(item, "className", None)
+        == "brent-vol-history-exclusion-strike-chip"
+    ]
+    assert [item.children for item in strike_chips] == ["50", "200"]
+    assert [item.title for item in strike_chips] == ["50P", "200C"]
+    assert any(
+        "brent-vol-history-exclusion-metric-primary"
+        in str(getattr(item, "className", "")).split()
+        for item in note_items
+    )
+
+
+def test_expiry_section_uses_one_shared_chart_legend():
+    items = list(_walk(history.layout))
+    legend = next(
+        item
+        for item in items
+        if getattr(item, "className", None) == "brent-vol-history-common-legend"
+    )
+    labels = [item.children[1].children for item in legend.children]
+    assert labels == [
+        "Calls IV",
+        "Puts IV",
+        "Executable band",
+        "Indicative last IV",
+        "Trade-time IV",
+        "Bloomberg settlement IV",
+        "Settlement eligible",
+        "Settlement excluded",
+        "Published Brent exact COB",
+        "Volume",
+        "Open interest · follows selected snapshot",
+        "New volume",
+    ]
+    intraday_labels = [
+        item.children[1].children
+        for item in history._expiry_legend_items("INTRADAY")
+    ]
+    settlement_labels = [
+        item.children[1].children
+        for item in history._expiry_legend_items("SETTLEMENT")
+    ]
+    assert "Intraday OI · Bloomberg effective date" in intraday_labels
+    assert "Settlement OI · official close" in settlement_labels
+
+
+def test_settlement_iv_remains_visible_without_volume_or_open_interest():
+    chain = _chain_frame()
+    for column in (
+        "volume",
+        "source_volume",
+        "open_interest",
+        "source_open_interest",
+        "settlement_open_interest",
+    ):
+        chain[column] = None
+    prepared = history.prepare_market_observations(chain)
+    figure = history.build_expiry_figure(
+        chain,
+        prepared,
+        pd.DataFrame(),
+        pd.Timestamp("2026-12-01"),
+    )
+    traces = {trace.name: trace for trace in figure.data}
+
+    assert "Settlement eligible" not in traces
+    assert "Settlement excluded" in traces
+    assert "Bloomberg settlement IV" in traces
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 0]) == [70.0, 90.0]
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 3]) == ["—", "—"]
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 4]) == ["—", "—"]
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 5]) == [80.0, 80.0]
+    assert (
+        "Premium <b>%{customdata[6]} USD/bbl</b>"
+        in traces["Settlement excluded"].hovertemplate
+    )
+    assert list(traces["Settlement excluded"].customdata[:, 6]) == [
+        "1.2500",
+        "1.1000",
+    ]
+
+
+def test_missing_bid_ask_uses_non_executable_last_price_iv_on_delta():
+    chain = _intraday_missing_quote_frame()
+    indicative = history._indicative_last_price_smile(chain)
+    assert len(indicative) == 1
+    row = indicative.iloc[0]
+    assert row["option_security"] == "COM8P 60 Comdty"
+    assert row["reference_iv"] == pytest.approx(0.2929201, abs=1e-6)
+    assert row["display_delta"] == pytest.approx(0.2319641, abs=1e-6)
+    assert row["delta_source"] == "Indicative last price · non-executable"
+    assert row["reference_time"] == "Timestamp unavailable"
+
+    figure = history.build_expiry_figure(
+        chain,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.Timestamp("2028-06-01"),
+        x_axis="delta",
+    )
+    trace_names = {trace.name for trace in figure.data}
+    assert "Indicative last-price IV" in trace_names
+    assert not any(name.startswith("Executable mid IV") for name in trace_names)
+    indicative_trace = next(
+        trace for trace in figure.data if trace.name == "Indicative last-price IV"
+    )
+    assert list(indicative_trace.y) == pytest.approx([29.29201], abs=1e-5)
+    assert "Underlying %{customdata[3]:.3f}" in indicative_trace.hovertemplate
+    assert "Volume / OI" in indicative_trace.hovertemplate
+    assert float(indicative_trace.customdata[0][3]) == pytest.approx(73.795)
+    assert not any(trace.name.startswith("Volume ·") for trace in figure.data)
+    assert not any(
+        trace.name.startswith("Open interest ·") for trace in figure.data
+    )
+    annotations = [str(item.text) for item in figure.layout.annotations]
+    assert not any("unavailable on Delta" in text for text in annotations)
+
+
+def test_expiry_figure_keeps_extreme_activity_but_focuses_on_smile():
+    chain = _chain_frame()
+    extreme_mask = chain["option_security"].eq("COZ6P 50 Comdty")
+    chain.loc[extreme_mask, "option_security"] = "COZ6P 400 Comdty"
+    chain.loc[extreme_mask, "option_global_id"] = "BBG-EXTREME"
+    chain.loc[extreme_mask, "strike"] = 400.0
+    chain.loc[extreme_mask, "settlement_price"] = 0.01
+    chain.loc[extreme_mask, "volume"] = 1
+    chain.loc[extreme_mask, "open_interest"] = 2
+    chain.loc[extreme_mask, "implied_volatility"] = None
+    chain.loc[extreme_mask, "iv_status"] = "excluded"
+    chain.loc[extreme_mask, "iv_exclusion_reason"] = "outside governed display band"
+    prepared = history.prepare_market_observations(chain)
+    published = history.published_strike_nodes(
+        _published_frame(),
+        {pd.Timestamp("2026-12-01"): 80.0},
+        pd.Timestamp("2026-08-10"),
+    )
+    figure = history.build_expiry_figure(
+        chain,
+        prepared,
+        published,
+        pd.Timestamp("2026-12-01"),
+    )
+    open_interest = next(
+        trace for trace in figure.data if trace.name == "Open interest · puts"
+    )
+    assert 400.0 in list(open_interest.x)
+    assert figure.layout.xaxis.range[1] < 400.0
+
+
+def test_delta_axis_uses_put_atm_call_convention_and_keeps_activity_only_strikes():
+    chain = _chain_frame()
+    prepared = history.prepare_market_observations(chain)
+    published = history.published_strike_nodes(
+        _published_frame(),
+        {pd.Timestamp("2026-12-01"): 80.0},
+        pd.Timestamp("2026-08-10"),
+    )
+    figure = history.build_expiry_figure(
+        chain,
+        prepared,
+        published,
+        pd.Timestamp("2026-12-01"),
+        x_axis="delta",
+    )
+
+    assert figure.layout.xaxis.title.text == "Delta (put wing → call wing)"
+    assert list(figure.layout.xaxis.range) == [0.0, 1.0]
+    assert list(figure.layout.xaxis.ticktext) == [
+        "0Δ put",
+        "10Δ put",
+        "25Δ put",
+        "ATM",
+        "25Δ call",
+        "10Δ call",
+        "0Δ call",
+    ]
+    for trace in figure.data:
+        if len(trace.x):
+            assert all(0.0 <= float(value) <= 1.0 for value in trace.x)
+
+    put_open_interest = next(
+        trace for trace in figure.data if trace.name == "Open interest · puts"
+    )
+    plotted_strikes = [float(row[0]) for row in put_open_interest.customdata]
+    assert 50.0 in plotted_strikes
+    placement_by_strike = {
+        float(row[0]): row[2] for row in put_open_interest.customdata
+    }
+    assert placement_by_strike[50.0] == "Nearest primary smile wing"
+    published_trace = next(
+        trace for trace in figure.data if trace.name == "Published Brent exact COB"
+    )
+    assert list(published_trace.x) == [0.25, 0.75]
+
+
+def test_detail_rows_distinguish_zero_from_missing_and_keep_status():
+    rows = history._detail_rows(_chain_frame(), "2026-12-01")
+    by_security = {row["option_security"]: row for row in rows}
+    assert by_security["COZ6C 90 Comdty"]["volume"] == 0
+    assert by_security["COZ6P 50 Comdty"]["volume"] is None
+    assert by_security["COZ6P 50 Comdty"]["iv_status"] == "missing_settlement"
+
+
+def test_intraday_activity_excludes_prior_volume_but_labels_stale_realtime_oi():
+    frame = _chain_frame()
+    frame["snapshot_metadata"] = [{"snapshot_kind": "INTRADAY"}] * len(frame)
+    frame["business_date"] = pd.Timestamp("2026-08-12")
+    frame["last_trade_date"] = pd.to_datetime(
+        ["2026-08-12", "2026-08-11", None]
+    )
+    frame["settlement_open_interest"] = frame["open_interest"]
+    frame["settlement_open_interest_date"] = pd.Timestamp("2026-08-11")
+    frame["intraday_open_interest"] = frame["open_interest"]
+    frame["intraday_open_interest_date"] = pd.to_datetime(
+        ["2026-08-12", "2026-08-11", None]
+    )
+
+    normalized = history._normalize_chain_frame(frame)
+    by_security = normalized.set_index("option_security")
+
+    same_day = by_security.loc["COZ6P 70 Comdty"]
+    assert same_day["volume"] == 20
+    assert same_day["open_interest"] == 250
+    assert same_day["settlement_open_interest"] == 250
+    assert same_day["intraday_open_interest"] == 250
+    assert same_day["open_interest_source"] == "Bloomberg intraday RT_OPEN_INTEREST"
+    assert same_day["volume_scope_status"] == "same_day"
+    assert same_day["open_interest_scope_status"] == "same_day"
+
+    prior_session = by_security.loc["COZ6C 90 Comdty"]
+    assert pd.isna(prior_session["volume"])
+    assert prior_session["open_interest"] == 180
+    assert prior_session["volume_scope_status"] == "prior_session_excluded"
+    assert prior_session["open_interest_scope_status"] == "stale"
+
+    missing_dates = by_security.loc["COZ6P 50 Comdty"]
+    assert pd.isna(missing_dates["volume"])
+    assert missing_dates["open_interest"] == 10
+    assert missing_dates["volume_scope_status"] == "unavailable"
+    assert (
+        missing_dates["open_interest_scope_status"]
+        == "effective_date_unavailable"
+    )
+
+
+def test_intraday_open_interest_never_falls_back_to_settlement_column():
+    frame = _chain_frame().iloc[[0]].copy()
+    frame["snapshot_metadata"] = [{"snapshot_kind": "INTRADAY"}]
+    frame["business_date"] = pd.Timestamp("2026-08-12")
+    frame["last_trade_date"] = pd.Timestamp("2026-08-12")
+    frame["settlement_open_interest"] = 9_999
+    frame["settlement_open_interest_date"] = pd.Timestamp("2026-08-11")
+    frame["intraday_open_interest"] = None
+    frame["intraday_open_interest_date"] = None
+    normalized = history._normalize_chain_frame(frame).iloc[0]
+    assert normalized["settlement_open_interest"] == 9_999
+    assert pd.isna(normalized["source_open_interest"])
+    assert pd.isna(normalized["open_interest"])
+    assert normalized["open_interest_scope_status"] == "unavailable"
+
+
+def test_settlement_snapshot_uses_official_open_interest_source():
+    normalized = _chain_frame()
+    row = normalized.iloc[0]
+    assert row["open_interest"] == row["settlement_open_interest"] == 250
+    assert row["open_interest_date"] == pd.Timestamp("2026-08-10")
+    assert row["open_interest_source"] == "Bloomberg settlement OPEN_INT"
+
+
+def test_publication_coverage_ignores_non_chain_maturities():
+    published = pd.concat(
+        [
+            _published_frame(),
+            _published_frame().assign(contract_date=pd.Timestamp("2027-01-01")),
+        ],
+        ignore_index=True,
+    )
+    assert history.publication_coverage(_chain_frame(), published) == (1, 1)

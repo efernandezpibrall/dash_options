@@ -10,7 +10,13 @@ import pandas as pd
 from dash import Input, Output, State, callback, dcc, html
 from dash.exceptions import PreventUpdate
 
-from vol_calibration.feature_flags import calibration_enabled, publication_enabled, writes_enabled
+from vol_calibration.feature_flags import (
+    calibration_enabled,
+    publication_enabled,
+    ttf_intraday_writes_enabled,
+    ttf_publication_enabled,
+    writes_enabled,
+)
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.pages import brent, hh, jkm, ttf
 from vol_calibration.session_state import persist_product_table
@@ -83,15 +89,27 @@ def create_layout(search: str | None = None):
         )
 
     context = parse_calibration_query(search)
+    model_description = (
+        "BRENT uses an SVI-anchored intraday residual adjustment; "
+        f"HH, TTF, and JKM use {DEFAULT_CALIBRATION_MODEL_VERSION}. "
+    )
+    if ttf_publication_enabled():
+        mutation_description = (
+            "TTF intraday trades and validated-surface saving are enabled; "
+            "legacy save paths for other products remain disabled."
+        )
+    elif ttf_intraday_writes_enabled():
+        mutation_description = (
+            "TTF intraday trade persistence is enabled; publication and legacy "
+            "calibration saving remain disabled."
+        )
+    else:
+        mutation_description = "Database saving and publication are disabled."
     notices = [
         dbc.Alert(
             [
                 html.Strong("Diagnostic release: "),
-                (
-                    "calibration, comparison, and export use "
-                    f"{DEFAULT_CALIBRATION_MODEL_VERSION}. "
-                    "Database saving and publication are disabled."
-                ),
+                model_description + mutation_description,
             ],
             color="warning",
             className="vol-calibration-release-notice",

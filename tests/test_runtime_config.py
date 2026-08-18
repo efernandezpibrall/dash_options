@@ -5,6 +5,8 @@ from runtime_config import clear_runtime_config_cache, config_bool, config_value
 from vol_calibration.feature_flags import (
     background_jobs_enabled,
     publication_enabled,
+    ttf_intraday_writes_enabled,
+    ttf_publication_enabled,
     writes_enabled,
 )
 
@@ -64,6 +66,25 @@ def test_invalid_ssl_verification_setting_fails_closed(monkeypatch, tmp_path):
         config_bool("TRINOS", "VERIFY_SSL", fallback=True)
 
 
+def test_bloomberg_refresh_flags_have_independent_environment_overrides(
+    monkeypatch,
+    tmp_path,
+):
+    _use_empty_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED", "false")
+    monkeypatch.setenv("BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED", "true")
+    clear_runtime_config_cache()
+
+    assert (
+        config_bool("BLOOMBERG_OPTIONS", "INTRADAY_REFRESH_ENABLED", fallback=True)
+        is False
+    )
+    assert (
+        config_bool("BLOOMBERG_OPTIONS", "SETTLEMENT_REFRESH_ENABLED", fallback=False)
+        is True
+    )
+
+
 def test_aspect_environment_settings_are_available_without_a_config_section(
     monkeypatch,
     tmp_path,
@@ -103,7 +124,10 @@ def test_trino_connection_receives_the_configured_ssl_setting(monkeypatch):
     assert captured["closed"] is True
 
 
-def test_all_calibration_mutation_flags_default_to_disabled(monkeypatch):
+def test_all_calibration_mutation_flags_default_to_disabled(
+    monkeypatch, tmp_path
+):
+    _use_empty_config(monkeypatch, tmp_path)
     for name in (
         "VOL_CALIBRATION_WRITES_ENABLED",
         "VOL_CALIBRATION_PUBLISH_ENABLED",
@@ -114,6 +138,55 @@ def test_all_calibration_mutation_flags_default_to_disabled(monkeypatch):
     assert writes_enabled() is False
     assert publication_enabled() is False
     assert background_jobs_enabled() is False
+
+
+def test_calibration_mutation_flags_can_be_enabled_from_config(
+    monkeypatch, tmp_path
+):
+    config_path = tmp_path / "write-enabled.ini"
+    config_path.write_text(
+        "[VOL_CALIBRATION]\n"
+        "WRITES_ENABLED = true\n"
+        "PUBLISH_ENABLED = true\n"
+        "BACKGROUND_JOBS_ENABLED = false\n"
+    )
+    monkeypatch.setenv("OPTIONS_CONFIG_PATH", str(config_path))
+    for name in (
+        "VOL_CALIBRATION_WRITES_ENABLED",
+        "VOL_CALIBRATION_PUBLISH_ENABLED",
+        "VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    clear_runtime_config_cache()
+
+    assert writes_enabled() is True
+    assert publication_enabled() is True
+    assert background_jobs_enabled() is False
+
+
+def test_ttf_write_flags_are_scoped_from_legacy_saves(monkeypatch, tmp_path):
+    config_path = tmp_path / "ttf-write-enabled.ini"
+    config_path.write_text(
+        "[VOL_CALIBRATION]\n"
+        "WRITES_ENABLED = false\n"
+        "PUBLISH_ENABLED = false\n"
+        "TTF_INTRADAY_WRITES_ENABLED = true\n"
+        "TTF_PUBLICATION_ENABLED = true\n"
+    )
+    monkeypatch.setenv("OPTIONS_CONFIG_PATH", str(config_path))
+    for name in (
+        "VOL_CALIBRATION_WRITES_ENABLED",
+        "VOL_CALIBRATION_PUBLISH_ENABLED",
+        "VOL_CALIBRATION_TTF_INTRADAY_WRITES_ENABLED",
+        "VOL_CALIBRATION_TTF_PUBLICATION_ENABLED",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    clear_runtime_config_cache()
+
+    assert writes_enabled() is False
+    assert publication_enabled() is False
+    assert ttf_intraday_writes_enabled() is True
+    assert ttf_publication_enabled() is True
 
 
 def test_background_jobs_cannot_bypass_disabled_writes(monkeypatch):

@@ -6,11 +6,12 @@ import logging
 import threading
 from collections import OrderedDict
 from functools import lru_cache
+from math import ceil
 from zoneinfo import ZoneInfo
 
 import dash
 import dash_ag_grid as dag
-from dash import Input, Output, State, callback, dcc, html
+from dash import Input, Output, State, callback, clientside_callback, dcc, html
 import pandas as pd
 import requests
 from sqlalchemy import text
@@ -43,6 +44,72 @@ ASPECT_REQUIRED_COLUMNS = {
     'strategy',
     'entityType',
 }
+
+STRATEGY_DROPDOWN_LABELS = {
+    'select_all': 'Select all',
+    'deselect_all': 'Clear all',
+    'selected_count': '{num_selected} strategies selected',
+    'search': 'Search strategies',
+    'clear_search': 'Clear strategy search',
+    'clear_selection': 'Clear strategy selection',
+    'no_options_found': 'No strategies found',
+}
+
+RISK_BUCKET_DROPDOWN_LABELS = {
+    'select_all': 'Select all',
+    'deselect_all': 'Clear all',
+    'selected_count': '{num_selected} assets / pairs',
+    'search': 'Search assets and pairs',
+    'clear_search': 'Clear asset and pair search',
+    'clear_selection': 'Clear asset and pair selection',
+    'no_options_found': 'No assets or pairs found',
+}
+
+TRADE_TYPE_DROPDOWN_LABELS = {
+    'select_all': 'Select all',
+    'deselect_all': 'Clear all',
+    'selected_count': '{num_selected} trade types selected',
+    'search': 'Search trade types',
+    'clear_search': 'Clear trade type search',
+    'clear_selection': 'Clear trade type selection',
+    'no_options_found': 'No trade types found',
+}
+
+
+def _all_selected_labels_clientside(labels, all_selected_label):
+    return """
+function(options, selectedValues) {
+    const labels = %(labels)s;
+    const availableValues = (options || []).map(function(option) {
+        return option && typeof option === 'object' ? option.value : option;
+    });
+    const selected = new Set(Array.isArray(selectedValues) ? selectedValues : []);
+    const allSelected = availableValues.length > 0
+        && availableValues.every(function(value) { return selected.has(value); });
+
+    labels.selected_count = allSelected
+        ? %(all_selected_label)s
+        : labels.selected_count;
+    return labels;
+}
+""" % {
+        'labels': json.dumps(labels),
+        'all_selected_label': json.dumps(all_selected_label),
+    }
+
+
+STRATEGY_DROPDOWN_LABELS_CLIENTSIDE = _all_selected_labels_clientside(
+    STRATEGY_DROPDOWN_LABELS,
+    'All strategies selected',
+)
+RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE = _all_selected_labels_clientside(
+    RISK_BUCKET_DROPDOWN_LABELS,
+    'All assets / pairs',
+)
+TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE = _all_selected_labels_clientside(
+    TRADE_TYPE_DROPDOWN_LABELS,
+    'All trade types selected',
+)
 ASPECT_EXPORT_COLUMNS = [
     'instrument',
     'qty',
@@ -427,7 +494,8 @@ def _month_through_label(value):
     date_value = _to_timestamp(value)
     if date_value is None:
         return 'Unknown'
-    return f'{_quarter_label(date_value)} / {date_value.strftime("%Y-%m")}'
+    quarter = ((date_value.month - 1) // 3) + 1
+    return f'{date_value.year} Q{quarter} · {date_value.strftime("%b")}'
 
 
 def _quarter_through_label(value):
@@ -500,6 +568,50 @@ def _maturity_sort_key(value):
     if len(first_component) == 4 and first_component.isdigit():
         return (int(first_component), 12, 4, value)
     return (9998, 12, 8, value)
+
+
+def _common_maturity_axis(*frames):
+    """Return one chronological maturity axis for all comparable grids."""
+    maturities = set()
+    for frame in frames:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        column = (
+            'maturity_bucket'
+            if 'maturity_bucket' in frame.columns
+            else 'Maturity' if 'Maturity' in frame.columns else None
+        )
+        if column is None:
+            continue
+        for value in frame[column]:
+            if value is None or pd.isna(value):
+                continue
+            label = str(value).strip()
+            if label and label != 'Total':
+                maturities.add(label)
+    return sorted(maturities, key=_maturity_sort_key)
+
+
+def _align_maturity_rows(table, maturity_axis, index_name='Maturity'):
+    if table.empty:
+        return table
+
+    aligned = table.copy()
+    if maturity_axis is None:
+        order = sorted(
+            aligned[index_name].astype(str).tolist(),
+            key=_maturity_sort_key,
+        )
+    else:
+        order = list(maturity_axis)
+
+    aligned[index_name] = aligned[index_name].astype(str)
+    return (
+        aligned.set_index(index_name)
+        .reindex(order)
+        .rename_axis(index_name)
+        .reset_index()
+    )
 
 
 def _calendar_month_starts(value):
@@ -1252,7 +1364,7 @@ def create_unit_aggregate_df(rows):
     return pivot[['Unit'] + greek_columns]
 
 
-def create_ladder_df(rows, greek_key):
+def create_ladder_df(rows, greek_key, maturity_axis=None):
     if rows.empty:
         return pd.DataFrame()
 
@@ -1269,20 +1381,19 @@ def create_ladder_df(rows, greek_key):
         columns=column_name,
         values='exposure',
         aggfunc='sum',
-        fill_value=0,
     )
 
     net = net.reset_index().rename(columns={'maturity_bucket': index_name})
-    net = net.loc[sorted(net.index, key=lambda index: _maturity_sort_key(net.at[index, index_name]))].reset_index(drop=True)
+    net = _align_maturity_rows(net, maturity_axis, index_name)
 
     numeric_columns = [column for column in net.columns if column != index_name]
     if _should_add_theta_total(greek_rows, greek_key):
-        net['Total'] = net[numeric_columns].sum(axis=1)
+        net['Total'] = net[numeric_columns].sum(axis=1, min_count=1)
         numeric_columns.append('Total')
 
     total_row = {index_name: 'Total', '_row_type': 'total'}
     for column in numeric_columns:
-        total_row[column] = net[column].sum()
+        total_row[column] = net[column].sum(min_count=1)
 
     net['_row_type'] = 'normal'
     net = concat_dataframes([net, pd.DataFrame([total_row])], ignore_index=True)
@@ -1333,7 +1444,7 @@ def create_ladder_unit_headers(rows, greek_key):
     return unit_headers
 
 
-def create_unit_ladder_df(rows, greek_key):
+def create_unit_ladder_df(rows, greek_key, maturity_axis=None):
     if rows.empty:
         return pd.DataFrame()
 
@@ -1347,20 +1458,19 @@ def create_unit_ladder_df(rows, greek_key):
         columns='unit',
         values='exposure',
         aggfunc='sum',
-        fill_value=0,
     )
 
     net = net.reset_index().rename(columns={'maturity_bucket': index_name})
-    net = net.loc[sorted(net.index, key=lambda index: _maturity_sort_key(net.at[index, index_name]))].reset_index(drop=True)
+    net = _align_maturity_rows(net, maturity_axis, index_name)
 
     numeric_columns = [column for column in net.columns if column != index_name]
     if _should_add_theta_total(greek_rows, greek_key):
-        net['Total'] = net[numeric_columns].sum(axis=1)
+        net['Total'] = net[numeric_columns].sum(axis=1, min_count=1)
         numeric_columns.append('Total')
 
     total_row = {index_name: 'Total', '_row_type': 'total'}
     for column in numeric_columns:
-        total_row[column] = net[column].sum()
+        total_row[column] = net[column].sum(min_count=1)
 
     net['_row_type'] = 'normal'
     net = concat_dataframes([net, pd.DataFrame([total_row])], ignore_index=True)
@@ -1383,7 +1493,7 @@ def _bucket_greek_column_labels(bucket_type, available_greeks=None):
     return [GREEK_DEFINITIONS[greek_key]['label'] for greek_key in greek_keys]
 
 
-def create_bucket_greek_tables(rows):
+def create_bucket_greek_tables(rows, maturity_axis=None):
     if rows.empty:
         return []
 
@@ -1425,24 +1535,21 @@ def create_bucket_greek_tables(rows):
             columns='greek',
             values='net',
             aggfunc='sum',
-            fill_value=0,
         )
         table.columns = [GREEK_DEFINITIONS[greek]['label'] for greek in table.columns]
         table = table.reset_index().rename(columns={'maturity_bucket': 'Maturity'})
-        table = table.loc[
-            sorted(table.index, key=lambda row_index: _maturity_sort_key(table.at[row_index, 'Maturity']))
-        ].reset_index(drop=True)
+        table = _align_maturity_rows(table, maturity_axis)
         greek_columns = _bucket_greek_column_labels(
             bucket['bucket_type'],
             bucket_rows['greek'],
         )
         for column in greek_columns:
             if column not in table.columns:
-                table[column] = 0.0
+                table[column] = pd.NA
 
         total_row = {'Maturity': 'Total', '_row_type': 'total'}
         for column in greek_columns:
-            total_row[column] = table[column].sum()
+            total_row[column] = table[column].sum(min_count=1)
 
         table['_row_type'] = 'normal'
         table = concat_dataframes([table, pd.DataFrame([total_row])], ignore_index=True)
@@ -1455,6 +1562,8 @@ def create_bucket_greek_tables(rows):
         bucket_tables.append({
             'id': f'bucket-greeks-{index}',
             'title': title,
+            'kind_label': bucket_type_label.title(),
+            'display_label': str(bucket['display_bucket']),
             'bucket_type': bucket['bucket_type'],
             'risk_bucket': str(bucket['display_bucket']),
             'unit': unit_label,
@@ -1523,19 +1632,29 @@ def create_raw_rows_df(rows):
     )
 
 
-def build_display_tables(rows):
-    bucket_greek_tables = create_bucket_greek_tables(rows)
+def build_display_tables(rows, maturity_axis=None):
+    bucket_greek_tables = create_bucket_greek_tables(rows, maturity_axis)
     return {
         'summary': create_summary_df(rows),
         'bucket_greek_tables': bucket_greek_tables,
-        **{f'{greek_key}_ladder': create_ladder_df(rows, greek_key) for greek_key in GREEK_KEYS},
+        **{
+            f'{greek_key}_ladder': create_ladder_df(rows, greek_key, maturity_axis)
+            for greek_key in GREEK_KEYS
+        },
         **{f'{greek_key}_ladder_units': create_ladder_unit_headers(rows, greek_key) for greek_key in GREEK_KEYS},
-        **{f'{greek_key}_unit_ladder': create_unit_ladder_df(rows, greek_key) for greek_key in GREEK_KEYS},
+        **{
+            f'{greek_key}_unit_ladder': create_unit_ladder_df(
+                rows,
+                greek_key,
+                maturity_axis,
+            )
+            for greek_key in GREEK_KEYS
+        },
     }
 
 
-def build_output_tables(rows):
-    tables = build_display_tables(rows)
+def build_output_tables(rows, maturity_axis=None):
+    tables = build_display_tables(rows, maturity_axis)
     return {
         **tables,
         'unit_aggregate': create_unit_aggregate_df(rows),
@@ -1621,7 +1740,7 @@ def _aspect_status_text(meta):
     return message
 
 
-def build_aspect_overlay_tables(rows):
+def build_aspect_overlay_tables(rows, maturity_axis=None):
     if rows.empty:
         return html.Div(
             'Load an Aspect settlement or live snapshot to view the delta overlay.',
@@ -1629,8 +1748,8 @@ def build_aspect_overlay_tables(rows):
         )
 
     summary = create_aspect_summary_df(rows)
-    delta_ladder = create_ladder_df(rows, 'delta')
-    delta_unit_ladder = create_unit_ladder_df(rows, 'delta')
+    delta_ladder = create_ladder_df(rows, 'delta', maturity_axis)
+    delta_unit_ladder = create_unit_ladder_df(rows, 'delta', maturity_axis)
     unit_headers = create_ladder_unit_headers(rows, 'delta')
 
     return html.Div([
@@ -1641,6 +1760,7 @@ def build_aspect_overlay_tables(rows):
                 summary,
                 fit_to_content=True,
                 grid_class_suffix=' greeks-aspect-grid',
+                accessible_label='Aspect delta by strategy and instrument',
             ),
         ], className='greeks-aspect-table-panel'),
         html.Div([
@@ -1648,9 +1768,10 @@ def build_aspect_overlay_tables(rows):
             build_compact_table(
                 'greeks-aspect-delta-ladder-table',
                 delta_ladder,
-                fit_to_content=True,
+                comparison_grid=True,
                 grid_class_suffix=' greeks-aspect-grid',
                 unit_headers=unit_headers,
+                accessible_label='Aspect delta by maturity and instrument',
             ),
         ], className='greeks-aspect-table-panel'),
         html.Div([
@@ -1658,14 +1779,15 @@ def build_aspect_overlay_tables(rows):
             build_compact_table(
                 'greeks-aspect-unit-ladder-table',
                 delta_unit_ladder,
-                fit_to_content=True,
+                comparison_grid=True,
                 grid_class_suffix=' greeks-aspect-grid',
+                accessible_label='Aspect delta by maturity and unit',
             ),
         ], className='greeks-aspect-table-panel'),
     ], className='greeks-aspect-table-grid')
 
 
-QUANTITY_GREEK_DECIMAL_PLACES = 6
+DISPLAY_DECIMAL_PLACES = 0
 QUANTITY_GREEK_NUMBER_FORMAT = '#,##0.000000'
 MONETARY_NUMBER_FORMAT = '#,##0.00'
 MONETARY_EXPORT_COLUMNS = {'Value', 'P&L'}
@@ -1678,20 +1800,17 @@ def _round_numeric(df):
     rounded = df.copy()
     for column in rounded.select_dtypes(include='number').columns:
         rounded[column] = rounded[column].round(
-            QUANTITY_GREEK_DECIMAL_PLACES
+            DISPLAY_DECIMAL_PLACES
         )
     return rounded
 
 
 def _format_grid_number(value):
     numeric_value = _safe_number(value)
-    if numeric_value == 0:
-        return None
-    return f'{numeric_value:,.{QUANTITY_GREEK_DECIMAL_PLACES}f}'
+    return f'{numeric_value:,.{DISPLAY_DECIMAL_PLACES}f}'
 
 
 def _format_grid_records(df, numeric_columns):
-    formatted = []
     formatted = []
     for record in df.to_dict('records'):
         clean = {}
@@ -1709,29 +1828,53 @@ def _format_grid_records(df, numeric_columns):
 
 
 def _clamp_width(value, minimum, maximum):
-    return int(max(minimum, min(maximum, value)))
+    return int(ceil(max(minimum, min(maximum, value))))
+
+
+def _estimated_text_pixels(value):
+    text_value = str(value)
+    width = 0.0
+    for character in text_value:
+        if character.isdigit():
+            width += 7.6
+        elif character.isupper():
+            width += 7.0
+        elif character.islower():
+            width += 9.0 if character in {'m', 'w'} else 3.6 if character in {'i', 'l'} else 6.5
+        elif character in {',', '.', ':', ';'}:
+            width += 4.1
+        elif character in {'-', '/', '\\'}:
+            width += 4.5
+        elif character.isspace():
+            width += 3.5
+        else:
+            width += 6.0
+    return width
 
 
 def _estimate_content_width(df, column, numeric_columns):
-    header_length = len(str(column))
+    header_width = _estimated_text_pixels(column)
     values = df[column].dropna().tolist() if column in df.columns else []
 
     if column in numeric_columns:
-        display_lengths = [len(_format_grid_number(value) or '') for value in values]
-        content_length = max([header_length, *display_lengths], default=header_length)
-        return _clamp_width(content_length * 8 + 24, 72, 230)
+        value_widths = [
+            _estimated_text_pixels(_format_grid_number(value) or '')
+            for value in values
+        ]
+        content_width = max([header_width, *value_widths], default=header_width)
+        return _clamp_width(content_width + 10, 52, 184)
 
-    display_lengths = [len(str(value)) for value in values]
-    content_length = max([header_length, *display_lengths], default=header_length)
+    value_widths = [_estimated_text_pixels(value) for value in values]
+    content_width = max([header_width, *value_widths], default=header_width)
     if column == 'Maturity':
-        return _clamp_width(content_length * 8 + 28, 88, 122)
+        return _clamp_width(content_width + 10, 68, 96)
     if column == 'Risk Bucket':
-        return _clamp_width(content_length * 7 + 36, 140, 260)
+        return _clamp_width(content_width + 16, 120, 240)
     if column == 'Bucket Type':
-        return _clamp_width(content_length * 7 + 28, 96, 124)
+        return _clamp_width(content_width + 12, 84, 116)
     if column == 'Unit':
-        return _clamp_width(content_length * 7 + 28, 72, 90)
-    return _clamp_width(content_length * 7 + 28, 84, 220)
+        return _clamp_width(content_width + 10, 60, 84)
+    return _clamp_width(content_width + 12, 68, 200)
 
 
 def _with_unit_header(column_def, unit_headers, column):
@@ -1745,8 +1888,14 @@ def _with_unit_header(column_def, unit_headers, column):
     }
 
 
-def _ag_grid_column_defs(df, fit_to_content=False, unit_headers=None):
+def _ag_grid_column_defs(
+    df,
+    fit_to_content=False,
+    unit_headers=None,
+    comparison_grid=False,
+):
     column_defs = []
+    size_to_content = fit_to_content or comparison_grid
     numeric_columns = set(df.select_dtypes(include='number').columns.tolist())
     text_columns = {'Bucket Type', 'Risk Bucket', 'Unit', 'Maturity'}
     text_widths = {
@@ -1766,20 +1915,28 @@ def _ag_grid_column_defs(df, fit_to_content=False, unit_headers=None):
                 'headerName': column,
                 'field': column,
                 'type': 'rightAligned',
-                'sortable': True,
+                'sortable': not comparison_grid,
                 'filter': False,
-                'resizable': True,
-                'minWidth': 64,
+                'resizable': not comparison_grid,
+                'suppressMovable': comparison_grid,
+                'minWidth': 72,
                 'cellClass': 'mckinsey-ag-grid-cell mckinsey-ag-grid-number-cell greeks-number-cell',
                 'headerClass': 'mckinsey-ag-grid-header greeks-number-header',
                 'headerTooltip': column,
                 'cellClassRules': {
                     'greeks-positive-cell': f"Number(params.data['{raw_field}']) > 0",
                     'greeks-negative-cell': f"Number(params.data['{raw_field}']) < 0",
+                    'greeks-missing-cell': f"params.data['{raw_field}'] == null",
                 },
             }
-            if fit_to_content:
-                column_def['width'] = _estimate_content_width(df, column, numeric_columns)
+            if size_to_content:
+                measured_width = _estimate_content_width(df, column, numeric_columns)
+                column_def.update({
+                    'width': measured_width,
+                    'minWidth': measured_width,
+                })
+                if comparison_grid:
+                    column_def['maxWidth'] = measured_width
             else:
                 column_def['flex'] = 1
             column_defs.append(_with_unit_header(column_def, unit_headers, column))
@@ -1787,19 +1944,36 @@ def _ag_grid_column_defs(df, fit_to_content=False, unit_headers=None):
             column_def = {
                 'headerName': column,
                 'field': column,
-                'sortable': True,
+                'sortable': not comparison_grid,
                 'filter': False,
-                'resizable': True,
+                'resizable': not comparison_grid,
+                'suppressMovable': comparison_grid,
                 'minWidth': text_widths.get(column, {}).get('minWidth', 84 if column in text_columns else 72),
                 'cellClass': 'mckinsey-ag-grid-cell mckinsey-ag-grid-text-cell greeks-text-cell',
                 'headerClass': 'mckinsey-ag-grid-header greeks-text-header',
                 'headerTooltip': column,
                 'tooltipField': column,
             }
-            if fit_to_content:
-                column_def['width'] = _estimate_content_width(df, column, numeric_columns)
+            if size_to_content:
+                measured_width = _estimate_content_width(df, column, numeric_columns)
+                column_def.update({
+                    'width': measured_width,
+                    'minWidth': measured_width,
+                })
+                if comparison_grid:
+                    column_def['maxWidth'] = measured_width
             else:
                 column_def['flex'] = text_widths.get(column, {}).get('flex', 1.3 if column in text_columns else 1)
+            if comparison_grid and column == 'Maturity':
+                maturity_width = column_def['width']
+                column_def.update({
+                    'pinned': 'left',
+                    'lockPinned': True,
+                    'lockPosition': 'left',
+                    'width': maturity_width,
+                    'minWidth': maturity_width,
+                    'maxWidth': maturity_width,
+                })
             column_defs.append(_with_unit_header(column_def, unit_headers, column))
 
     return column_defs
@@ -1815,7 +1989,16 @@ def _column_width_sum(column_defs):
     return total
 
 
-def build_compact_table(table_id, df, max_height=None, fit_to_content=False, grid_class_suffix='', unit_headers=None):
+def build_compact_table(
+    table_id,
+    df,
+    max_height=None,
+    fit_to_content=False,
+    grid_class_suffix='',
+    unit_headers=None,
+    comparison_grid=False,
+    accessible_label=None,
+):
     del max_height
     if df.empty:
         return html.Div('No data for the current selection.', className='greeks-empty-state')
@@ -1823,13 +2006,38 @@ def build_compact_table(table_id, df, max_height=None, fit_to_content=False, gri
     display_df = _round_numeric(df)
     numeric_columns = display_df.select_dtypes(include='number').columns.tolist()
     records = _format_grid_records(display_df, numeric_columns)
-    column_defs = _ag_grid_column_defs(display_df, fit_to_content=fit_to_content, unit_headers=unit_headers)
-    content_width = _column_width_sum(column_defs) + 28
+    column_defs = _ag_grid_column_defs(
+        display_df,
+        fit_to_content=fit_to_content,
+        unit_headers=unit_headers,
+        comparison_grid=comparison_grid,
+    )
+    content_width = _column_width_sum(column_defs) + 2
     grid_style = (
         {'width': f'{content_width}px', 'maxWidth': '100%', 'height': 'auto'}
-        if fit_to_content
+        if fit_to_content or comparison_grid
         else {'width': '100%', 'height': 'auto'}
     )
+
+    grid_options = {
+        'domLayout': 'autoHeight',
+        'rowHeight': 28,
+        'headerHeight': 30,
+        'groupHeaderHeight': 24,
+        'pagination': False,
+        'suppressPaginationPanel': True,
+        'enableCellTextSelection': True,
+        'ensureDomOrder': True,
+        'animateRows': False,
+        'alwaysShowHorizontalScroll': False,
+        'alwaysShowVerticalScroll': False,
+        'suppressHorizontalScroll': False,
+        'suppressMovableColumns': comparison_grid,
+    }
+    if comparison_grid:
+        grid_options['getRowId'] = {'function': "params.data['Maturity']"}
+    if accessible_label:
+        grid_options['ariaLabel'] = accessible_label
 
     return dag.AgGrid(
         id=table_id,
@@ -1840,22 +2048,9 @@ def build_compact_table(table_id, df, max_height=None, fit_to_content=False, gri
             'autoHeaderHeight': False,
             'suppressHeaderMenuButton': True,
             'suppressHeaderFilterButton': True,
-            'resizable': True,
+            'resizable': not comparison_grid,
         },
-        dashGridOptions={
-            'domLayout': 'autoHeight',
-            'rowHeight': 30,
-            'headerHeight': 32,
-            'groupHeaderHeight': 28,
-            'pagination': False,
-            'suppressPaginationPanel': True,
-            'enableCellTextSelection': True,
-            'ensureDomOrder': True,
-            'animateRows': False,
-            'alwaysShowHorizontalScroll': False,
-            'alwaysShowVerticalScroll': False,
-            'suppressHorizontalScroll': True,
-        },
+        dashGridOptions=grid_options,
         rowClassRules={
             'greeks-total-row': "params.data && params.data._row_type === 'total'",
             'greeks-unit-row': "params.data && params.data['Bucket Type'] === 'Unit'",
@@ -1863,15 +2058,20 @@ def build_compact_table(table_id, df, max_height=None, fit_to_content=False, gri
         className=(
             'ag-theme-alpine mckinsey-ag-grid supply-dest-summary-grid greeks-ag-grid'
             + (' greeks-content-fit-grid' if fit_to_content else '')
+            + (' greeks-comparison-grid' if comparison_grid else '')
             + grid_class_suffix
         ),
         style=grid_style,
-        columnSize=None if fit_to_content else 'responsiveSizeToFit',
+        columnSize=(
+            None
+            if fit_to_content or comparison_grid
+            else 'responsiveSizeToFit'
+        ),
         columnSizeOptions={
-            'defaultMinWidth': 58,
+            'defaultMinWidth': 72,
             'columnLimits': [
                 {'key': 'Risk Bucket', 'minWidth': 170},
-                {'key': 'Maturity', 'minWidth': 112},
+                {'key': 'Maturity', 'minWidth': 68, 'maxWidth': 96},
                 {'key': 'Bucket Type', 'minWidth': 92},
                 {'key': 'Unit', 'minWidth': 74},
             ],
@@ -1887,12 +2087,29 @@ def build_bucket_greek_sections(tables):
 
     return html.Div([
         html.Div([
-            html.Div(bucket_table['title'], className='greeks-bucket-greek-title'),
+            html.Div([
+                html.Div([
+                    html.Span(
+                        bucket_table['kind_label'],
+                        className='greeks-bucket-greek-kind',
+                    ),
+                    html.Span('·', className='greeks-bucket-greek-separator'),
+                    html.Span(
+                        bucket_table['display_label'],
+                        className='greeks-bucket-greek-name',
+                    ),
+                ], className='greeks-bucket-greek-heading'),
+                html.Span(
+                    bucket_table['unit'],
+                    className='greeks-bucket-greek-unit',
+                ) if bucket_table['unit'] else None,
+            ], className='greeks-bucket-greek-title'),
             build_compact_table(
                 f"greeks-{bucket_table['id']}-table",
                 bucket_table['table'],
-                fit_to_content=True,
+                comparison_grid=True,
                 grid_class_suffix=' greeks-bucket-greek-grid',
+                accessible_label=bucket_table['title'],
             ),
         ], className='greeks-bucket-greek-panel')
         for bucket_table in bucket_tables
@@ -1906,15 +2123,17 @@ def build_ladder_sections(tables):
         exposure_table = build_compact_table(
             f'greeks-{greek_key}-ladder-table',
             tables.get(f'{greek_key}_ladder', pd.DataFrame()),
-            fit_to_content=True,
+            comparison_grid=True,
             grid_class_suffix=' greeks-ladder-grid',
             unit_headers=tables.get(f'{greek_key}_ladder_units', {}),
+            accessible_label=f'{greek_label} by maturity and asset or pair',
         )
         unit_exposure_table = build_compact_table(
             f'greeks-{greek_key}-unit-ladder-table',
             tables.get(f'{greek_key}_unit_ladder', pd.DataFrame()),
-            fit_to_content=True,
+            comparison_grid=True,
             grid_class_suffix=' greeks-ladder-grid greeks-unit-exposure-grid',
+            accessible_label=f'{greek_label} by maturity and unit',
         )
         sections.append(
             html.Div([
@@ -1923,7 +2142,7 @@ def build_ladder_sections(tables):
                 ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
                 html.Div([
                     html.Div([
-                        html.Div('By Bucket', className='greeks-ladder-subtitle'),
+                        html.Div('By asset / pair', className='greeks-ladder-subtitle'),
                         exposure_table,
                     ], className='supply-dest-table-container greeks-monitor-table-wrap greeks-ladder-table-panel'),
                     html.Div([
@@ -1945,7 +2164,7 @@ def _format_currency(value):
     value = _safe_number(value)
     sign = '-' if value < 0 else ''
     return (
-        f'{sign}${abs(value):,.{QUANTITY_GREEK_DECIMAL_PLACES}f}'
+        f'{sign}${abs(value):,.{DISPLAY_DECIMAL_PLACES}f}'
     )
 
 
@@ -2041,15 +2260,20 @@ layout = html.Div([
                     options=MATURITY_AGGREGATION_OPTIONS,
                     value='mixed',
                     inline=True,
-                    className='supply-dest-view-selector exporters-sticky-selector greeks-aggregation-mode-selector',
+                    className=(
+                        'greeks-segmented-control '
+                        'greeks-aggregation-mode-selector'
+                    ),
                     inputClassName='greeks-aggregation-mode-input',
                     labelClassName='greeks-aggregation-mode-option',
-                    inputStyle={'display': 'none'},
-                    labelStyle={'marginRight': '0'},
                 ),
-            ], className='greeks-monitor-control-group greeks-control-aggregation'),
+            ], className=(
+                'greeks-monitor-control-group '
+                'greeks-segmented-control-group '
+                'greeks-control-aggregation'
+            )),
             html.Div([
-                html.Label('Monthly Through', className='inline-filter-label'),
+                html.Label('Month Cutoff', className='inline-filter-label'),
                 dcc.Dropdown(
                     id='month-through-selector',
                     options=[],
@@ -2059,7 +2283,7 @@ layout = html.Div([
                 ),
             ], className='greeks-monitor-control-group greeks-control-month-through'),
             html.Div([
-                html.Label('Quarterly Through', className='inline-filter-label'),
+                html.Label('Quarter Cutoff', className='inline-filter-label'),
                 dcc.Dropdown(
                     id='quarter-through-selector',
                     options=[],
@@ -2069,36 +2293,24 @@ layout = html.Div([
                 ),
             ], className='greeks-monitor-control-group greeks-control-quarter-through'),
             html.Div([
-                html.Label('Unit Mode', className='inline-filter-label'),
+                html.Label('Unit', className='inline-filter-label'),
                 dcc.RadioItems(
                     id='unit-mode-selector',
                     options=UNIT_MODE_OPTIONS,
                     value='native',
                     inline=True,
-                    className='supply-dest-view-selector exporters-sticky-selector greeks-unit-mode-selector',
+                    className=(
+                        'greeks-segmented-control '
+                        'greeks-unit-mode-selector'
+                    ),
                     inputClassName='greeks-unit-mode-input',
                     labelClassName='greeks-unit-mode-option',
-                    inputStyle={'display': 'none'},
-                    labelStyle={'marginRight': '0'},
                 ),
-            ], className='greeks-monitor-control-group greeks-control-unit-mode'),
-            html.Div([
-                html.Button(
-                    'Load Aspect COB',
-                    id='greeks-aspect-settlement-btn',
-                    className='greeks-aspect-button greeks-aspect-button-secondary',
-                    title='Load the selected COB settlement exposure from Aspect',
-                ),
-                html.Button(
-                    'Load Aspect Live',
-                    id='greeks-aspect-live-btn',
-                    className='greeks-aspect-button greeks-aspect-button-live',
-                    title='Load today’s live exposure from Aspect',
-                ),
-                html.Button('Export Workbook', id='export-greeks-workbook-btn', className='inline-button-primary'),
-            ], className='greeks-monitor-actions'),
-        ], className='greeks-monitor-control-row'),
-        html.Div([
+            ], className=(
+                'greeks-monitor-control-group '
+                'greeks-segmented-control-group '
+                'greeks-control-unit-mode'
+            )),
             html.Div([
                 html.Label('Strategies', className='inline-filter-label'),
                 dcc.Dropdown(
@@ -2106,8 +2318,17 @@ layout = html.Div([
                     options=[],
                     value=[],
                     multi=True,
+                    closeOnSelect=False,
+                    debounce=True,
+                    optionHeight=40,
+                    maxHeight=360,
+                    labels=STRATEGY_DROPDOWN_LABELS,
                     placeholder='Select strategies',
-                    className='greeks-inline-dropdown-multi',
+                    className=(
+                        'greeks-inline-dropdown-multi '
+                        'greeks-compact-multi-dropdown '
+                        'greeks-strategy-dropdown'
+                    ),
                 ),
             ], className='greeks-monitor-control-group greeks-control-strategies'),
             html.Div([
@@ -2117,8 +2338,17 @@ layout = html.Div([
                     options=[],
                     value=[],
                     multi=True,
+                    closeOnSelect=False,
+                    debounce=True,
+                    optionHeight=40,
+                    maxHeight=360,
+                    labels=TRADE_TYPE_DROPDOWN_LABELS,
                     placeholder='Select trade types',
-                    className='greeks-inline-dropdown-trade-type',
+                    className=(
+                        'greeks-inline-dropdown-trade-type '
+                        'greeks-compact-multi-dropdown '
+                        'greeks-trade-type-dropdown'
+                    ),
                 ),
             ], className='greeks-monitor-control-group greeks-control-trade-types'),
             html.Div([
@@ -2128,11 +2358,53 @@ layout = html.Div([
                     options=[],
                     value=[],
                     multi=True,
+                    closeOnSelect=False,
+                    debounce=True,
+                    optionHeight=40,
+                    maxHeight=360,
+                    labels=RISK_BUCKET_DROPDOWN_LABELS,
                     placeholder='Select instruments and pairs',
-                    className='greeks-inline-dropdown-multi',
+                    className=(
+                        'greeks-inline-dropdown-multi '
+                        'greeks-compact-multi-dropdown '
+                        'greeks-risk-bucket-dropdown'
+                    ),
                 ),
             ], className='greeks-monitor-control-group greeks-control-risk-buckets'),
-        ], className='greeks-monitor-control-row'),
+            html.Div([
+                html.Label('Aspect Actions', className='inline-filter-label'),
+                html.Div([
+                    html.Button(
+                        'COB',
+                        id='greeks-aspect-settlement-btn',
+                        className='greeks-aspect-button greeks-aspect-button-secondary',
+                        title='Load the selected COB settlement exposure from Aspect',
+                        **{'aria-label': 'Load Aspect COB'},
+                    ),
+                    html.Button(
+                        'Live',
+                        id='greeks-aspect-live-btn',
+                        className='greeks-aspect-button greeks-aspect-button-live',
+                        title='Load today’s live exposure from Aspect',
+                        **{'aria-label': 'Load Aspect Live'},
+                    ),
+                    html.Button(
+                        'Export',
+                        id='export-greeks-workbook-btn',
+                        className='inline-button-primary',
+                        title='Export the filtered Greek exposure workbook',
+                        **{'aria-label': 'Export Workbook'},
+                    ),
+                ], className='greeks-monitor-inline-actions'),
+            ], className='greeks-monitor-control-group greeks-control-actions'),
+            html.Div([
+                dcc.Store(id='greeks-source-status-mount', data=True),
+                html.Div(
+                    id='greeks-source-status-inline',
+                    className='greeks-source-status-inline-host',
+                ),
+            ], className='greeks-inline-source-status'),
+        ], className='greeks-monitor-control-row greeks-monitor-selector-row'),
     ], className='professional-section-header greeks-sticky-filter-bar greeks-monitor-controls'),
 
     dcc.Loading(
@@ -2162,7 +2434,7 @@ layout = html.Div([
                 ),
                 html.Div([
                     html.Div([
-                        html.H3('Maturity by ASSET/PAIR', className='section-title-inline greeks-monitor-title'),
+                            html.H3('Maturity by asset / pair', className='section-title-inline greeks-monitor-title'),
                     ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
                     html.Div(id='greeks-bucket-greek-tables-container', className='supply-dest-table-container greeks-monitor-table-wrap'),
                 ], className='main-section-container supply-dest-section greeks-monitor-section'),
@@ -2171,6 +2443,30 @@ layout = html.Div([
         ],
     ),
 ], className='options-dashboard-container greeks-page greeks-monitor-page')
+
+
+clientside_callback(
+    STRATEGY_DROPDOWN_LABELS_CLIENTSIDE,
+    Output('strategy-selector', 'labels'),
+    Input('strategy-selector', 'options'),
+    Input('strategy-selector', 'value'),
+)
+
+
+clientside_callback(
+    RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE,
+    Output('risk-bucket-selector', 'labels'),
+    Input('risk-bucket-selector', 'options'),
+    Input('risk-bucket-selector', 'value'),
+)
+
+
+clientside_callback(
+    TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE,
+    Output('trade-type-selector', 'labels'),
+    Input('trade-type-selector', 'options'),
+    Input('trade-type-selector', 'value'),
+)
 
 
 @callback(
@@ -2485,44 +2781,20 @@ def update_filtered_greeks_store(base_store, selected_strategies, selected_trade
     )
 
 
-@callback(
-    Output('greeks-aspect-status', 'children'),
-    Output('greeks-aspect-status', 'className'),
-    Output('greeks-aspect-table-container', 'children'),
-    Input('greeks-aspect-store', 'data'),
-    Input('maturity-aggregation-mode-selector', 'value'),
-    Input('month-through-selector', 'value'),
-    Input('quarter-through-selector', 'value'),
-    Input('unit-mode-selector', 'value'),
-)
-def update_aspect_overlay(
-    aspect_store,
+def _normalize_aspect_payload_rows(
+    payload,
     aggregation,
     month_through,
     quarter_through,
     unit_mode,
 ):
-    payload = _resolve_aspect_payload(aspect_store)
     meta = payload.get('meta', {})
-    status = meta.get('status') or 'idle'
-    status_class = f'greeks-aspect-status greeks-aspect-status-{status}'
-
-    if status != 'ok':
-        empty = html.Div(
-            'The option Greeks tables below remain available and are not changed.',
-            className='greeks-empty-state',
-        )
-        return _aspect_status_text(meta), status_class, empty
-
+    if meta.get('status') != 'ok':
+        return pd.DataFrame()
     raw_rows = pd.DataFrame(payload.get('rows', []))
     if raw_rows.empty:
-        empty = html.Div(
-            'Aspect returned no exposure rows for this snapshot.',
-            className='greeks-empty-state',
-        )
-        return _aspect_status_text(meta), status_class, empty
-
-    normalized = normalize_aspect_contributions(
+        return pd.DataFrame()
+    return normalize_aspect_contributions(
         raw_rows,
         aggregation or 'mixed',
         unit_mode or 'native',
@@ -2530,33 +2802,82 @@ def update_aspect_overlay(
         quarter_through,
         meta.get('requested_cob_date'),
     )
-    return (
-        _aspect_status_text(meta),
-        status_class,
-        build_aspect_overlay_tables(normalized),
-    )
-
-
 @callback(
     Output('greeks-kpi-strip', 'children'),
     Output('greeks-bucket-greek-tables-container', 'children'),
     Output('greeks-ladder-sections', 'children'),
+    Output('greeks-aspect-status', 'children'),
+    Output('greeks-aspect-status', 'className'),
+    Output('greeks-aspect-table-container', 'children'),
     Input('greeks-normalized-store', 'data'),
+    Input('greeks-aspect-store', 'data'),
+    State('maturity-aggregation-mode-selector', 'value'),
+    State('month-through-selector', 'value'),
+    State('quarter-through-selector', 'value'),
+    State('unit-mode-selector', 'value'),
 )
-def update_monitor_tables(store_data):
+def update_monitor_tables(
+    store_data,
+    aspect_store,
+    aggregation,
+    month_through,
+    quarter_through,
+    unit_mode,
+):
     payload = _resolve_greeks_payload(store_data)
-    if not payload.get('rows'):
-        empty = html.Div('No data for the current selection.', className='greeks-empty-state')
-        return empty, empty, []
+    aspect_payload = _resolve_aspect_payload(aspect_store)
+    aspect_meta = aspect_payload.get('meta', {})
+    aspect_status = aspect_meta.get('status') or 'idle'
+    aspect_status_class = (
+        f'greeks-aspect-status greeks-aspect-status-{aspect_status}'
+    )
 
-    rows = pd.DataFrame(payload['rows'])
-    meta = payload.get('meta', {})
-    tables = build_display_tables(rows)
+    rows = pd.DataFrame(payload.get('rows', []))
+    aspect_rows = _normalize_aspect_payload_rows(
+        aspect_payload,
+        aggregation,
+        month_through,
+        quarter_through,
+        unit_mode,
+    )
+    maturity_axis = _common_maturity_axis(rows, aspect_rows)
+
+    if rows.empty:
+        empty = html.Div(
+            'No data for the current selection.',
+            className='greeks-empty-state',
+        )
+        kpis, bucket_sections, ladder_sections = empty, empty, []
+    else:
+        meta = payload.get('meta', {})
+        tables = build_display_tables(rows, maturity_axis)
+        kpis = build_kpi_strip(rows, meta)
+        bucket_sections = build_bucket_greek_sections(tables)
+        ladder_sections = build_ladder_sections(tables)
+
+    if aspect_status != 'ok':
+        aspect_content = html.Div(
+            'The option Greeks tables below remain available and are not changed.',
+            className='greeks-empty-state',
+        )
+    elif aspect_rows.empty:
+        aspect_content = html.Div(
+            'Aspect returned no exposure rows for this snapshot.',
+            className='greeks-empty-state',
+        )
+    else:
+        aspect_content = build_aspect_overlay_tables(
+            aspect_rows,
+            maturity_axis,
+        )
 
     return (
-        build_kpi_strip(rows, meta),
-        build_bucket_greek_sections(tables),
-        build_ladder_sections(tables),
+        kpis,
+        bucket_sections,
+        ladder_sections,
+        _aspect_status_text(aspect_meta),
+        aspect_status_class,
+        aspect_content,
     )
 
 
@@ -2586,7 +2907,21 @@ def export_greeks_workbook(
         return dash.no_update
 
     rows = pd.DataFrame(payload.get('rows', []))
-    tables = build_output_tables(rows) if not rows.empty else {}
+    aspect_meta = aspect_payload.get('meta', {})
+    aspect_raw = pd.DataFrame(aspect_payload.get('rows', []))
+    aspect_normalized = _normalize_aspect_payload_rows(
+        aspect_payload,
+        aggregation,
+        month_through,
+        quarter_through,
+        unit_mode,
+    )
+    maturity_axis = _common_maturity_axis(rows, aspect_normalized)
+    tables = (
+        build_output_tables(rows, maturity_axis)
+        if not rows.empty
+        else {}
+    )
     cob_date = (
         payload.get('meta', {}).get('cob_date')
         or aspect_payload.get('meta', {}).get('requested_cob_date')
@@ -2613,17 +2948,7 @@ def export_greeks_workbook(
                 'Raw Normalized': tables['raw'],
             })
 
-        aspect_meta = aspect_payload.get('meta', {})
-        aspect_raw = pd.DataFrame(aspect_payload.get('rows', []))
         if aspect_meta.get('status') == 'ok' and not aspect_raw.empty:
-            aspect_normalized = normalize_aspect_contributions(
-                aspect_raw,
-                aggregation or 'mixed',
-                unit_mode or 'native',
-                month_through,
-                quarter_through,
-                aspect_meta.get('requested_cob_date'),
-            )
             aspect_metadata = pd.DataFrame([
                 {'Field': 'Source', 'Value': aspect_meta.get('source')},
                 {'Field': 'Mode', 'Value': aspect_meta.get('mode')},
@@ -2637,8 +2962,16 @@ def export_greeks_workbook(
             sheet_map.update({
                 'Aspect Metadata': _sanitize_excel_text(aspect_metadata),
                 'Aspect Summary': _sanitize_excel_text(create_aspect_summary_df(aspect_normalized)),
-                'Aspect Delta': create_ladder_df(aspect_normalized, 'delta'),
-                'Aspect Unit Delta': create_unit_ladder_df(aspect_normalized, 'delta'),
+                'Aspect Delta': create_ladder_df(
+                    aspect_normalized,
+                    'delta',
+                    maturity_axis,
+                ),
+                'Aspect Unit Delta': create_unit_ladder_df(
+                    aspect_normalized,
+                    'delta',
+                    maturity_axis,
+                ),
                 'Aspect Raw': _sanitize_excel_text(create_aspect_raw_export_df(aspect_raw)),
             })
 

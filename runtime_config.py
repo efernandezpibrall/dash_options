@@ -36,7 +36,15 @@ def load_runtime_config() -> configparser.ConfigParser:
             config.read(candidate)
             break
 
-    for section in ("DATABASE", "TRINOS", "ASPECT", "NETWORK"):
+    for section in (
+        "DATABASE",
+        "TRINOS",
+        "ASPECT",
+        "NETWORK",
+        "VOL_CALIBRATION",
+        "OPTIONS_AUTH",
+        "BLOOMBERG_OPTIONS",
+    ):
         if not config.has_section(section):
             config.add_section(section)
 
@@ -56,6 +64,46 @@ def load_runtime_config() -> configparser.ConfigParser:
         ("ASPECT", "VERIFY_SSL"): ("ASPECT_VERIFY_SSL",),
         ("ASPECT", "REQUEST_TIMEOUT_SECONDS"): ("ASPECT_REQUEST_TIMEOUT_SECONDS",),
         ("NETWORK", "PROXY_URL"): ("OPTIONS_PROXY_URL", "PROXY_URL"),
+        ("VOL_CALIBRATION", "ENABLED"): ("VOL_CALIBRATION_ENABLED",),
+        ("VOL_CALIBRATION", "WRITES_ENABLED"): (
+            "VOL_CALIBRATION_WRITES_ENABLED",
+        ),
+        ("VOL_CALIBRATION", "PUBLISH_ENABLED"): (
+            "VOL_CALIBRATION_PUBLISH_ENABLED",
+        ),
+        ("VOL_CALIBRATION", "BACKGROUND_JOBS_ENABLED"): (
+            "VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED",
+        ),
+        ("VOL_CALIBRATION", "TTF_INTRADAY_WRITES_ENABLED"): (
+            "VOL_CALIBRATION_TTF_INTRADAY_WRITES_ENABLED",
+        ),
+        ("VOL_CALIBRATION", "TTF_PUBLICATION_ENABLED"): (
+            "VOL_CALIBRATION_TTF_PUBLICATION_ENABLED",
+        ),
+        ("OPTIONS_AUTH", "MODE"): ("OPTIONS_AUTH_MODE",),
+        ("OPTIONS_AUTH", "LOCAL_USER"): ("OPTIONS_LOCAL_AUTH_USER",),
+        ("OPTIONS_AUTH", "LOCAL_ROLES"): ("OPTIONS_LOCAL_AUTH_ROLES",),
+        ("OPTIONS_AUTH", "TRUSTED_PROXY_SHARED_SECRET"): (
+            "OPTIONS_TRUSTED_PROXY_SHARED_SECRET",
+        ),
+        ("OPTIONS_AUTH", "TRUSTED_PROXY_SECRET_HEADER"): (
+            "OPTIONS_TRUSTED_PROXY_SECRET_HEADER",
+        ),
+        ("OPTIONS_AUTH", "TRUSTED_PROXY_USER_HEADER"): (
+            "OPTIONS_TRUSTED_PROXY_USER_HEADER",
+        ),
+        ("OPTIONS_AUTH", "TRUSTED_PROXY_ROLES_HEADER"): (
+            "OPTIONS_TRUSTED_PROXY_ROLES_HEADER",
+        ),
+        ("BLOOMBERG_OPTIONS", "INTRADAY_REFRESH_ENABLED"): (
+            "BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED",
+        ),
+        ("BLOOMBERG_OPTIONS", "SETTLEMENT_REFRESH_ENABLED"): (
+            "BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED",
+        ),
+        ("BLOOMBERG_OPTIONS", "ENABLED_PRODUCTS"): (
+            "BBG_OPTION_CHAIN_ENABLED_PRODUCTS",
+        ),
     }
     for (section, option), names in env_mappings.items():
         for name in names:

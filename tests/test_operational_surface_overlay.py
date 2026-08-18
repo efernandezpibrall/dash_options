@@ -192,7 +192,9 @@ def test_delta_overlay_uses_maturity_union_and_governed_call_delta_coordinates()
     )
 
     reference_traces = [
-        trace for trace in figure.data if trace.name == 'Operational Surface'
+        trace
+        for trace in figure.data
+        if trace.name == 'Settlement vol surface (ICAP)'
     ]
     assert len(reference_traces) == 2
     assert list(reference_traces[0].x) == pytest.approx([0.10, 0.50, 0.90])
@@ -212,7 +214,7 @@ def test_ttf_exact_identical_points_render_one_combined_trace():
     )
     names = [trace.name for trace in figure.data]
 
-    assert names == ['Market / Operational Surface']
+    assert names == ['Settlement vol surface (ICAP)']
     assert figure.data[0].marker.symbol == 'diamond'
     assert figure.data[0].line.dash == 'dash'
 
@@ -235,7 +237,7 @@ def test_non_delta_axis_hides_reference_and_does_not_add_reference_only_panels()
         x_axis='moneyness',
     )
 
-    assert names == ['Market']
+    assert names == ['Settlement vol surface (ICAP)']
     assert [annotation.text for annotation in figure.layout.annotations] == [
         'Sep-26'
     ]
@@ -243,7 +245,7 @@ def test_non_delta_axis_hides_reference_and_does_not_add_reference_only_panels()
     assert color == 'info'
 
 
-def test_vectorized_delta_curve_matches_scalar_newton_solver():
+def test_vectorized_delta_curve_matches_scalar_bracketed_solver():
     from options.calibration_engine.models.wing_model import wing_model_iv
 
     params = {

@@ -36,11 +36,11 @@ def delta_to_strike_iv(
     wing_model_iv_func,
     is_put=True,
     tol=1e-6,
-    max_iter=50,
+    max_iter=80,
     model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
 ):
     """
-    Solve for strike and IV given a target delta using Newton-Raphson iteration.
+    Solve for strike and IV given a target delta using bracketed bisection.
 
     This uses REVERSE-DELTA mapping to guarantee monotonicity in delta space.
     Instead of Strike→IV→Delta (which can be non-monotonic when IV varies with strike),
@@ -52,70 +52,28 @@ def delta_to_strike_iv(
         dte: Days to expiration
         wing_params: Wing model parameters dict
         wing_model_iv_func: Wing model IV function
-        is_put: True for put wing (delta 0-0.5), False for call wing (delta 0.5-1)
+        is_put: True for put wing; False for the call wing. Targets are
+            positive absolute deltas in both cases.
         tol: Convergence tolerance
         max_iter: Maximum iterations
 
     Returns:
         (strike, iv) tuple, or (None, None) if convergence fails
     """
-    # Initial guess based on option type
-    if is_put:
-        strike = forward * 0.9  # Start below ATM for puts
-    else:
-        strike = forward * 1.1  # Start above ATM for calls
-
-    option_type = 'put' if is_put else 'call'
-
-    for _ in range(max_iter):
-        iv = wing_model_iv_func(
-            strike=np.array([strike]),
-            forward=forward,
-            model_version=model_version,
-            **wing_params,
-        )[0]
-        current_delta = strike_to_delta(strike, forward, iv, dte, option_type)
-
-        # For puts, delta is negative; convert to positive for comparison
-        if is_put:
-            current_delta = -current_delta
-
-        error = current_delta - target_delta
-
-        if abs(error) < tol:
-            break
-
-        # Numerical derivative (finite difference)
-        dk = strike * 0.001
-        iv_up = wing_model_iv_func(
-            strike=np.array([strike + dk]),
-            forward=forward,
-            model_version=model_version,
-            **wing_params,
-        )[0]
-        delta_up = strike_to_delta(strike + dk, forward, iv_up, dte, option_type)
-        if is_put:
-            delta_up = -delta_up
-
-        d_delta_d_strike = (delta_up - current_delta) / dk
-
-        if abs(d_delta_d_strike) < 1e-10:
-            break
-
-        # Newton step with damping for stability
-        step = -error / d_delta_d_strike
-        strike = strike + 0.5 * step
-
-        # Keep strike positive and within reasonable bounds
-        strike = max(forward * 0.05, min(forward * 5.0, strike))
-
-    final_iv = wing_model_iv_func(
-        strike=np.array([strike]),
-        forward=forward,
+    _, strikes, ivs = delta_curve_to_strike_iv(
+        np.asarray([target_delta], dtype=float),
+        forward,
+        dte,
+        wing_params,
+        wing_model_iv_func,
+        is_put=is_put,
+        tol=tol,
+        max_iter=max_iter,
         model_version=model_version,
-        **wing_params,
-    )[0]
-    return strike, final_iv
+    )
+    if not len(strikes):
+        return None, None
+    return float(strikes[0]), float(ivs[0])
 
 
 def delta_curve_to_strike_iv(
@@ -126,25 +84,36 @@ def delta_curve_to_strike_iv(
     wing_model_iv_func,
     is_put=True,
     tol=1e-6,
-    max_iter=50,
+    max_iter=80,
     model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
 ):
-    """Vectorized equivalent of ``delta_to_strike_iv`` for chart curves."""
+    """Map target deltas to the model with a vectorized bracketed solve.
+
+    Extreme Wing-v2 tails can require strikes well beyond five times the
+    forward.  A damped Newton solve with a hard 5F cap therefore returned an
+    unconverged point while still drawing it.  Bisection is slower per
+    iteration but deterministic, derivative-free, and lets us reject any
+    target whose delta residual did not actually converge.
+    """
     target_deltas = np.asarray(target_deltas, dtype=float)
-    strikes = np.full_like(
-        target_deltas,
-        forward * (0.9 if is_put else 1.1),
+    if target_deltas.ndim != 1:
+        target_deltas = target_deltas.reshape(-1)
+    finite_targets = np.isfinite(target_deltas) & (target_deltas > 0.0) & (
+        target_deltas < 1.0
     )
+    lower = np.full_like(target_deltas, forward * np.exp(-8.0))
+    upper = np.full_like(target_deltas, forward * np.exp(8.0))
     option_type = 'put' if is_put else 'call'
 
-    for _ in range(max_iter):
-        iv = wing_model_iv_func(
-            strike=strikes,
+    def delta_at(strikes):
+        iv = np.asarray(wing_model_iv_func(
+            strike=np.asarray(strikes, dtype=float),
             forward=forward,
             model_version=model_version,
+            dte=dte,
             **wing_params,
-        )
-        current_delta = np.asarray(
+        ), dtype=float)
+        delta = np.asarray(
             strike_to_delta(
                 strikes,
                 forward,
@@ -155,49 +124,47 @@ def delta_curve_to_strike_iv(
             dtype=float,
         )
         if is_put:
-            current_delta = -current_delta
+            delta = -delta
+        return delta, iv
+
+    lower_delta, _ = delta_at(lower)
+    upper_delta, _ = delta_at(upper)
+    if is_put:
+        bracketed = (lower_delta <= target_deltas) & (
+            upper_delta >= target_deltas
+        )
+    else:
+        bracketed = (lower_delta >= target_deltas) & (
+            upper_delta <= target_deltas
+        )
+
+    active = finite_targets & bracketed
+    for _ in range(max_iter):
+        strikes = np.sqrt(lower * upper)
+        current_delta, _ = delta_at(strikes)
         error = current_delta - target_deltas
-        if np.all(np.abs(error) < tol):
+        unconverged = active & np.isfinite(error) & (np.abs(error) >= tol)
+        if not np.any(unconverged):
             break
 
-        dk = strikes * 0.001
-        iv_up = wing_model_iv_func(
-            strike=strikes + dk,
-            forward=forward,
-            model_version=model_version,
-            **wing_params,
-        )
-        delta_up = np.asarray(
-            strike_to_delta(
-                strikes + dk,
-                forward,
-                iv_up,
-                dte,
-                option_type,
-            ),
-            dtype=float,
-        )
         if is_put:
-            delta_up = -delta_up
-        derivative = (delta_up - current_delta) / dk
-        valid_derivative = np.abs(derivative) >= 1e-10
-        step = np.zeros_like(strikes)
-        step[valid_derivative] = (
-            -error[valid_derivative] / derivative[valid_derivative]
-        )
-        strikes = np.clip(
-            strikes + 0.5 * step,
-            forward * 0.05,
-            forward * 5.0,
-        )
+            move_lower = unconverged & (error < 0.0)
+        else:
+            move_lower = unconverged & (error > 0.0)
+        move_upper = unconverged & ~move_lower
+        lower[move_lower] = strikes[move_lower]
+        upper[move_upper] = strikes[move_upper]
 
-    final_iv = wing_model_iv_func(
-        strike=strikes,
-        forward=forward,
-        model_version=model_version,
-        **wing_params,
+    strikes = np.sqrt(lower * upper)
+    final_delta, final_iv = delta_at(strikes)
+    residual = np.abs(final_delta - target_deltas)
+    valid = (
+        active
+        & np.isfinite(strikes)
+        & np.isfinite(final_iv)
+        & np.isfinite(residual)
+        & (residual < tol)
     )
-    valid = np.isfinite(strikes) & np.isfinite(final_iv)
     return target_deltas[valid], strikes[valid], np.asarray(final_iv)[valid]
 
 
@@ -313,6 +280,13 @@ def create_smile_grid_figure(
     model_version: str = DEFAULT_CALIBRATION_MODEL_VERSION,
     operational_surface: Optional[pd.DataFrame] = None,
     operational_metadata: Optional[dict] = None,
+    traded_options: Optional[pd.DataFrame] = None,
+    traded_options_metadata: Optional[dict] = None,
+    published_surface: Optional[pd.DataFrame] = None,
+    published_metadata: Optional[dict] = None,
+    manual_trades: Optional[pd.DataFrame] = None,
+    manual_trades_metadata: Optional[dict] = None,
+    market_metadata: Optional[dict] = None,
 ) -> go.Figure:
     """
     Create the smile plot grid figure.
@@ -334,6 +308,10 @@ def create_smile_grid_figure(
         These rows are reference-only and are displayed only on the Delta axis.
     operational_metadata : dict, optional
         Requested/actual COB and source provenance for the reference surface.
+    traded_options : DataFrame, optional
+        Exact-COB raw ICE TFO rows with positive reported volume.
+    traded_options_metadata : dict, optional
+        Exact-COB and source provenance for the traded-option rows.
 
     Returns
     -------
@@ -351,6 +329,25 @@ def create_smile_grid_figure(
         else pd.DataFrame()
     )
     operational_metadata = operational_metadata or {}
+    traded_options = (
+        traded_options.copy()
+        if traded_options is not None
+        else pd.DataFrame()
+    )
+    traded_options_metadata = traded_options_metadata or {}
+    published_surface = (
+        published_surface.copy()
+        if published_surface is not None
+        else pd.DataFrame()
+    )
+    published_metadata = published_metadata or {}
+    manual_trades = (
+        manual_trades.copy()
+        if manual_trades is not None
+        else pd.DataFrame()
+    )
+    manual_trades_metadata = manual_trades_metadata or {}
+    market_metadata = market_metadata or {}
 
     if 'expiry' in market_data.columns:
         market_data['expiry'] = pd.to_datetime(
@@ -372,6 +369,48 @@ def create_smile_grid_figure(
             operational_surface['contract_date'],
             errors='coerce',
         ).dt.normalize()
+    if 'maturity_date' in traded_options.columns:
+        traded_options['maturity_date'] = pd.to_datetime(
+            traded_options['maturity_date'],
+            errors='coerce',
+        ).dt.normalize()
+    if 'contract_date' in published_surface.columns:
+        published_surface['contract_date'] = pd.to_datetime(
+            published_surface['contract_date'],
+            errors='coerce',
+        ).dt.normalize()
+    if 'contract_date' in manual_trades.columns:
+        manual_trades['contract_date'] = pd.to_datetime(
+            manual_trades['contract_date'],
+            errors='coerce',
+        ).dt.normalize()
+    for column in (
+        'strike',
+        'call_delta',
+        'volatility',
+        'forward_value',
+        'settlement_price',
+        'total_volume',
+        'open_interest',
+    ):
+        if column in traded_options.columns:
+            traded_options[column] = pd.to_numeric(
+                traded_options[column],
+                errors='coerce',
+            )
+    for frame, columns in (
+        (
+            published_surface,
+            ('strike', 'delta', 'volatility', 'working_forward'),
+        ),
+        (
+            manual_trades,
+            ('strike', 'call_delta', 'mark_iv', 'forward', 'volume'),
+        ),
+    ):
+        for column in columns:
+            if column in frame.columns:
+                frame[column] = pd.to_numeric(frame[column], errors='coerce')
 
     market_expiries = _normalized_expiries(market_data, 'expiry')
     surface_expiries = (
@@ -379,7 +418,32 @@ def create_smile_grid_figure(
         if x_axis == 'delta'
         else []
     )
-    expiries = sorted(set(market_expiries).union(surface_expiries))
+    traded_reference_is_exact = (
+        str(traded_options_metadata.get('product', '')).strip().upper()
+        == 'TTF'
+        and str(
+            traded_options_metadata.get('surface_source', '')
+        ).strip().upper() == 'ICE'
+        and bool(traded_options_metadata.get('actual_cob'))
+        and traded_options_metadata.get('requested_cob')
+        == traded_options_metadata.get('actual_cob')
+    )
+    traded_expiries = (
+        _normalized_expiries(traded_options, 'maturity_date')
+        if traded_reference_is_exact
+        else []
+    )
+    published_expiries = _normalized_expiries(
+        published_surface, 'contract_date'
+    )
+    manual_expiries = _normalized_expiries(manual_trades, 'contract_date')
+    expiries = sorted(
+        set(market_expiries)
+        .union(surface_expiries)
+        .union(traded_expiries)
+        .union(published_expiries)
+        .union(manual_expiries)
+    )
     num_expiries = len(expiries)
     num_rows = (num_expiries + num_cols - 1) // num_cols
 
@@ -455,6 +519,28 @@ def create_smile_grid_figure(
             )
             else pd.DataFrame()
         )
+        traded_exp_data = (
+            traded_options[
+                traded_options['maturity_date'] == expiry
+            ].copy()
+            if (
+                traded_reference_is_exact
+                and 'maturity_date' in traded_options.columns
+            )
+            else pd.DataFrame()
+        )
+        published_exp_data = (
+            published_surface[
+                published_surface['contract_date'] == expiry
+            ].copy()
+            if 'contract_date' in published_surface.columns
+            else pd.DataFrame()
+        )
+        manual_exp_data = (
+            manual_trades[manual_trades['contract_date'] == expiry].copy()
+            if 'contract_date' in manual_trades.columns
+            else pd.DataFrame()
+        )
 
         forward = np.nan
         if not exp_data.empty and 'forward' in exp_data.columns:
@@ -463,19 +549,46 @@ def create_smile_grid_figure(
                 errors='coerce',
             ).iloc[0]
 
-        # Calculate x values based on selection
-        if x_axis == 'log_moneyness' and not exp_data.empty:
-            exp_data['x'] = np.log(exp_data['strike'] / forward)
-            # Dynamic x_range based on actual data with padding
-            data_min, data_max = exp_data['x'].min(), exp_data['x'].max()
-            padding = (data_max - data_min) * 0.1 if data_max > data_min else 0.1
-            x_range = [min(data_min - padding, -0.5), max(data_max + padding, 0.5)]
-        elif x_axis == 'moneyness' and not exp_data.empty:
-            exp_data['x'] = exp_data['strike'] / forward
-            # Dynamic x_range based on actual data with padding
-            data_min, data_max = exp_data['x'].min(), exp_data['x'].max()
-            padding = (data_max - data_min) * 0.1 if data_max > data_min else 0.1
-            x_range = [min(data_min - padding, 0.7), max(data_max + padding, 1.3)]
+        # ICE rows retain their raw strike/volatility. The selected-COB
+        # calibration forward is used only for moneyness and delta positioning.
+        if x_axis == 'log_moneyness':
+            if not exp_data.empty:
+                exp_data['x'] = np.log(exp_data['strike'] / forward)
+            if not traded_exp_data.empty:
+                traded_exp_data['x'] = np.log(
+                    traded_exp_data['strike']
+                    / traded_exp_data['forward_value']
+                )
+            if not published_exp_data.empty:
+                published_forward = published_exp_data.get(
+                    'working_forward', pd.Series(forward, index=published_exp_data.index)
+                ).fillna(forward)
+                published_exp_data['x'] = np.log(
+                    published_exp_data['strike'] / published_forward
+                )
+            if not manual_exp_data.empty:
+                manual_exp_data['x'] = np.log(
+                    manual_exp_data['strike'] / manual_exp_data['forward']
+                )
+        elif x_axis == 'moneyness':
+            if not exp_data.empty:
+                exp_data['x'] = exp_data['strike'] / forward
+            if not traded_exp_data.empty:
+                traded_exp_data['x'] = (
+                    traded_exp_data['strike']
+                    / traded_exp_data['forward_value']
+                )
+            if not published_exp_data.empty:
+                published_forward = published_exp_data.get(
+                    'working_forward', pd.Series(forward, index=published_exp_data.index)
+                ).fillna(forward)
+                published_exp_data['x'] = (
+                    published_exp_data['strike'] / published_forward
+                )
+            if not manual_exp_data.empty:
+                manual_exp_data['x'] = (
+                    manual_exp_data['strike'] / manual_exp_data['forward']
+                )
         elif x_axis == 'delta':
             # Convert to standard delta display: 0 (OTM put) → 0.5 (ATM) → 1 (OTM call)
             # Puts (delta < 0): x = -delta (e.g., -0.25 → 0.25)
@@ -486,15 +599,84 @@ def create_smile_grid_figure(
                 )
             if not surface_exp_data.empty:
                 surface_exp_data['x'] = _surface_delta_x(surface_exp_data)
+            if not traded_exp_data.empty:
+                traded_exp_data['x'] = 1.0 - traded_exp_data['call_delta']
+            if not published_exp_data.empty:
+                published_exp_data['x'] = 1.0 - published_exp_data['delta']
+            if not manual_exp_data.empty:
+                manual_exp_data['x'] = 1.0 - manual_exp_data['call_delta']
+
+        if x_axis == 'delta':
             x_range = [0, 1]
         else:
-            x_range = [-0.5, 0.5] if x_axis == 'log_moneyness' else [0.7, 1.3]
+            x_samples = []
+            for chart_data in (
+                exp_data,
+                traded_exp_data,
+                published_exp_data,
+                manual_exp_data,
+            ):
+                if not chart_data.empty and 'x' in chart_data.columns:
+                    x_samples.append(
+                        pd.to_numeric(chart_data['x'], errors='coerce')
+                        .replace([np.inf, -np.inf], np.nan)
+                        .dropna()
+                    )
+            plotted_x = (
+                pd.concat(x_samples, ignore_index=True)
+                if x_samples
+                else pd.Series(dtype=float)
+            )
+            if plotted_x.empty:
+                x_range = (
+                    [-0.5, 0.5]
+                    if x_axis == 'log_moneyness'
+                    else [0.7, 1.3]
+                )
+            else:
+                data_min, data_max = plotted_x.min(), plotted_x.max()
+                padding = (
+                    (data_max - data_min) * 0.1
+                    if data_max > data_min
+                    else 0.1
+                )
+                if x_axis == 'log_moneyness':
+                    x_range = [
+                        min(data_min - padding, -0.5),
+                        max(data_max + padding, 0.5),
+                    ]
+                else:
+                    x_range = [
+                        min(data_min - padding, 0.7),
+                        max(data_max + padding, 1.3),
+                    ]
 
         # Sort by x for proper display ordering
         if not exp_data.empty:
             exp_data = exp_data.sort_values('x')
         if not surface_exp_data.empty:
             surface_exp_data = surface_exp_data.sort_values('x')
+        if not traded_exp_data.empty:
+            traded_exp_data = (
+                traded_exp_data
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna(subset=['x', 'volatility'])
+                .sort_values('x')
+            )
+        if not published_exp_data.empty:
+            published_exp_data = (
+                published_exp_data
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna(subset=['x', 'volatility'])
+                .sort_values('x')
+            )
+        if not manual_exp_data.empty:
+            manual_exp_data = (
+                manual_exp_data
+                .replace([np.inf, -np.inf], np.nan)
+                .dropna(subset=['x', 'mark_iv'])
+                .sort_values('x')
+            )
 
         # Get params for this expiry
         exp_params = (
@@ -523,23 +705,42 @@ def create_smile_grid_figure(
                 surface_exp_data,
             )
         )
+        is_ttf_settlement_reference = (
+            reference_product == 'TTF'
+            and (
+                reference_is_exact
+                or bool(market_metadata.get('settlement_cob'))
+            )
+        )
 
         if not exp_data.empty:
-            market_name = (
-                'Market / Operational Surface'
-                if combine_market_reference
-                else 'Market'
+            if is_ttf_settlement_reference:
+                market_name = 'Settlement vol surface (ICAP)'
+            elif combine_market_reference:
+                market_name = 'Market / Operational Surface'
+            else:
+                market_name = 'Market'
+            connect_market_points = (
+                combine_market_reference or is_ttf_settlement_reference
             )
             market_style = {
-                'mode': 'lines+markers' if combine_market_reference else 'markers',
+                'mode': 'lines+markers' if connect_market_points else 'markers',
                 'marker': dict(
                     size=8,
-                    color='#0f766e' if combine_market_reference else '#007bff',
-                    symbol='diamond' if combine_market_reference else 'circle',
+                    color=(
+                        '#0f766e'
+                        if connect_market_points
+                        else '#007bff'
+                    ),
+                    symbol=(
+                        'diamond'
+                        if connect_market_points
+                        else 'circle'
+                    ),
                     line=dict(width=1, color='white'),
                 ),
             }
-            if combine_market_reference:
+            if connect_market_points:
                 market_style['line'] = dict(
                     color='#0f766e',
                     width=2,
@@ -550,6 +751,7 @@ def create_smile_grid_figure(
                     x=exp_data['x'],
                     y=exp_data['iv'] * 100,
                     name=market_name,
+                    legendgroup=market_name,
                     showlegend=market_name not in shown_legend_names,
                     hovertemplate=(
                         f"<b>{subplot_titles[idx]}</b><br>"
@@ -564,7 +766,11 @@ def create_smile_grid_figure(
             shown_legend_names.add(market_name)
 
         if not surface_exp_data.empty and not combine_market_reference:
-            surface_name = 'Operational Surface'
+            surface_name = (
+                'Settlement vol surface (ICAP)'
+                if reference_product == 'TTF'
+                else 'Operational Surface'
+            )
             source = operational_metadata.get('source') or 'unknown'
             actual_cob = operational_metadata.get('actual_cob') or 'unknown'
             customdata = np.column_stack([
@@ -584,6 +790,7 @@ def create_smile_grid_figure(
                         line=dict(width=1, color='white'),
                     ),
                     name=surface_name,
+                    legendgroup=surface_name,
                     showlegend=surface_name not in shown_legend_names,
                     customdata=customdata,
                     hovertemplate=(
@@ -601,6 +808,148 @@ def create_smile_grid_figure(
             )
             shown_legend_names.add(surface_name)
 
+        if not published_exp_data.empty:
+            published_name = 'Latest published smile'
+            publication_id = published_metadata.get('publication_id') or 'unknown'
+            published_at = published_metadata.get('published_at') or 'unknown'
+            customdata = np.column_stack(
+                [
+                    published_exp_data['strike'],
+                    published_exp_data['delta'],
+                    published_exp_data.get(
+                        'surface_region',
+                        pd.Series('unknown', index=published_exp_data.index),
+                    ),
+                ]
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=published_exp_data['x'],
+                    y=published_exp_data['volatility'] * 100,
+                    mode='lines',
+                    line=dict(color='#0f172a', width=2.5),
+                    name=published_name,
+                    legendgroup=published_name,
+                    showlegend=published_name not in shown_legend_names,
+                    customdata=customdata,
+                    hovertemplate=(
+                        f"<b>{subplot_titles[idx]} published smile</b><br>"
+                        f"Published: {published_at}<br>"
+                        "Strike: %{customdata[0]:.3f}<br>"
+                        "Call delta: %{customdata[1]:.4f}<br>"
+                        "IV: %{y:.2f}%<br>"
+                        "Region: %{customdata[2]}<br>"
+                        f"Publication: {publication_id}<br>"
+                        "<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=col,
+            )
+            shown_legend_names.add(published_name)
+
+        if not traded_exp_data.empty:
+            traded_name = 'ICE traded options (volume > 0)'
+            source = traded_options_metadata.get('source') or 'unknown'
+            actual_cob = traded_options_metadata.get('actual_cob') or 'unknown'
+            customdata = np.column_stack([
+                traded_exp_data['strike'],
+                traded_exp_data['call_delta'],
+                traded_exp_data['settlement_price'],
+                traded_exp_data['total_volume'],
+                traded_exp_data['open_interest'],
+                traded_exp_data['contract_type'],
+                traded_exp_data['quality_status'],
+            ])
+            fig.add_trace(
+                go.Scatter(
+                    x=traded_exp_data['x'],
+                    y=traded_exp_data['volatility'] * 100,
+                    mode='markers',
+                    marker=dict(
+                        size=6,
+                        color='#6d28d9',
+                        symbol='circle-open',
+                        opacity=0.85,
+                        line=dict(width=1.25, color='#6d28d9'),
+                    ),
+                    name=traded_name,
+                    legendgroup=traded_name,
+                    showlegend=traded_name not in shown_legend_names,
+                    customdata=customdata,
+                    hovertemplate=(
+                        f"<b>{subplot_titles[idx]} ICE traded option</b><br>"
+                        f"COB: {actual_cob}<br>"
+                        "Strike: %{customdata[0]:.2f} EUR/MWh<br>"
+                        "Call delta: %{customdata[1]:.4f}<br>"
+                        "ICE option volatility: %{y:.2f}%<br>"
+                        "Settlement: %{customdata[2]:.3f}<br>"
+                        "Volume: %{customdata[3]:,.0f} lots<br>"
+                        "Open interest: %{customdata[4]:,.0f}<br>"
+                        "Contract: %{customdata[5]}<br>"
+                        "Quality: %{customdata[6]}<br>"
+                        f"Source: {source}<br>"
+                        "<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=col,
+            )
+            shown_legend_names.add(traded_name)
+
+        if not manual_exp_data.empty:
+            manual_name = 'Manual intraday trades'
+            persistence = manual_trades_metadata.get('persistence') or 'session'
+            customdata = np.column_stack(
+                [
+                    manual_exp_data['strike'],
+                    manual_exp_data['call_delta'],
+                    manual_exp_data['forward'],
+                    manual_exp_data.get(
+                        'volume', pd.Series(np.nan, index=manual_exp_data.index)
+                    ),
+                    manual_exp_data.get(
+                        'put_call', pd.Series('', index=manual_exp_data.index)
+                    ),
+                    manual_exp_data.get(
+                        'observed_at', pd.Series('', index=manual_exp_data.index)
+                    ),
+                ]
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=manual_exp_data['x'],
+                    y=manual_exp_data['mark_iv'] * 100,
+                    mode='markers',
+                    marker=dict(
+                        size=5,
+                        color='#dc2626',
+                        symbol='x',
+                        opacity=0.9,
+                        line=dict(width=1, color='#dc2626'),
+                    ),
+                    name=manual_name,
+                    legendgroup=manual_name,
+                    showlegend=manual_name not in shown_legend_names,
+                    customdata=customdata,
+                    hovertemplate=(
+                        f"<b>{subplot_titles[idx]} manual trade</b><br>"
+                        "Strike: %{customdata[0]:.3f}<br>"
+                        "Call delta: %{customdata[1]:.4f}<br>"
+                        "IV: %{y:.2f}%<br>"
+                        "Working forward: %{customdata[2]:.3f}<br>"
+                        "Volume: %{customdata[3]:,.0f}<br>"
+                        "Option: %{customdata[4]}<br>"
+                        "Observed: %{customdata[5]}<br>"
+                        f"State: {persistence}<br>"
+                        "<extra></extra>"
+                    ),
+                ),
+                row=row,
+                col=col,
+            )
+            shown_legend_names.add(manual_name)
+
         model_dte = np.nan
         if not exp_data.empty and 'dte' in exp_data.columns:
             model_dte = pd.to_numeric(
@@ -617,6 +966,110 @@ def create_smile_grid_figure(
             and model_dte > 0
         ):
             params = exp_params.iloc[0].to_dict()
+            left_blend_width = pd.to_numeric(
+                pd.Series([params.get('left_blend_width')]), errors='coerce'
+            ).iloc[0]
+            right_blend_width = pd.to_numeric(
+                pd.Series([params.get('right_blend_width')]), errors='coerce'
+            ).iloc[0]
+            is_ttf_hybrid = bool(
+                np.isfinite(left_blend_width)
+                and np.isfinite(right_blend_width)
+                and str(params.get('calibration_method', '')).startswith(
+                    'PCHIP-core/'
+                )
+            )
+
+            if is_ttf_hybrid:
+                try:
+                    from vol_calibration.calibration_inputs import (
+                        select_expiry_observations,
+                    )
+                    from vol_calibration.ttf_hybrid_surface import (
+                        operational_surface_frame as ttf_operational_surface_frame,
+                    )
+
+                    governed_inputs = select_expiry_observations(
+                        exp_data,
+                        expiry,
+                        include_extrapolated=True,
+                    )
+                    hybrid_frame = ttf_operational_surface_frame(
+                        governed_inputs,
+                        params,
+                        left_blend_width=float(left_blend_width),
+                        right_blend_width=float(right_blend_width),
+                        n_points=401,
+                    )
+                    if x_axis == 'log_moneyness':
+                        hybrid_frame['plot_x'] = hybrid_frame['log_moneyness']
+                    elif x_axis == 'moneyness':
+                        hybrid_frame['plot_x'] = hybrid_frame['strike'] / forward
+                    else:
+                        hybrid_frame['plot_x'] = 1.0 - hybrid_frame['delta']
+                    hybrid_frame = hybrid_frame.sort_values('plot_x')
+                    hybrid_name = 'Operational surface (PCHIP core / Wing tails)'
+                    fig.add_trace(
+                        go.Scatter(
+                            x=hybrid_frame['plot_x'],
+                            y=hybrid_frame['iv'] * 100,
+                            mode='lines',
+                            line=dict(color='#fd7e14', width=3),
+                            name=hybrid_name,
+                            legendgroup=hybrid_name,
+                            showlegend=hybrid_name not in shown_legend_names,
+                            customdata=np.column_stack(
+                                [
+                                    hybrid_frame['blend_classification'],
+                                    hybrid_frame['total_variance'],
+                                    hybrid_frame['strike'],
+                                ]
+                            ),
+                            hovertemplate=(
+                                f"<b>{subplot_titles[idx]} hybrid</b><br>"
+                                "X: %{x:.4f}<br>"
+                                "Strike: %{customdata[2]:.3f}<br>"
+                                "IV: %{y:.2f}%<br>"
+                                "Total variance: %{customdata[1]:.6f}<br>"
+                                "Region: %{customdata[0]}<br>"
+                                "<extra></extra>"
+                            ),
+                        ),
+                        row=row,
+                        col=col,
+                    )
+                    shown_legend_names.add(hybrid_name)
+
+                    if is_selected:
+                        for region_name, fill_color in (
+                            ('left_blend', 'rgba(13, 110, 253, 0.08)'),
+                            ('right_blend', 'rgba(13, 110, 253, 0.08)'),
+                        ):
+                            region = hybrid_frame[
+                                hybrid_frame['blend_classification'] == region_name
+                            ]
+                            if not region.empty:
+                                fig.add_vrect(
+                                    x0=float(region['plot_x'].min()),
+                                    x1=float(region['plot_x'].max()),
+                                    fillcolor=fill_color,
+                                    line_width=0,
+                                    row=row,
+                                    col=col,
+                                )
+                        for boundary in ('left_blend', 'pchip_core', 'right_blend'):
+                            region = hybrid_frame[
+                                hybrid_frame['blend_classification'] == boundary
+                            ]
+                            if not region.empty:
+                                fig.add_vline(
+                                    x=float(region['plot_x'].min()),
+                                    line=dict(color='#0d6efd', dash='dot', width=1),
+                                    row=row,
+                                    col=col,
+                                )
+                except Exception:
+                    is_ttf_hybrid = False
 
             # Generate model curve
             if x_axis == 'log_moneyness':
@@ -631,14 +1084,14 @@ def create_smile_grid_figure(
                 pass  # strikes_model will be set in the delta-specific block below
 
             # Calculate model IVs
-            wing_params = {k: params.get(k, 0) for k in ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']}
+            wing_params = {k: params.get(k, np.nan) for k in ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']}
 
             # Use reasonable defaults if missing
-            if wing_params['ssr'] == 0:
+            if pd.isna(wing_params.get('ssr')):
                 wing_params['ssr'] = 1.0
-            if wing_params.get('put_wing_power', 0) == 0:
+            if pd.isna(wing_params.get('put_wing_power')):
                 wing_params['put_wing_power'] = 0.5
-            if wing_params.get('call_wing_power', 0) == 0:
+            if pd.isna(wing_params.get('call_wing_power')):
                 wing_params['call_wing_power'] = 0.5
 
             try:
@@ -681,27 +1134,39 @@ def create_smile_grid_figure(
                         strike=strikes_model,
                         forward=forward,
                         model_version=model_version,
+                        dte=model_dte,
                         **wing_params
                     )
                     sort_idx = np.argsort(x_model)
                     x_model = x_model[sort_idx]
                     model_iv = model_iv[sort_idx]
 
+                model_name = (
+                    'Wing tail-fit diagnostic'
+                    if is_ttf_hybrid
+                    else (
+                        'Calibrated surface (Wing-v2)'
+                        if reference_product == 'TTF'
+                        else 'Model'
+                    )
+                )
                 fig.add_trace(
                     go.Scatter(
                         x=x_model,
                         y=model_iv * 100,  # Convert to percentage
                         mode='lines',
                         line=dict(
-                            color='#fd7e14',
-                            width=2,
+                            color='#2563eb' if is_ttf_hybrid else '#fd7e14',
+                            width=1.5 if is_ttf_hybrid else 2,
+                            dash='dash' if is_ttf_hybrid else 'solid',
                         ),
-                        name='Model',
-                        showlegend='Model' not in shown_legend_names,
+                        name=model_name,
+                        legendgroup=model_name,
+                        showlegend=model_name not in shown_legend_names,
                     ),
                     row=row, col=col
                 )
-                shown_legend_names.add('Model')
+                shown_legend_names.add(model_name)
             except Exception:
                 pass
 
@@ -749,7 +1214,8 @@ def create_smile_grid_figure(
             yanchor='bottom',
             y=1.02,
             xanchor='right',
-            x=1
+            x=1,
+            groupclick='togglegroup',
         ),
         paper_bgcolor='white',
         plot_bgcolor='white',
@@ -800,6 +1266,12 @@ def create_single_smile_plot(
 
     forward = market_data['forward'].iloc[0]
     market_data = market_data.copy()
+    model_dte = pd.to_numeric(
+        pd.Series([market_data['dte'].iloc[0]])
+        if 'dte' in market_data.columns
+        else pd.Series([np.nan]),
+        errors='coerce',
+    ).iloc[0]
 
     # Calculate x values
     if x_axis == 'log_moneyness':
@@ -839,12 +1311,12 @@ def create_single_smile_plot(
 
     # Model curve
     if params:
-        wing_params = {k: params.get(k, 0) for k in ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']}
-        if wing_params['ssr'] == 0:
+        wing_params = {k: params.get(k, np.nan) for k in ['vr', 'sr', 'pc', 'cc', 'dc', 'uc', 'dsm', 'usm', 'vcr', 'scr', 'ssr', 'put_wing_power', 'call_wing_power']}
+        if pd.isna(wing_params.get('ssr')):
             wing_params['ssr'] = 1.0
-        if wing_params.get('put_wing_power', 0) == 0:
+        if pd.isna(wing_params.get('put_wing_power')):
             wing_params['put_wing_power'] = 0.5
-        if wing_params.get('call_wing_power', 0) == 0:
+        if pd.isna(wing_params.get('call_wing_power')):
             wing_params['call_wing_power'] = 0.5
 
         if x_axis == 'log_moneyness':
@@ -862,6 +1334,7 @@ def create_single_smile_plot(
                 strike=strikes_model,
                 forward=forward,
                 model_version=model_version,
+                dte=model_dte,
                 **wing_params,
             )
             sort_idx = np.argsort(x_model)

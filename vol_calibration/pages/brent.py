@@ -12,11 +12,18 @@ import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, Input, Output, State, no_update, ctx
 from dash.exceptions import PreventUpdate
 
-from vol_calibration.components.parameter_table import create_parameter_table, format_params_for_table, parse_table_data, update_arb_status_in_row
-from vol_calibration.components.smile_grid import create_smile_grid, create_smile_grid_figure
+from vol_calibration.components.brent_adjustment_table import (
+    create_brent_adjustment_table,
+    format_brent_adjustment_rows,
+    parse_brent_adjustment_rows,
+)
+from vol_calibration.components.brent_adjustment_plot import (
+    create_brent_adjustment_comparison,
+    create_brent_adjustment_grid,
+)
+from vol_calibration.components.smile_grid import create_smile_grid
 from vol_calibration.components.comparison_modal import (
     create_comparison_modal,
-    create_comparison_plot,
     format_comparison_data,
     extract_final_params
 )
@@ -30,32 +37,31 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.feature_flags import writes_enabled
-from vol_calibration.model_version import (
-    DEFAULT_CALIBRATION_MODEL_VERSION,
-    calibrate_v2 as calibrate,
-    evaluate_fit_v2 as evaluate_fit,
+from vol_calibration.brent_intraday import (
+    ADJUSTMENT_LABELS,
+    ADJUSTMENT_PARAMS,
+    BrentAdjustmentError,
+    baseline_row,
+    calibrate_adjustment,
+    evaluate_adjustment,
+    prepare_adjustment_fit,
+    select_expiry_rows,
+    select_surface_slice,
+    validate_adjustment,
 )
 from vol_calibration.session_state import restore_product_table
 from vol_calibration.operational_surface import (
     create_operational_surface_status,
     create_operational_surface_store,
+    load_operational_surface_payload,
     operational_surface_frame,
     register_operational_surface_callback,
 )
 
 from options.calibration_engine.io.loaders import load_market_data_with_metadata
-from options.calibration_engine.config.defaults import get_defaults
-from options.calibration_engine.io.storage import (
-    ParameterStore,
-    get_database_engine,
-    load_latest_surface_from_db,
-    SOURCE_FULL_OPT,
-    SOURCE_MANUAL,
-    PARAM_COLUMNS
-)
-
 COMMODITY = 'BRENT'
 COMMODITY_LOWER = COMMODITY.lower()
+BRENT_ADJUSTMENT_MODEL_VERSION = 'brent_svi_intraday_residual_v1'
 
 
 def get_default_date():
@@ -73,7 +79,7 @@ def create_header():
         dbc.Col([
             html.H4([
                 html.Span("BRENT", className="text-danger fw-bold"),
-                html.Span(" Vol Surface", className="text-muted"),
+                html.Span(" Intraday SVI Adjustment", className="text-muted"),
             ], className="mb-0"),
         ], width="auto"),
         dbc.Col([
@@ -97,9 +103,16 @@ def create_header():
         ], width="auto"),
         dbc.Col([
             dbc.ButtonGroup([
+                dbc.Button(
+                    [html.I(className="fas fa-history me-1"), "Settlement History"],
+                    href="/brent_vol_history",
+                    color="secondary",
+                    outline=True,
+                    size="sm",
+                ),
                 dbc.Button([html.I(className="fas fa-sync-alt me-1"), "Reload"], id=f'{COMMODITY_LOWER}-reload-btn', color="secondary", outline=True, size="sm"),
-                dbc.Button([html.I(className="fas fa-magic me-1"), "Calibrate"], id=f'{COMMODITY_LOWER}-calibrate-all-btn', color="danger", outline=True, size="sm", title="Calibrate selected expiry"),
-                dbc.Button([html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"], id=f'{COMMODITY_LOWER}-batch-calibrate-btn', color="danger", size="sm", title="Calibrate all expiries at once"),
+                dbc.Button([html.I(className="fas fa-magic me-1"), "Calibrate Adjustment"], id=f'{COMMODITY_LOWER}-calibrate-all-btn', color="danger", outline=True, size="sm", title="Calibrate selected expiry against the official SVI baseline"),
+                dbc.Button([html.I(className="fas fa-layer-group me-1"), "Adjust All Expiries"], id=f'{COMMODITY_LOWER}-batch-calibrate-btn', color="danger", size="sm", title="Calibrate SVI-relative adjustments for all eligible expiries"),
                 dbc.Button(
                     [html.I(className="fas fa-save me-1"), "Save All"],
                     id=f'{COMMODITY_LOWER}-save-all-btn',
@@ -122,11 +135,19 @@ layout = dbc.Container([
     dcc.Store(id=f'{COMMODITY_LOWER}-params-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-comparison-data-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-results-store'),
+    dbc.Alert(
+        [
+            html.Strong("Calibration contract: "),
+            "the official SVI surface is the zero-adjustment baseline. Blue points are eligible American futures-style observations; grey crosses are observed but excluded references and never move the fit.",
+        ],
+        color="info",
+        className="py-2 px-3 mb-3 small",
+    ),
     dbc.Row([
         dbc.Col([
             dbc.Card([
-                dbc.CardHeader(html.H6("Parameters", className="mb-0")),
-                dbc.CardBody([create_parameter_table(COMMODITY)], className="p-2"),
+                dbc.CardHeader(html.H6("SVI-relative adjustment parameters", className="mb-0")),
+                dbc.CardBody([create_brent_adjustment_table()], className="p-2"),
             ]),
         ], width=12),
     ], className="mb-4"),
@@ -141,7 +162,14 @@ layout = dbc.Container([
             ]),
         ], width=12),
     ]),
-    create_comparison_modal(COMMODITY),
+    create_comparison_modal(
+        COMMODITY,
+        comparison_params=list(ADJUSTMENT_PARAMS),
+        param_labels=ADJUSTMENT_LABELS,
+        save_label="Apply Final to Draft",
+        save_disabled=False,
+        save_title="Apply the validated adjustment to this browser session only; no database publication.",
+    ),
     create_batch_calibration_confirm_modal(COMMODITY),
     create_batch_calibration_progress_modal(COMMODITY),
     dcc.Loading(id=f'{COMMODITY_LOWER}-loading', type='circle', children=html.Div(id=f'{COMMODITY_LOWER}-loading-output')),
@@ -194,10 +222,16 @@ def load_data(trade_date, reload_clicks):
             error=load_result.get('error'),
         )
         empty_market_json = pd.DataFrame(
-            columns=['expiry', 'dte', 'delta', 'iv', 'strike', 'forward']
+            columns=[
+                'expiry', 'dte', 'delta', 'iv', 'strike', 'forward',
+                'calibration_eligible', 'exclusion_reason',
+            ]
         ).to_json(date_format='iso', orient='split')
         empty_params_json = pd.DataFrame(
-            columns=['expiry', *PARAM_COLUMNS, 'rmse']
+            columns=[
+                'expiry', *ADJUSTMENT_PARAMS, 'eligible_points',
+                'excluded_points', 'validation', 'rmse', 'message',
+            ]
         ).to_json(date_format='iso', orient='split')
         blocked_title = (
             load_result.get('message')
@@ -214,43 +248,34 @@ def load_data(trade_date, reload_clicks):
             blocked_title,
         )
 
-    # Try to load historical params from database (T-1)
-    historical_params = None
+    # Resolve the same governed SVI snapshot used by /vol_surface.  It is the
+    # immutable zero-adjustment anchor, not another set of observations to fit.
     try:
-        engine = get_database_engine()
-        if engine is not None:
-            historical_params = load_latest_surface_from_db(engine, COMMODITY, trade_date)
-    except Exception:
-        historical_params = None
+        operational_payload = load_operational_surface_payload(COMMODITY, trade_date)
+        operational_surface = operational_surface_frame(operational_payload)
+    except Exception as exc:
+        operational_payload = {'error': str(exc)}
+        operational_surface = pd.DataFrame()
 
-    defaults = get_defaults(COMMODITY)
-    expiries = market_data['expiry'].unique()
-    params_list = []
-    loaded_from_db = False
-
-    for expiry in sorted(expiries):
-        exp_data = market_data[market_data['expiry'] == expiry]
-        forward = exp_data['forward'].iloc[0] if 'forward' in exp_data.columns else 75.0
-        expiry_date = pd.to_datetime(expiry).date()
-
-        params_to_use = defaults.copy()
-        if historical_params is not None and not historical_params.empty:
-            matching = historical_params[historical_params['expiry'] == expiry_date]
-            if not matching.empty:
-                loaded_from_db = True
-                row = matching.iloc[0]
-                for col in PARAM_COLUMNS:
-                    if col in row and pd.notna(row[col]):
-                        params_to_use[col] = row[col]
-
-        try:
-            result = evaluate_fit(params=params_to_use, market_data=exp_data, forward=forward)
-            rmse = result['rmse']
-        except Exception:
-            rmse = np.nan
-        params_list.append({'expiry': expiry, **params_to_use, 'rmse': rmse})
-
-    params_df = pd.DataFrame(params_list)
+    params_df = pd.DataFrame(
+        [
+            baseline_row(
+                select_expiry_rows(market_data, expiry),
+                select_surface_slice(operational_surface, expiry),
+                expiry,
+            )
+            for expiry in sorted(pd.to_datetime(market_data['expiry']).unique())
+        ]
+    )
+    ready_count = int(
+        params_df.get('validation', pd.Series(dtype=str)).eq('Pass').sum()
+    )
+    exact_baseline = bool(
+        operational_payload.get('actual_cob')
+        and operational_payload.get('requested_cob')
+        == operational_payload.get('actual_cob')
+    )
+    calibration_ready = ready_count > 0 and exact_baseline
 
     # Create status badge and tooltip
     badge, tooltip = format_data_status(
@@ -262,17 +287,34 @@ def load_data(trade_date, reload_clicks):
         message=load_result.get('message'),
         error=load_result.get('error'),
     )
-    tooltip_parts = [tooltip, "Params: Historical (T-1)" if loaded_from_db else "Params: Defaults"]
+    calibration_mode = load_result.get('calibration_mode') or 'unknown'
+    tooltip_parts = [
+        tooltip,
+        f"Mode: {calibration_mode}",
+        f"Eligible expiries: {ready_count}",
+        "Anchor: exact-COB official SVI" if exact_baseline else "Anchor unavailable or prior-COB",
+    ]
+    if not load_result.get('provenance_complete', False):
+        tooltip_parts.append('Source timestamps incomplete')
+    action_title = (
+        "No expiry has at least 8 eligible body strikes and an exact-COB SVI baseline"
+        if not calibration_ready
+        else (
+            "Run historical EOD replay adjustment"
+            if calibration_mode == 'eod_settlement_replay'
+            else "Calibrate selected intraday snapshot against official SVI"
+        )
+    )
 
     return (
         market_data.to_json(date_format='iso', orient='split'),
         params_df.to_json(date_format='iso', orient='split'),
         badge,
         " | ".join(tooltip_parts),
-        False,
-        "Calibrate selected expiry",
-        False,
-        "Calibrate all expiries at once",
+        not calibration_ready,
+        action_title,
+        not calibration_ready,
+        action_title,
     )
 
 
@@ -286,22 +328,16 @@ def load_data(trade_date, reload_clicks):
 )
 def update_param_table(params_json, market_data_json, session_state, trade_date):
     restored = restore_product_table(session_state, COMMODITY_LOWER, trade_date)
-    if restored is not None:
+    if restored is not None and all(
+        all(name in row for name in ADJUSTMENT_PARAMS) for row in restored
+    ):
         return restored
     if params_json is None:
         return []
 
     params_df = pd.read_json(StringIO(params_json), orient='split')
 
-    # Parse market data for arbitrage check (forward prices)
-    market_data = None
-    if market_data_json is not None:
-        try:
-            market_data = pd.read_json(StringIO(market_data_json), orient='split')
-        except Exception:
-            pass
-
-    return format_params_for_table(params_df, market_data)
+    return format_brent_adjustment_rows(params_df)
 
 
 @callback(
@@ -327,17 +363,16 @@ def update_smile_grid(
         if market_data_json
         else pd.DataFrame()
     )
-    params_df = parse_table_data(table_data or [])
+    params_df = parse_brent_adjustment_rows(table_data or [])
     selected_row = selected_rows[0] if selected_rows else None
     selected_axis = x_axis or 'delta'
-    return create_smile_grid_figure(
+    return create_brent_adjustment_grid(
         market_data,
         params_df,
         selected_axis,
         selected_row,
-        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
-        operational_surface=operational_surface_frame(operational_payload),
-        operational_metadata=operational_payload,
+        operational_surface_frame(operational_payload),
+        operational_payload,
     )
 
 
@@ -366,108 +401,34 @@ def update_smile_grid(
      State(f'{COMMODITY_LOWER}-comparison-data-store', 'data'),
      State(f'{COMMODITY_LOWER}-x-axis-selector', 'value'),
      State(f'{COMMODITY_LOWER}-date-picker', 'date'),
-     State(f'{COMMODITY_LOWER}-data-status', 'children')],
+     State(f'{COMMODITY_LOWER}-data-status', 'children'),
+     State(f'{COMMODITY_LOWER}-operational-surface-store', 'data')],
     prevent_initial_call=True
 )
 def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks, reset_clicks, comparison_table_data,
                        market_data_json, table_data, selected_rows, is_open, comparison_store, x_axis,
-                       trade_date_str, current_status_badge):
+                       trade_date_str, current_status_badge, operational_payload=None):
     triggered_id = ctx.triggered_id
     empty_fig = {}
     default_outputs = (False, None, "", "", [], empty_fig, "", "", "", no_update, no_update)
 
     if triggered_id == f'{COMMODITY_LOWER}-comparison-cancel-btn':
         return default_outputs
-    if triggered_id == f'{COMMODITY_LOWER}-comparison-save-btn':
-        if not writes_enabled():
-            raise PreventUpdate
-        # Save final params to database
-        if comparison_store is not None:
-            try:
-                engine = get_database_engine()
-                if engine is not None:
-                    final_params = comparison_store.get('final_params', {})
-                    forward = comparison_store.get('forward', 75.0)
-                    row_idx = comparison_store.get('row_idx', 0)
-                    candidate_rmse = comparison_store.get('candidate_rmse', 0.0)
-
-                    # Parse trade_date from date picker (use selected date, not today)
-                    if trade_date_str:
-                        trade_date = pd.to_datetime(trade_date_str).date()
-                    else:
-                        trade_date = date.today()
-
-                    # Get actual expiry from market data
-                    if market_data_json:
-                        market_data = pd.read_json(StringIO(market_data_json), orient='split')
-                        expiry_dates = sorted(market_data['expiry'].unique())
-                        if row_idx < len(expiry_dates):
-                            expiry_date = pd.to_datetime(expiry_dates[row_idx]).date()
-                        else:
-                            expiry_date = date.today()
-
-                        # Recalculate RMSE for final params (not candidate RMSE)
-                        exp_data = market_data[market_data['expiry'] == expiry_dates[row_idx]]
-                        try:
-                            final_result = evaluate_fit(final_params, exp_data, forward)
-                            final_rmse = final_result['rmse']
-                        except Exception:
-                            final_rmse = candidate_rmse
-                    else:
-                        expiry_date = date.today()
-                        final_rmse = candidate_rmse
-
-                    candidate_params = comparison_store.get('candidate_params', {})
-                    source = SOURCE_FULL_OPT if final_params == candidate_params else SOURCE_MANUAL
-
-                    store = ParameterStore(db_engine=engine)
-                    store.save(
-                        commodity=COMMODITY,
-                        expiry=expiry_date,
-                        params=final_params,
-                        calibration_date=trade_date,
-                        fit_error=final_rmse,
-                        arbitrage_valid=True,
-                        trade_date=trade_date,
-                        forward=forward,
-                        source=source,
-                        user_id='dashboard',
-                        overwrite=True
-                    )
-
-                    # Return success with green "Saved" badge and updated table
-                    saved_badge = dbc.Badge(
-                        [html.I(className="fas fa-check me-1"), "Saved"],
-                        color="success",
-                        pill=True,
-                    )
-                    # Update the table data with saved final params
-                    updated_table_data = no_update
-                    if table_data:
-                        updated_table_data = table_data.copy()
-                        if row_idx < len(updated_table_data):
-                            for param_key, param_val in final_params.items():
-                                if param_key in updated_table_data[row_idx]:
-                                    updated_table_data[row_idx][param_key] = param_val
-                            updated_table_data[row_idx]['rmse'] = f"{final_rmse*100:.2f}%"
-                    return (False, None, "", "", [], empty_fig, "", "", "", saved_badge, updated_table_data)
-
-            except Exception as e:
-                print(f"Error saving parameters: {e}")
-                # Return failure with red "Save failed" badge
-                failed_badge = dbc.Badge(
-                    [html.I(className="fas fa-times me-1"), "Save failed"],
-                    color="danger",
-                    pill=True,
-                )
-                return (False, None, "", "", [], empty_fig, "", "", "", failed_badge, no_update)
-
-        return default_outputs
     if market_data_json is None or table_data is None:
         raise PreventUpdate
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    params_df = parse_table_data(table_data)
+    params_df = parse_brent_adjustment_rows(table_data)
+    surface = operational_surface_frame(operational_payload)
+
+    def failure_outputs(message):
+        badge = dbc.Badge(
+            [html.I(className="fas fa-times-circle me-1"), "Calibration failed"],
+            color="danger",
+            pill=True,
+            title=str(message),
+        )
+        return (False, None, "", "", [], empty_fig, "", "", "", badge, no_update)
 
     if triggered_id == f'{COMMODITY_LOWER}-calibrate-all-btn':
         row_idx = selected_rows[0] if selected_rows else 0
@@ -475,38 +436,59 @@ def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks
             raise PreventUpdate
 
         expiry = params_df.iloc[row_idx]['expiry']
-        exp_data = market_data[market_data['expiry'] == market_data['expiry'].unique()[row_idx]]
-        forward = exp_data['forward'].iloc[0] if not exp_data.empty else 75.0
-        current_params = {k: v for k, v in params_df.iloc[row_idx].to_dict().items() if k not in ['expiry', 'rmse', 'arb_status']}
-
+        exp_data = select_expiry_rows(market_data, expiry)
+        surface_slice = select_surface_slice(surface, expiry)
+        current_params = {
+            name: float(params_df.iloc[row_idx].get(name, 0.0))
+            for name in ADJUSTMENT_PARAMS
+        }
         try:
-            result = calibrate(market_data=exp_data, forward=forward, initial_params=current_params, commodity=COMMODITY)
+            if not operational_payload or (
+                operational_payload.get('requested_cob')
+                != operational_payload.get('actual_cob')
+            ):
+                raise BrentAdjustmentError(
+                    'An exact-COB official Brent SVI baseline is required.'
+                )
+            result = calibrate_adjustment(
+                exp_data,
+                surface_slice,
+                expiry=expiry,
+                full_surface=surface,
+                cob_date=trade_date_str,
+            )
             candidate_params = result['params']
             candidate_rmse = result['rmse']
-        except Exception:
-            candidate_params = current_params.copy()
-            candidate_rmse = 0.0
-
-        try:
-            current_result = evaluate_fit(current_params, exp_data, forward)
+            prepared, _ = prepare_adjustment_fit(exp_data, surface_slice)
+            current_result = evaluate_adjustment(current_params, prepared)
             current_rmse = current_result['rmse']
-        except Exception:
-            current_rmse = 0.0
+        except (BrentAdjustmentError, TypeError, ValueError) as exc:
+            return failure_outputs(exc)
+
+        forward = float(prepared['forward'].iloc[0])
 
         comparison_data = {
             'expiry': str(expiry), 'forward': forward, 'current_params': current_params,
             'candidate_params': candidate_params, 'final_params': current_params.copy(),
             'current_rmse': current_rmse, 'candidate_rmse': candidate_rmse, 'row_idx': row_idx,
+            'validation': result['validation'],
+            'shrink_factor': result['shrink_factor'],
         }
-        comparison_table = format_comparison_data(current_params, candidate_params, current_params)
-        fig = create_comparison_plot(
+        comparison_table = format_comparison_data(
+            current_params,
+            candidate_params,
+            current_params,
+            comparison_params=list(ADJUSTMENT_PARAMS),
+            param_labels=ADJUSTMENT_LABELS,
+        )
+        fig = create_brent_adjustment_comparison(
             exp_data,
+            surface_slice,
             current_params,
             candidate_params,
             current_params,
             expiry_label=expiry,
             x_axis=x_axis or 'log_moneyness',
-            model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
         )
 
         return (True, comparison_data, f"Expiry: {expiry}", f"${forward:.2f}", comparison_table, fig,
@@ -528,29 +510,93 @@ def handle_calibration(calibrate_clicks, cancel_clicks, save_clicks, copy_clicks
     else:
         final_params = extract_final_params(comparison_table_data)
 
-    exp_data = market_data[market_data['expiry'] == market_data['expiry'].unique()[row_idx]]
-
+    exp_data = select_expiry_rows(market_data, expiry)
+    surface_slice = select_surface_slice(surface, expiry)
+    validation_error = None
     try:
-        final_result = evaluate_fit(final_params, exp_data, forward)
+        if not operational_payload or (
+            operational_payload.get('requested_cob')
+            != operational_payload.get('actual_cob')
+        ):
+            raise BrentAdjustmentError(
+                'An exact-COB official Brent SVI baseline is required.'
+            )
+        prepared, nodes = prepare_adjustment_fit(exp_data, surface_slice)
+        validation = validate_adjustment(
+            final_params,
+            nodes,
+            forward=float(prepared['forward'].iloc[0]),
+            dte=float(prepared['dte'].iloc[0]),
+            expiry=expiry,
+            full_surface=surface,
+            cob_date=trade_date_str,
+        )
+        if not validation['is_valid']:
+            raise BrentAdjustmentError(validation.get('reason') or 'Validation failed')
+        final_result = evaluate_adjustment(final_params, prepared)
         final_rmse = final_result['rmse']
-    except Exception:
-        final_rmse = 0.0
+    except (BrentAdjustmentError, TypeError, ValueError) as exc:
+        validation_error = str(exc)
+        final_rmse = np.nan
 
     comparison_data = comparison_store.copy()
     comparison_data['final_params'] = final_params
-    comparison_table = format_comparison_data(current_params, candidate_params, final_params)
-    fig = create_comparison_plot(
+    comparison_table = format_comparison_data(
+        current_params,
+        candidate_params,
+        final_params,
+        comparison_params=list(ADJUSTMENT_PARAMS),
+        param_labels=ADJUSTMENT_LABELS,
+    )
+    fig = create_brent_adjustment_comparison(
         exp_data,
+        surface_slice,
         current_params,
         candidate_params,
         final_params,
         expiry_label=expiry,
         x_axis=x_axis or 'log_moneyness',
-        model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
     )
 
+    final_rmse_label = f"{final_rmse*100:.2f}%" if np.isfinite(final_rmse) else "Invalid"
+    if triggered_id == f'{COMMODITY_LOWER}-comparison-save-btn':
+        if validation_error or not np.isfinite(final_rmse):
+            badge = dbc.Badge(
+                [html.I(className="fas fa-times-circle me-1"), "Draft rejected"],
+                color="danger",
+                pill=True,
+                title=validation_error or 'Final adjustment is invalid.',
+            )
+            return (
+                True, comparison_data, f"Expiry: {expiry}", f"${forward:.2f}",
+                comparison_table, fig,
+                f"{comparison_store.get('current_rmse', np.nan)*100:.2f}%",
+                f"{comparison_store.get('candidate_rmse', np.nan)*100:.2f}%",
+                final_rmse_label, badge, no_update,
+            )
+
+        if row_idx >= len(table_data):
+            raise PreventUpdate
+        updated_table_data = [dict(row) for row in table_data]
+        for name in ADJUSTMENT_PARAMS:
+            updated_table_data[row_idx][name] = float(final_params[name])
+        updated_table_data[row_idx]['rmse'] = final_rmse_label
+        updated_table_data[row_idx]['validation'] = 'Pass'
+        updated_table_data[row_idx]['message'] = (
+            'Validated session draft; not published to the database.'
+        )
+        badge = dbc.Badge(
+            [html.I(className="fas fa-check me-1"), "Draft applied · not published"],
+            color="success",
+            pill=True,
+        )
+        return (
+            False, None, "", "", [], empty_fig, "", "", "", badge,
+            updated_table_data,
+        )
+
     return (True, comparison_data, f"Expiry: {expiry}", f"${forward:.2f}", comparison_table, fig,
-            f"{comparison_store.get('current_rmse', 0)*100:.2f}%", f"{comparison_store.get('candidate_rmse', 0)*100:.2f}%", f"{final_rmse*100:.2f}%", no_update, no_update)
+            f"{comparison_store.get('current_rmse', np.nan)*100:.2f}%", f"{comparison_store.get('candidate_rmse', np.nan)*100:.2f}%", final_rmse_label, no_update, no_update)
 
 
 @callback(
@@ -585,7 +631,8 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
 
         summary_data = {
             'Commodity': [COMMODITY],
-            'Model Version': [DEFAULT_CALIBRATION_MODEL_VERSION],
+            'Model Version': [BRENT_ADJUSTMENT_MODEL_VERSION],
+            'Baseline': ['Official Brent SVI surface'],
             'Trade Date': [str(trade_date)],
             'Export Date': [str(date.today())],
             'Number of Expiries': [len(table_data)],
@@ -658,11 +705,13 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
      State(f'{COMMODITY_LOWER}-batch-auto-save', 'value'),
      State(f'{COMMODITY_LOWER}-batch-skip-good-fit', 'value'),
      State(f'{COMMODITY_LOWER}-date-picker', 'date'),
-     State(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open')],
+     State(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
+     State(f'{COMMODITY_LOWER}-operational-surface-store', 'data')],
     prevent_initial_call=True
 )
 def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_data,
-                          auto_save_opts, skip_good_opts, trade_date_str, is_open):
+                          auto_save_opts, skip_good_opts, trade_date_str, is_open,
+                          operational_payload=None):
     """Run batch calibration on all expiries."""
     triggered_id = ctx.triggered_id
 
@@ -677,29 +726,17 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     if market_data_json is None or table_data is None:
         raise PreventUpdate
 
-    auto_save = writes_enabled() and 'auto_save' in (auto_save_opts or [])
     skip_good = 'skip_good' in (skip_good_opts or [])
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    params_df = parse_table_data(table_data)
+    params_df = parse_brent_adjustment_rows(table_data)
+    surface = operational_surface_frame(operational_payload)
 
     if trade_date_str:
         trade_date = pd.to_datetime(trade_date_str).date()
     else:
         trade_date = date.today()
 
-    # Get database engine if auto-save is enabled
-    engine = None
-    store = None
-    if auto_save:
-        try:
-            engine = get_database_engine()
-            if engine is not None:
-                store = ParameterStore(db_engine=engine)
-        except Exception:
-            pass
-
-    expiries = sorted(market_data['expiry'].unique())
     results = []
     updated_table_data = table_data.copy()
 
@@ -707,75 +744,62 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     skip_count = 0
     fail_count = 0
 
-    for i, expiry in enumerate(expiries):
-        exp_data = market_data[market_data['expiry'] == expiry]
-        forward = exp_data['forward'].iloc[0] if not exp_data.empty else 75.0
-        expiry_str = pd.to_datetime(expiry).strftime('%Y-%m-%d')
-        expiry_date = pd.to_datetime(expiry).date()
-
-        # Get current params
-        if i < len(params_df):
-            current_params = {k: v for k, v in params_df.iloc[i].to_dict().items()
-                            if k not in ['expiry', 'rmse', 'arb_status']}
-
-            # Get current RMSE
-            try:
-                current_result = evaluate_fit(current_params, exp_data, forward)
-                old_rmse = current_result['rmse']
-            except Exception:
-                old_rmse = 0.0
-
-            # Skip if already well calibrated
-            if skip_good and old_rmse < 0.01:
-                results.append(format_batch_result_row(expiry_str, 'Skipped', old_rmse, old_rmse))
+    exact_baseline = bool(
+        operational_payload
+        and operational_payload.get('requested_cob')
+        == operational_payload.get('actual_cob')
+    )
+    for i, row in params_df.iterrows():
+        expiry = row['expiry']
+        expiry_str = str(expiry)
+        exp_data = select_expiry_rows(market_data, expiry)
+        surface_slice = select_surface_slice(surface, expiry)
+        old_rmse = None
+        try:
+            if not exact_baseline:
+                raise BrentAdjustmentError(
+                    'An exact-COB official Brent SVI baseline is required.'
+                )
+            prepared, _ = prepare_adjustment_fit(exp_data, surface_slice)
+            current_params = {
+                name: float(row.get(name, 0.0)) for name in ADJUSTMENT_PARAMS
+            }
+            old_rmse = evaluate_adjustment(current_params, prepared)['rmse']
+            if skip_good and old_rmse < 0.002:
+                results.append(
+                    format_batch_result_row(
+                        expiry_str, 'Skipped', old_rmse, old_rmse
+                    )
+                )
                 skip_count += 1
                 continue
 
-            # Run calibration
-            try:
-                result = calibrate(market_data=exp_data, forward=forward,
-                                 initial_params=current_params, commodity=COMMODITY)
-                new_params = result['params']
-                new_rmse = result['rmse']
-
-                # Update table data
-                if i < len(updated_table_data):
-                    for param_key, param_val in new_params.items():
-                        if param_key in updated_table_data[i]:
-                            updated_table_data[i][param_key] = param_val
-                    updated_table_data[i]['rmse'] = f"{new_rmse*100:.2f}%"
-                    # Recalculate arbitrage status with new params
-                    updated_table_data[i]['arb_status'] = update_arb_status_in_row(
-                        updated_table_data[i], forward=forward
-                    )
-
-                # Auto-save if enabled
-                if auto_save and store is not None:
-                    try:
-                        store.save(
-                            commodity=COMMODITY,
-                            expiry=expiry_date,
-                            params=new_params,
-                            calibration_date=trade_date,
-                            fit_error=new_rmse,
-                            arbitrage_valid=True,
-                            trade_date=trade_date,
-                            forward=forward,
-                            source=SOURCE_FULL_OPT,
-                            user_id='dashboard_batch',
-                            overwrite=True
-                        )
-                    except Exception:
-                        pass
-
-                results.append(format_batch_result_row(expiry_str, 'Success', old_rmse, new_rmse))
-                success_count += 1
-
-            except Exception:
-                results.append(format_batch_result_row(expiry_str, 'Failed', old_rmse, None))
-                fail_count += 1
-        else:
-            results.append(format_batch_result_row(expiry_str, 'Failed', None, None))
+            result = calibrate_adjustment(
+                exp_data,
+                surface_slice,
+                expiry=expiry,
+                full_surface=surface,
+                cob_date=trade_date,
+            )
+            new_params = result['params']
+            new_rmse = result['rmse']
+            for param_key, param_val in new_params.items():
+                updated_table_data[i][param_key] = param_val
+            updated_table_data[i]['rmse'] = f"{new_rmse*100:.2f}%"
+            updated_table_data[i]['validation'] = 'Pass'
+            updated_table_data[i]['message'] = (
+                f"SVI-relative fit; shrink factor {result['shrink_factor']:.3f}"
+            )
+            results.append(
+                format_batch_result_row(
+                    expiry_str, 'Success', old_rmse, new_rmse
+                )
+            )
+            success_count += 1
+        except (BrentAdjustmentError, TypeError, ValueError):
+            results.append(
+                format_batch_result_row(expiry_str, 'Failed', old_rmse, None)
+            )
             fail_count += 1
 
     # Create results display
@@ -787,7 +811,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     # Create status badge
     if fail_count == 0:
         status_badge = dbc.Badge(
-            [html.I(className="fas fa-check me-1"), f"Calibrated {success_count} expiries"],
+            [html.I(className="fas fa-check me-1"), f"Adjusted {success_count} expiries"],
             color="success",
             pill=True,
         )
@@ -799,5 +823,5 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
             pill=True,
         )
 
-    return (True, 100, f"Completed: {success_count} calibrated, {skip_count} skipped, {fail_count} failed",
+    return (True, 100, f"Completed: {success_count} adjusted, {skip_count} skipped, {fail_count} failed",
             results_display, False, results, updated_table_data, status_badge)

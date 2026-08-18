@@ -365,6 +365,78 @@ def test_page_has_one_h1_one_wide_grid_and_no_summary_detail_selector():
     assert "RadioItems" not in names
     assert "trades-view-selector" not in ids
     assert "trades-table" in ids
+    heading = next(
+        component
+        for component in components
+        if type(component).__name__ == "H1"
+    )
+    assert heading.children == "Trade ledger"
+    assert "trades-visually-hidden-heading" in heading.className.split()
+    assert not any(
+        getattr(component, "children", None)
+        == (
+            "Every active option trade leg with its booked economics and "
+            "published valuation and Greeks for the selected COB."
+        )
+        for component in components
+    )
+
+
+def test_trades_filters_reuse_the_greeks_sticky_toolbar_contract():
+    toolbar = next(
+        component
+        for component in _component_tree(trades.layout)
+        if "trades-monitor-controls"
+        in getattr(component, "className", "").split()
+    )
+    selector_row = next(
+        component
+        for component in _component_tree(toolbar)
+        if "trades-monitor-selector-row"
+        in getattr(component, "className", "").split()
+    )
+    ids = {
+        getattr(component, "id", None)
+        for component in _component_tree(selector_row)
+        if getattr(component, "id", None)
+    }
+    labels = [
+        component.children
+        for component in _component_tree(selector_row)
+        if "inline-filter-label"
+        in getattr(component, "className", "").split()
+    ]
+
+    assert "greeks-sticky-filter-bar" in toolbar.className.split()
+    assert labels == ["COB Date", "Strategies"]
+    assert ids == {
+        "trades-date-dropdown",
+        "trades-strategy-dropdown",
+        "trades-source-status-mount",
+        "trades-dashboard-source-status-inline",
+    }
+    strategy_dropdown = next(
+        component
+        for component in _component_tree(selector_row)
+        if getattr(component, "id", None) == "trades-strategy-dropdown"
+    )
+    assert "greeks-compact-multi-dropdown" in strategy_dropdown.className.split()
+    assert "greeks-inline-source-status" in selector_row.children[2].className.split()
+    assert not any(
+        getattr(component, "id", None) == "export-trades-table-btn"
+        for component in _component_tree(toolbar)
+    )
+
+    section_actions = next(
+        component
+        for component in _component_tree(trades.layout)
+        if "trades-section-actions"
+        in getattr(component, "className", "").split()
+    )
+    assert any(
+        getattr(component, "id", None) == "export-trades-table-btn"
+        for component in _component_tree(section_actions)
+    )
 
 
 def test_grid_contains_required_groups_and_native_numeric_columns():

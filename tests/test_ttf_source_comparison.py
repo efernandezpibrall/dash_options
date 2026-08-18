@@ -129,10 +129,10 @@ def test_valuation_comparison_records_include_official_shadow_differences():
     assert record["qty_pnl_difference"] == 2861
 
 
-def test_valuation_monetary_totals_display_two_decimal_places():
+def test_valuation_monetary_totals_display_as_whole_numbers():
     assert (
         valuation._format_valuation_display_value('qty_pnl', 1234.5)
-        == '1,234.50'
+        == '1,234'
     )
     pnl_columns = {
         definition['field']: definition
