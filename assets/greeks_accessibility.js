@@ -1,6 +1,8 @@
 (function () {
     'use strict';
 
+    let pricerLabelSequence = 0;
+
     function cleanText(element) {
         return element ? element.textContent.replace(/\s+/g, ' ').trim() : '';
     }
@@ -40,6 +42,58 @@
         });
     }
 
+    function applyPricerLabels() {
+        document.querySelectorAll('.pricer-field').forEach((field) => {
+            const labelElement = field.querySelector(':scope > .pricer-field-label');
+            const fieldLabel = cleanText(labelElement);
+            if (!fieldLabel) {
+                return;
+            }
+            if (!labelElement.id) {
+                pricerLabelSequence += 1;
+                labelElement.id = `pricer-field-label-${pricerLabelSequence}`;
+            }
+            field.querySelectorAll(
+                ':scope > .dash-dropdown-wrapper button.dash-dropdown'
+            ).forEach((control) => {
+                const selectedValue = control.querySelector('.dash-dropdown-value');
+                control.setAttribute('aria-labelledby', [
+                    labelElement.id,
+                    selectedValue && selectedValue.id,
+                ].filter(Boolean).join(' '));
+                control.removeAttribute('aria-label');
+            });
+            field.querySelectorAll(
+                ':scope > .dash-datepicker .dash-datepicker-input, '
+                + ':scope > .dash-input-container > input.dash-input-element, '
+                + ':scope > [role="slider"], '
+                + ':scope > .dash-slider-container [role="slider"]'
+            ).forEach((control) => {
+                control.setAttribute('aria-label', fieldLabel);
+            });
+        });
+
+        document.querySelectorAll('.pricer-structure-panel').forEach((panel) => {
+            const structureTitle = cleanText(
+                panel.querySelector(':scope > .pricer-section-header .pricer-section-title')
+            );
+            panel.querySelectorAll('[role="treegrid"]').forEach((treegrid) => {
+                if (!structureTitle) {
+                    return;
+                }
+                const isMonthlyComponents = Boolean(
+                    treegrid.closest('.pricer-strip-components-grid')
+                );
+                treegrid.setAttribute(
+                    'aria-label',
+                    isMonthlyComponents
+                        ? `Monthly strip components for ${structureTitle}`
+                        : `Option legs for ${structureTitle}`
+                );
+            });
+        });
+    }
+
     let scheduled = false;
     function scheduleGridLabels() {
         if (scheduled) {
@@ -49,6 +103,7 @@
         window.requestAnimationFrame(() => {
             scheduled = false;
             applyGridLabels();
+            applyPricerLabels();
         });
     }
 

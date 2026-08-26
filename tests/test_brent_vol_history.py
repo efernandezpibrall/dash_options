@@ -117,6 +117,70 @@ def _intraday_missing_quote_frame():
     return history._normalize_chain_frame(frame)
 
 
+def _tfo_apr27_intraday_frame():
+    base = _chain_frame().iloc[0].to_dict()
+    rows = []
+    prices = {
+        48.0: {"C": 10.0, "P": 9.667},
+        49.0: {"C": 9.037, "P": 9.704},
+        50.0: {"C": 8.707001, "P": 10.374001},
+    }
+    for strike, sides in prices.items():
+        for put_call, last_price in sides.items():
+            rows.append(
+                {
+                    **base,
+                    "product": "TFO",
+                    "business_date": "2026-08-24",
+                    "observed_at": "2026-08-24T13:18:21Z",
+                    "underlying_security": "FJSJ7 Comdty",
+                    "pricing_underlying_security": "TZTJ7 Comdty",
+                    "underlying_contract_month": "2027-04-01",
+                    "underlying_price": 49.7925,
+                    "underlying_bid": 49.695,
+                    "underlying_mid": 49.7925,
+                    "underlying_ask": 49.890,
+                    "option_security": f"FJSJ7{put_call} {strike:g} Comdty",
+                    "option_global_id": f"BBG-FJSJ7-{put_call}-{strike:g}",
+                    "put_call": put_call,
+                    "strike": strike,
+                    "option_expiration_date": "2027-03-25",
+                    "option_style": "EUROPEAN",
+                    "currency": "EUR",
+                    "price_unit": "EUR/MWH",
+                    "settlement_price": None,
+                    "last_price": last_price,
+                    "last_trade_date": pd.NaT,
+                    "intraday_open_interest": 100.0 + strike,
+                    "intraday_open_interest_date": "2026-08-24",
+                    "option_bid": None,
+                    "option_mid": None,
+                    "option_ask": None,
+                    "executable_iv_bid": None,
+                    "executable_iv_mid": None,
+                    "executable_iv_ask": None,
+                    "executable_iv_status": "unavailable",
+                    "implied_volatility": None,
+                    "iv_status": "unavailable",
+                    "snapshot_metadata": {"snapshot_kind": "INTRADAY"},
+                }
+            )
+    return history._normalize_chain_frame(pd.DataFrame(rows))
+
+
+def _tfo_apr27_prior_settlement_frame():
+    frame = _tfo_apr27_intraday_frame()
+    frame["snapshot_metadata"] = [{"snapshot_kind": "SETTLEMENT"}] * len(frame)
+    frame["business_date"] = pd.Timestamp("2026-08-17")
+    frame["underlying_price"] = 48.333
+    frame["settlement_price"] = frame["last_price"]
+    frame["implied_volatility"] = frame["strike"].map(
+        {48.0: 0.633951, 49.0: 0.638026, 50.0: 0.641815}
+    )
+    frame["iv_status"] = "resolved"
+    return history._normalize_chain_frame(frame)
+
+
 def test_layout_has_one_semantic_h1_and_auditable_components():
     items = list(_walk(history.layout))
     headings = [item for item in items if isinstance(item, html.H1)]
@@ -126,10 +190,17 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
         for item in items
         if getattr(item, "id", None) == "brent-vol-history-trade-start"
     )
+    worker_poll = next(
+        item
+        for item in items
+        if getattr(item, "id", None) == "brent-vol-history-worker-poll"
+    )
     assert len(headings) == 1
     assert headings[0].children == "Vol trades"
     assert headings[0].className == "brent-vol-history-visually-hidden-heading"
     assert trade_slider.allow_direct_input is False
+    assert worker_poll.interval == 10_000
+    assert worker_poll.disabled is False
     assert "brent-vol-history-summary" not in ids
     assert "brent-vol-history-trade-status" not in ids
     assert "brent-vol-history-status" not in ids
@@ -654,7 +725,7 @@ def test_expiry_section_uses_one_shared_chart_legend():
         "Calls IV",
         "Puts IV",
         "Executable band",
-        "Indicative last IV",
+        "Prior official settlement IV",
         "Trade-time IV",
         "Bloomberg settlement IV",
         "Settlement eligible",
@@ -712,17 +783,8 @@ def test_settlement_iv_remains_visible_without_volume_or_open_interest():
     ]
 
 
-def test_missing_bid_ask_uses_non_executable_last_price_iv_on_delta():
+def test_missing_bid_ask_never_turns_last_price_into_a_current_iv_curve():
     chain = _intraday_missing_quote_frame()
-    indicative = history._indicative_last_price_smile(chain)
-    assert len(indicative) == 1
-    row = indicative.iloc[0]
-    assert row["option_security"] == "COM8P 60 Comdty"
-    assert row["reference_iv"] == pytest.approx(0.2929201, abs=1e-6)
-    assert row["display_delta"] == pytest.approx(0.2319641, abs=1e-6)
-    assert row["delta_source"] == "Indicative last price · non-executable"
-    assert row["reference_time"] == "Timestamp unavailable"
-
     figure = history.build_expiry_figure(
         chain,
         pd.DataFrame(),
@@ -731,21 +793,65 @@ def test_missing_bid_ask_uses_non_executable_last_price_iv_on_delta():
         x_axis="delta",
     )
     trace_names = {trace.name for trace in figure.data}
-    assert "Indicative last-price IV" in trace_names
+    assert "Indicative last-price IV" not in trace_names
     assert not any(name.startswith("Executable mid IV") for name in trace_names)
-    indicative_trace = next(
-        trace for trace in figure.data if trace.name == "Indicative last-price IV"
-    )
-    assert list(indicative_trace.y) == pytest.approx([29.29201], abs=1e-5)
-    assert "Underlying %{customdata[3]:.3f}" in indicative_trace.hovertemplate
-    assert "Volume / OI" in indicative_trace.hovertemplate
-    assert float(indicative_trace.customdata[0][3]) == pytest.approx(73.795)
     assert not any(trace.name.startswith("Volume ·") for trace in figure.data)
     assert not any(
         trace.name.startswith("Open interest ·") for trace in figure.data
     )
-    annotations = [str(item.text) for item in figure.layout.annotations]
-    assert not any("unavailable on Delta" in text for text in annotations)
+    assert dict(figure.layout.meta)["quality"]["status"] == "No reliable IV"
+
+
+def test_apr27_last_prices_are_audit_only_and_prior_settlement_drives_delta():
+    chain = _tfo_apr27_intraday_frame()
+    prior = _tfo_apr27_prior_settlement_frame()
+    quality = history._last_price_parity_quality(chain)
+
+    assert quality["status"] == "coherent_historical"
+    assert quality["pair_count"] == 3
+    assert quality["parity_forward"] == pytest.approx(48.333, abs=1e-9)
+    assert quality["parity_mad"] == pytest.approx(0.0, abs=1e-9)
+    assert quality["live_forward"] == pytest.approx(49.7925)
+    assert quality["gap"] == pytest.approx(1.4595)
+
+    figure = history.build_expiry_figure(
+        chain,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.Timestamp("2027-04-01"),
+        x_axis="delta",
+        prior_settlement_chain=prior,
+        product="TFO",
+    )
+    traces = {trace.name: trace for trace in figure.data}
+    prior_name = "Prior settlement IV · 17 Aug 2026"
+    assert "Indicative last-price IV" not in traces
+    assert prior_name in traces
+    assert "Volume / OI" not in traces[prior_name].hovertemplate
+    assert any(trace.type == "bar" for trace in figure.data)
+    delta_sources = {
+        str(row[2])
+        for trace in figure.data
+        if trace.type == "bar"
+        for row in trace.customdata
+    }
+    assert all("Prior settlement 17 Aug 2026" in source for source in delta_sources)
+    figure_quality = dict(figure.layout.meta)["quality"]
+    assert figure_quality["status"] == "Prior settle · 17 Aug 2026"
+    assert "No reliable current IV" in figure_quality["detail"]
+    assert "48.333" in figure_quality["detail"]
+    assert "49.7925" in figure_quality["detail"]
+
+    cards = history.build_plot_cards(
+        chain,
+        pd.DataFrame(),
+        x_axis="delta",
+        prior_settlement_chain=prior,
+        product="TFO",
+    )
+    visible_text = " ".join(item for item in _walk(cards[0]) if isinstance(item, str))
+    assert "Prior settle · 17 Aug 2026" in visible_text
+    assert "FJS last-price parity implies TZT 48.3330" in visible_text
 
 
 def test_expiry_figure_keeps_extreme_activity_but_focuses_on_smile():
@@ -818,7 +924,7 @@ def test_delta_axis_uses_put_atm_call_convention_and_keeps_activity_only_strikes
     placement_by_strike = {
         float(row[0]): row[2] for row in put_open_interest.customdata
     }
-    assert placement_by_strike[50.0] == "Nearest primary smile wing"
+    assert placement_by_strike[50.0] == "Nearest current executable smile wing"
     published_trace = next(
         trace for trace in figure.data if trace.name == "Published Brent exact COB"
     )

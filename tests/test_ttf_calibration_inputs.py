@@ -13,6 +13,9 @@ from vol_calibration.calibration_inputs import (
     expiry_month,
     select_expiry_observations,
 )
+from vol_calibration.components.batch_calibration_modal import (
+    create_batch_calibration_confirm_modal,
+)
 from vol_calibration.data_cache import clear_workspace_load_cache
 from vol_calibration.pages import ttf
 
@@ -615,7 +618,18 @@ def test_batch_confirmation_reports_exact_ttf_basis_breakdown(monkeypatch):
 
     result = ttf.toggle_batch_confirm_modal(1, None, None, table_data, False)
 
-    assert result == (True, "64 expiries: 31 observed, 33 extrapolated")
+    assert result == (
+        True,
+        "64 expiries: 31 observed, 33 extrapolated · settlement-node target",
+    )
+
+
+def test_hybrid_batch_confirmation_sets_realistic_duration_expectation():
+    hybrid_modal = create_batch_calibration_confirm_modal("TTF", hybrid=True)
+    standard_modal = create_batch_calibration_confirm_modal("HH")
+
+    assert "several minutes" in repr(hybrid_modal)
+    assert "several seconds" in repr(standard_modal)
 
 
 def test_ttf_export_preserves_market_weights_and_canonical_provenance():
@@ -752,7 +766,7 @@ def test_batch_chains_tail_retries_and_continues_after_failure(monkeypatch):
     assert updated_by_expiry["Jun-29"]["vr"] == pytest.approx(0.61)
 
 
-def test_batch_and_save_state_share_published_base_and_node_edits(monkeypatch):
+def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
     market_data = _valid_ttf_observations()
     market_json = market_data.to_json(date_format="iso", orient="split")
     table_data = [_table_row("Sep-26", "observed", 0.32)]
@@ -760,8 +774,8 @@ def test_batch_and_save_state_share_published_base_and_node_edits(monkeypatch):
     publication = {"publication_id": "base-publication"}
     observed_calls = {}
 
-    def fake_base(market, expiry, publication_payload):
-        observed_calls["publication"] = publication_payload
+    def fake_settlement(market, expiry):
+        observed_calls["settlement_target"] = True
         return ttf._select_ttf_expiry_inputs(market, expiry)
 
     def fake_node_edits(observations, edits, expiry=None):
@@ -787,7 +801,14 @@ def test_batch_and_save_state_share_published_base_and_node_edits(monkeypatch):
         "ctx",
         SimpleNamespace(triggered_id="ttf-batch-confirm-btn"),
     )
-    monkeypatch.setattr(ttf, "_base_ttf_observations", fake_base)
+    monkeypatch.setattr(ttf, "_settlement_ttf_observations", fake_settlement)
+    monkeypatch.setattr(
+        ttf,
+        "_base_ttf_observations",
+        lambda *args, **kwargs: pytest.fail(
+            "batch calibration used the published intraday base"
+        ),
+    )
     monkeypatch.setattr(ttf, "_apply_node_edits", fake_node_edits)
     monkeypatch.setattr(ttf, "fit_ttf_hybrid_candidate", fake_hybrid)
 
@@ -804,7 +825,7 @@ def test_batch_and_save_state_share_published_base_and_node_edits(monkeypatch):
         publication,
     )
 
-    assert observed_calls["publication"] is publication
+    assert observed_calls["settlement_target"] is True
     assert observed_calls["node_store"] is node_store
     assert pd.Timestamp(observed_calls["expiry"]).to_period("M") == pd.Period(
         "2026-09", freq="M"
@@ -819,6 +840,7 @@ def test_batch_and_save_state_share_published_base_and_node_edits(monkeypatch):
     )
     assert ready is True
     assert reason is None
+    assert output[5]["calibration_target"] == ttf.TTF_BATCH_CALIBRATION_TARGET
 
 
 def test_hybrid_comparison_cannot_persist_even_when_writes_enabled(monkeypatch):

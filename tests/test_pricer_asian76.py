@@ -64,6 +64,18 @@ def find_component(component, component_id):
     return None
 
 
+def walk_components(component):
+    yield component
+    children = getattr(component, 'children', None)
+    if children is None:
+        return
+    if not isinstance(children, (list, tuple)):
+        children = [children]
+    for child in children:
+        if child is not None:
+            yield from walk_components(child)
+
+
 def test_asian_parser_orders_pattern_ids_and_adjusts_volatility_once():
     _call_put, params, dates, param_ids, date_ids = asian_inputs()
     parsed = pricer._parse_asian76_model_inputs(params, dates, param_ids, date_ids)
@@ -75,11 +87,11 @@ def test_asian_parser_orders_pattern_ids_and_adjusts_volatility_once():
     assert parsed['averaging_start_date'] == dt.date(2026, 10, 19)
     assert parsed['expiration_date'] == dt.date(2027, 1, 17)
     assert parsed['contract_expiration_date'] == dt.date(2027, 4, 17)
-    assert parsed['T_A'] == pytest.approx(90 / 365)
-    assert parsed['T'] == pytest.approx(180 / 365)
-    assert parsed['option_business_days'] == 129
-    assert parsed['contract_business_days'] == 194
-    expected_factor = math.sqrt(129 / 194)
+    assert parsed['T_A'] == pytest.approx(90 / 365.25)
+    assert parsed['T'] == pytest.approx(180 / 365.25)
+    assert parsed['option_business_days'] == 124
+    assert parsed['contract_business_days'] == 187
+    expected_factor = math.sqrt(124 / 187)
     assert parsed['vol_adjustment_factor'] == pytest.approx(expected_factor)
     assert parsed['v'] == pytest.approx(0.32 * expected_factor)
 
@@ -115,17 +127,49 @@ def test_asian_parser_rejects_adjusted_volatility_below_library_floor():
 
 
 def test_asian_date_sync_enforces_ordering_bounds():
-    corrected = pricer.sync_asian76_dates('2026-10-19', '2026-09-01', '2026-09-15')
+    corrected = pricer.sync_asian76_dates(
+        '2026-10-19',
+        '2026-09-01',
+        '2026-09-15',
+        'TTF',
+        ['MONTH'],
+        None,
+        '2026-07-21',
+    )
     assert corrected == (
+        no_update,
+        '2026-10-19',
+        '2026-10-19',
+        None,
         '2026-10-19',
         '2026-10-19',
         '2026-10-19',
-        '2026-10-19',
-        '2026-10-19',
+        False,
+        False,
+        False,
     )
 
-    valid = pricer.sync_asian76_dates('2026-10-19', '2027-01-17', '2027-04-17')
-    assert valid == (no_update, '2026-10-19', '2027-01-17', no_update, '2027-01-17')
+    valid = pricer.sync_asian76_dates(
+        '2026-10-19',
+        '2027-01-17',
+        '2027-04-17',
+        'TTF',
+        ['MONTH'],
+        None,
+        '2026-07-21',
+    )
+    assert valid == (
+        no_update,
+        no_update,
+        '2026-10-19',
+        None,
+        '2027-01-17',
+        no_update,
+        '2027-01-17',
+        False,
+        False,
+        False,
+    )
 
 
 def test_asian_adapter_preserves_contract_boundaries_and_parity():
@@ -194,9 +238,19 @@ def test_theta_is_n_a_when_averaging_has_started():
 
 
 def test_store_is_session_scoped_and_replaces_global_cache():
-    store = find_component(pricer.layout, 'pricer-calculation-store')
-    assert isinstance(store, dcc.Store)
-    assert store.storage_type == 'session'
+    workspace_store = find_component(pricer.layout, 'pricer-workspace-store')
+    calculation_stores = [
+        item
+        for item in walk_components(pricer.layout)
+        if isinstance(item, dcc.Store)
+        and isinstance(getattr(item, 'id', None), dict)
+        and item.id.get('type') == 'pricer-calculation-store'
+    ]
+    assert isinstance(workspace_store, dcc.Store)
+    assert workspace_store.storage_type == 'session'
+    assert len(calculation_stores) == 1
+    assert calculation_stores[0].storage_type == 'memory'
+    assert calculation_stores[0].id['structure_id'] == pricer.DEFAULT_STRUCTURE_ID
     assert not hasattr(pricer, 'option_cache')
 
 
@@ -213,7 +267,9 @@ def test_asian_payoff_and_future_valuation_semantics():
 
     selected = pricer.update_payoff_chart(snapshot, '2026-08-20', 50, 'asian76')
     marker = next(trace for trace in selected.data if trace.name == 'Selected Valuation')
-    expected = asian_76('C', 100, 105, 150 / 365, 60 / 365, 0.03, snapshot['params']['v'])[0]
+    expected = asian_76(
+        'C', 100, 105, 150 / 365.25, 60 / 365.25, 0.03, snapshot['params']['v']
+    )[0]
     assert marker.y[0] == pytest.approx(expected)
 
     unsupported = pricer.update_payoff_chart(snapshot, '2026-10-20', 50, 'asian76')

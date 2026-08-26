@@ -1,7 +1,8 @@
-"""Immutable publication service for complete TTF intraday surfaces."""
+"""Immutable publication service for governed PCHIP/Wing gas surfaces."""
 
 from __future__ import annotations
 
+import csv
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 import hashlib
@@ -28,10 +29,99 @@ RESULT_TABLE = "at_lng.vol_calibration_expiry_results"
 AUDIT_TABLE = "at_lng.vol_calibration_audit_events"
 RUN_TRADE_TABLE = "at_lng.vol_calibration_run_trade_inputs"
 PUBLICATION_ENGINE_VERSION = "ttf-intraday-pchip-wing-v1"
+JKM_HYBRID_POLICY_VERSION = "jkm_pchip_core_wing_tail_hybrid_v1"
+_HYBRID_PUBLICATION_POLICIES = {
+    "TTF": {
+        "method": TTF_HYBRID_METHOD,
+        "policy_version": TTF_HYBRID_POLICY_VERSION,
+        "engine_version": PUBLICATION_ENGINE_VERSION,
+    },
+    "JKM": {
+        "method": TTF_HYBRID_METHOD,
+        "policy_version": JKM_HYBRID_POLICY_VERSION,
+        "engine_version": "jkm-pchip-wing-v1",
+    },
+}
+
+_SURFACE_INSERT_COLUMNS = (
+    "publication_id",
+    "run_id",
+    "commodity",
+    "cob_date",
+    "contract_date",
+    "option_expiration_date",
+    "strike",
+    "delta",
+    "put_call",
+    "volatility",
+    "total_variance",
+    "working_forward",
+    "surface_region",
+    "blend_classification",
+    "calibration_basis",
+    "source_name",
+    "calibration_method",
+    "calibration_policy_version",
+    "input_fingerprint",
+)
 
 
 class TTFPublicationError(RuntimeError):
-    """Raised when a complete TTF publication cannot be committed safely."""
+    """Raised when a complete governed gas publication cannot be committed."""
+
+
+HybridPublicationError = TTFPublicationError
+
+
+def _publication_policy(commodity: str) -> tuple[str, dict]:
+    product = str(commodity or "").strip().upper()
+    policy = _HYBRID_PUBLICATION_POLICIES.get(product)
+    if policy is None:
+        raise TTFPublicationError(
+            f"Hybrid publication is unsupported for commodity {product!r}."
+        )
+    return product, policy
+
+
+def _copy_surface_points(connection, point_rows: list[dict]) -> bool:
+    """Use PostgreSQL COPY when the active DBAPI driver exposes it.
+
+    Returning ``False`` means the connection does not support COPY and lets the
+    caller retain the portable SQLAlchemy executemany fallback. COPY failures
+    themselves propagate so the surrounding publication transaction rolls back.
+    """
+    sqlalchemy_connection = getattr(connection, "connection", None)
+    driver_connection = getattr(sqlalchemy_connection, "driver_connection", None)
+    cursor_factory = getattr(driver_connection, "cursor", None)
+    if not callable(cursor_factory):
+        return False
+
+    cursor = cursor_factory()
+    copy_expert = getattr(cursor, "copy_expert", None)
+    if not callable(copy_expert):
+        cursor.close()
+        return False
+
+    buffer = StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    for row in point_rows:
+        writer.writerow(
+            [
+                r"\N" if row.get(column) is None else row.get(column)
+                for column in _SURFACE_INSERT_COLUMNS
+            ]
+        )
+    buffer.seek(0)
+    column_sql = ", ".join(_SURFACE_INSERT_COLUMNS)
+    copy_sql = (
+        f"COPY {SURFACE_TABLE} ({column_sql}) FROM STDIN "
+        r"WITH (FORMAT CSV, NULL '\N')"
+    )
+    try:
+        copy_expert(copy_sql, buffer)
+    finally:
+        cursor.close()
+    return True
 
 
 def _table_available(engine, table_name: str) -> bool:
@@ -62,7 +152,13 @@ def _as_of_cutoff(trading_date, now: datetime | None = None) -> datetime:
     return datetime.combine(selected, time.max, tzinfo=timezone.utc)
 
 
-def empty_publication_payload(trading_date, *, error: str | None = None) -> dict:
+def empty_publication_payload(
+    trading_date,
+    *,
+    error: str | None = None,
+    commodity: str = "TTF",
+) -> dict:
+    product, policy = _publication_policy(commodity)
     selected = pd.to_datetime(trading_date, errors="coerce")
     return {
         "publication_id": None,
@@ -76,8 +172,9 @@ def empty_publication_payload(trading_date, *, error: str | None = None) -> dict
         "row_count": 0,
         "expiry_count": 0,
         "source": SURFACE_TABLE,
-        "method": TTF_HYBRID_METHOD,
-        "policy_version": TTF_HYBRID_POLICY_VERSION,
+        "commodity": product,
+        "method": policy["method"],
+        "policy_version": policy["policy_version"],
         "expiry_results": [],
         "data": pd.DataFrame().to_json(orient="split"),
         "error": error,
@@ -90,18 +187,38 @@ def load_latest_ttf_publication(
     *,
     as_of: datetime | None = None,
     publication_id: str | None = None,
+    prefer_exact_cob: bool = False,
+    commodity: str = "TTF",
 ) -> dict:
-    """Load one complete TTF publication, normally without look-ahead."""
+    """Load one complete hybrid publication, normally without look-ahead.
+
+    Calibration review may opt into the active revision for the exact selected
+    COB even when that revision was approved later.  Older fallback revisions
+    remain subject to the normal point-in-time cutoff.
+    """
+    product, policy = _publication_policy(commodity)
     if not ttf_publication_storage_available(engine):
         return empty_publication_payload(
             trading_date,
-            error="TTF publication storage is not migrated.",
+            error=f"{product} publication storage is not migrated.",
+            commodity=product,
         )
     cutoff = _as_of_cutoff(trading_date, as_of)
     if publication_id is None:
-        publication_filter = (
-            "p.cob_date <= :trading_date AND p.published_at <= :as_of"
-        )
+        if prefer_exact_cob:
+            publication_filter = (
+                "(p.cob_date = :trading_date OR "
+                "(p.cob_date < :trading_date AND p.published_at <= :as_of))"
+            )
+            publication_order = (
+                "CASE WHEN p.cob_date = :trading_date THEN 0 ELSE 1 END, "
+                "p.published_at DESC, p.created_at DESC"
+            )
+        else:
+            publication_filter = (
+                "p.cob_date <= :trading_date AND p.published_at <= :as_of"
+            )
+            publication_order = "p.published_at DESC, p.created_at DESC"
         publication_params = {
             "trading_date": pd.Timestamp(trading_date).date(),
             "as_of": cutoff,
@@ -112,15 +229,16 @@ def load_latest_ttf_publication(
         # point-in-time cutoff here would hide the row that was just committed.
         publication_filter = "p.publication_id = CAST(:publication_id AS uuid)"
         publication_params = {"publication_id": str(publication_id)}
+        publication_order = "p.published_at DESC, p.created_at DESC"
     publication_query = text(
         f"""
         SELECT p.publication_id, p.run_id, p.cob_date, p.published_at,
                p.published_by, r.configuration
         FROM {PUBLICATION_TABLE} p
         JOIN {RUN_TABLE} r ON r.run_id = p.run_id
-        WHERE p.commodity = 'TTF' AND p.status = 'published' AND p.is_active
+        WHERE p.commodity = '{product}' AND p.status = 'published' AND p.is_active
           AND {publication_filter}
-        ORDER BY p.published_at DESC, p.created_at DESC
+        ORDER BY {publication_order}
         LIMIT 1
         """
     )
@@ -130,7 +248,7 @@ def load_latest_ttf_publication(
             publication_params,
         ).mappings().first()
         if publication is None:
-            return empty_publication_payload(trading_date)
+            return empty_publication_payload(trading_date, commodity=product)
         points = pd.read_sql(
             text(
                 f"""
@@ -190,8 +308,9 @@ def load_latest_ttf_publication(
         "row_count": int(len(points)),
         "expiry_count": int(points["contract_date"].nunique()) if not points.empty else 0,
         "source": SURFACE_TABLE,
-        "method": TTF_HYBRID_METHOD,
-        "policy_version": TTF_HYBRID_POLICY_VERSION,
+        "commodity": product,
+        "method": policy["method"],
+        "policy_version": policy["policy_version"],
         "expiry_results": [_json_ready(dict(item)) for item in expiry_results],
         "data": points.to_json(date_format="iso", orient="split"),
         "error": None,
@@ -230,10 +349,12 @@ def normalize_ttf_publication_surface(
     *,
     trading_date,
     input_fingerprint: str | None = None,
+    commodity: str = "TTF",
 ) -> pd.DataFrame:
     """Normalize and fail closed on a complete operational-surface frame."""
+    product, policy = _publication_policy(commodity)
     if surface is None or surface.empty:
-        raise TTFPublicationError("A TTF publication cannot be empty.")
+        raise TTFPublicationError(f"A {product} publication cannot be empty.")
     normalized = surface.copy()
     aliases = {
         "expiry": "contract_date",
@@ -259,7 +380,7 @@ def normalize_ttf_publication_surface(
     missing = sorted(required - set(normalized.columns))
     if missing:
         raise TTFPublicationError(
-            "TTF publication surface is missing: " + ", ".join(missing)
+            f"{product} publication surface is missing: " + ", ".join(missing)
         )
     normalized["contract_date"] = pd.to_datetime(
         normalized["contract_date"], errors="coerce"
@@ -276,44 +397,57 @@ def normalize_ttf_publication_surface(
     ):
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
     if normalized[["contract_date", "option_expiration_date"]].isna().any().any():
-        raise TTFPublicationError("TTF publication dates must be complete and valid.")
+        raise TTFPublicationError(
+            f"{product} publication dates must be complete and valid."
+        )
     numeric = normalized[
         ["strike", "delta", "volatility", "total_variance", "working_forward"]
     ]
     if not np.isfinite(numeric.to_numpy(dtype=float)).all():
-        raise TTFPublicationError("TTF publication coordinates must be finite.")
+        raise TTFPublicationError(f"{product} publication coordinates must be finite.")
     if (
         normalized[["strike", "volatility", "total_variance", "working_forward"]]
         <= 0
     ).any().any():
         raise TTFPublicationError(
-            "TTF publication strike, IV, variance, and forward must be positive."
+            f"{product} publication strike, IV, variance, and forward must be positive."
         )
     if not normalized["delta"].between(0, 1, inclusive="neither").all():
-        raise TTFPublicationError("TTF publication deltas must be inside (0, 1).")
+        raise TTFPublicationError(
+            f"{product} publication deltas must be inside (0, 1)."
+        )
     if normalized.duplicated(["contract_date", "strike"]).any():
-        raise TTFPublicationError("TTF publication contains duplicate expiry/strike points.")
+        raise TTFPublicationError(
+            f"{product} publication contains duplicate expiry/strike points."
+        )
     if normalized["source_name"].astype(str).str.strip().eq("").any():
-        raise TTFPublicationError("TTF publication source provenance is required.")
+        raise TTFPublicationError(
+            f"{product} publication source provenance is required."
+        )
     if not normalized["calibration_basis"].astype(str).str.lower().isin(
         {"observed", "extrapolated"}
     ).all():
-        raise TTFPublicationError("TTF publication basis is unsupported.")
+        raise TTFPublicationError(f"{product} publication basis is unsupported.")
 
-    normalized["commodity"] = "TTF"
+    normalized["commodity"] = product
     normalized["cob_date"] = pd.Timestamp(trading_date).normalize()
     normalized["put_call"] = "C"
-    normalized["calibration_method"] = TTF_HYBRID_METHOD
-    normalized["calibration_policy_version"] = TTF_HYBRID_POLICY_VERSION
+    normalized["calibration_method"] = policy["method"]
+    normalized["calibration_policy_version"] = policy["policy_version"]
     if input_fingerprint is not None:
         normalized["input_fingerprint"] = input_fingerprint
     return normalized.sort_values(["contract_date", "strike"]).reset_index(drop=True)
 
 
-def ttf_surface_fingerprint(surface: pd.DataFrame) -> str:
+def ttf_surface_fingerprint(
+    surface: pd.DataFrame,
+    *,
+    commodity: str = "TTF",
+) -> str:
     normalized = normalize_ttf_publication_surface(
         surface,
         trading_date=surface.get("cob_date", pd.Series([date.today()])).iloc[0],
+        commodity=commodity,
     )
     columns = [
         "contract_date",
@@ -369,11 +503,13 @@ def publish_ttf_surface(
     manual_trade_ids: Iterable[str] = (),
     expected_expiries: Iterable | None = None,
     notes: str | None = None,
+    commodity: str = "TTF",
 ) -> dict:
-    """Atomically supersede and publish one complete TTF surface revision."""
+    """Atomically supersede and publish one complete hybrid surface revision."""
+    product, policy = _publication_policy(commodity)
     authorize(identity, Permission.PUBLISH, resource_creator=created_by)
     if not ttf_publication_storage_available(engine):
-        raise TTFPublicationError("TTF publication storage is not migrated.")
+        raise TTFPublicationError(f"{product} publication storage is not migrated.")
     if not str(idempotency_key or "").strip():
         raise TTFPublicationError("A publication idempotency key is required.")
     trading = pd.Timestamp(trading_date).date()
@@ -381,8 +517,12 @@ def publish_ttf_surface(
     if settlement > trading:
         raise TTFPublicationError("Settlement COB cannot be after the trading date.")
 
-    prepared = normalize_ttf_publication_surface(surface, trading_date=trading)
-    fingerprint = ttf_surface_fingerprint(prepared)
+    prepared = normalize_ttf_publication_surface(
+        surface,
+        trading_date=trading,
+        commodity=product,
+    )
+    fingerprint = ttf_surface_fingerprint(prepared, commodity=product)
     prepared["input_fingerprint"] = fingerprint
     results = [dict(item) for item in expiry_results]
     trade_ids = [str(trade_id) for trade_id in manual_trade_ids]
@@ -394,14 +534,16 @@ def publish_ttf_surface(
     surface_expiries = set(prepared["option_expiration_date"].dt.date.unique())
     if len(results) != len(result_expiries):
         raise TTFPublicationError(
-            "A complete TTF publication requires one result per expiry."
+            f"A complete {product} publication requires one result per expiry."
         )
     if result_expiries != surface_expiries:
         raise TTFPublicationError(
-            "Every published TTF expiry requires exactly one validated result."
+            f"Every published {product} expiry requires exactly one validated result."
         )
     if any(not (item.get("validation") or {}).get("is_valid", False) for item in results):
-        raise TTFPublicationError("Every published TTF expiry must pass validation.")
+        raise TTFPublicationError(
+            f"Every published {product} expiry must pass validation."
+        )
     if expected_expiries is not None:
         expected_months = {
             value if isinstance(value, pd.Period) else pd.Timestamp(value).to_period("M")
@@ -410,7 +552,7 @@ def publish_ttf_surface(
         surface_months = set(prepared["contract_date"].dt.to_period("M").unique())
         if expected_months != surface_months:
             raise TTFPublicationError(
-                "The TTF publication does not contain the complete governed expiry set."
+                f"The {product} publication does not contain the complete governed expiry set."
             )
 
     run_id = str(uuid4())
@@ -418,8 +560,9 @@ def publish_ttf_surface(
     configuration = {
         "settlement_cob": settlement.isoformat(),
         "base_publication_id": base_publication_id,
-        "method": TTF_HYBRID_METHOD,
-        "policy_version": TTF_HYBRID_POLICY_VERSION,
+        "commodity": product,
+        "method": policy["method"],
+        "policy_version": policy["policy_version"],
         "manual_trade_ids": trade_ids,
         "expiry_count": len(surface_expiries),
         "point_count": len(prepared),
@@ -427,7 +570,7 @@ def publish_ttf_surface(
     with engine.begin() as connection:
         connection.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {"lock_key": f"TTF:{trading.isoformat()}"},
+            {"lock_key": f"{product}:{trading.isoformat()}"},
         )
         existing = connection.execute(
             text(
@@ -441,13 +584,14 @@ def publish_ttf_surface(
                 engine,
                 trading,
                 publication_id=str(existing),
+                commodity=product,
             )
 
         current = connection.execute(
             text(
                 f"""
                 SELECT publication_id FROM {PUBLICATION_TABLE}
-                WHERE commodity = 'TTF' AND cob_date = :cob_date AND is_active
+                WHERE commodity = '{product}' AND cob_date = :cob_date AND is_active
                 FOR UPDATE
                 """
             ),
@@ -461,7 +605,7 @@ def publish_ttf_surface(
         )
         if current_id != expected_current_id:
             raise TTFPublicationError(
-                "The active TTF publication for this trading date changed; "
+                f"The active {product} publication for this trading date changed; "
                 "reload before publishing."
             )
 
@@ -472,16 +616,17 @@ def publish_ttf_surface(
                     (run_id, commodity, cob_date, input_fingerprint, engine_version,
                      status, configuration, notes, created_by, idempotency_key)
                 VALUES
-                    (:run_id, 'TTF', :cob_date, :fingerprint, :engine_version,
+                    (:run_id, :commodity, :cob_date, :fingerprint, :engine_version,
                      'draft', CAST(:configuration AS jsonb), :notes, :created_by,
                      :run_idempotency)
                 """
             ),
             {
                 "run_id": run_id,
+                "commodity": product,
                 "cob_date": trading,
                 "fingerprint": fingerprint,
-                "engine_version": PUBLICATION_ENGINE_VERSION,
+                "engine_version": policy["engine_version"],
                 "configuration": json.dumps(configuration, sort_keys=True),
                 "notes": notes,
                 "created_by": created_by,
@@ -568,13 +713,14 @@ def publish_ttf_surface(
                      approved_by, approved_at, supersedes_publication_id,
                      idempotency_key)
                 VALUES
-                    (:publication_id, :run_id, 'TTF', :cob_date, 'approved', FALSE,
+                    (:publication_id, :run_id, :commodity, :cob_date, 'approved', FALSE,
                      :approved_by, CURRENT_TIMESTAMP, :supersedes, :idempotency_key)
                 """
             ),
             {
                 "publication_id": publication_id,
                 "run_id": run_id,
+                "commodity": product,
                 "cob_date": trading,
                 "approved_by": identity.subject,
                 "supersedes": current,
@@ -587,7 +733,7 @@ def publish_ttf_surface(
                 {
                     "publication_id": publication_id,
                     "run_id": run_id,
-                    "commodity": "TTF",
+                    "commodity": product,
                     "cob_date": trading,
                     "contract_date": pd.Timestamp(row["contract_date"]).date(),
                     "option_expiration_date": pd.Timestamp(
@@ -603,30 +749,32 @@ def publish_ttf_surface(
                     "blend_classification": str(row["blend_classification"]),
                     "calibration_basis": str(row["calibration_basis"]).lower(),
                     "source_name": str(row["source_name"]),
-                    "calibration_method": TTF_HYBRID_METHOD,
-                    "calibration_policy_version": TTF_HYBRID_POLICY_VERSION,
+                    "calibration_method": policy["method"],
+                    "calibration_policy_version": policy["policy_version"],
                     "input_fingerprint": fingerprint,
                 }
             )
-        connection.execute(
-            text(
-                f"""
-                INSERT INTO {SURFACE_TABLE}
-                    (publication_id, run_id, commodity, cob_date, contract_date,
-                     option_expiration_date, strike, delta, put_call, volatility,
-                     total_variance, working_forward, surface_region, blend_classification,
-                     calibration_basis, source_name, calibration_method,
-                     calibration_policy_version, input_fingerprint)
-                VALUES
-                    (:publication_id, :run_id, :commodity, :cob_date, :contract_date,
-                     :option_expiration_date, :strike, :delta, :put_call, :volatility,
-                     :total_variance, :working_forward, :surface_region, :blend_classification,
-                     :calibration_basis, :source_name, :calibration_method,
-                     :calibration_policy_version, :input_fingerprint)
-                """
-            ),
-            point_rows,
-        )
+        copied = _copy_surface_points(connection, point_rows)
+        if not copied:
+            connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {SURFACE_TABLE}
+                        (publication_id, run_id, commodity, cob_date, contract_date,
+                         option_expiration_date, strike, delta, put_call, volatility,
+                         total_variance, working_forward, surface_region, blend_classification,
+                         calibration_basis, source_name, calibration_method,
+                         calibration_policy_version, input_fingerprint)
+                    VALUES
+                        (:publication_id, :run_id, :commodity, :cob_date, :contract_date,
+                         :option_expiration_date, :strike, :delta, :put_call, :volatility,
+                         :total_variance, :working_forward, :surface_region, :blend_classification,
+                         :calibration_basis, :source_name, :calibration_method,
+                         :calibration_policy_version, :input_fingerprint)
+                    """
+                ),
+                point_rows,
+            )
         inserted = connection.execute(
             text(
                 f"SELECT COUNT(*) FROM {SURFACE_TABLE} "
@@ -635,7 +783,9 @@ def publish_ttf_surface(
             {"publication_id": publication_id},
         ).scalar_one()
         if int(inserted) != len(prepared):
-            raise TTFPublicationError("TTF publication point readback did not reconcile.")
+            raise TTFPublicationError(
+                f"{product} publication point readback did not reconcile."
+            )
         if current is not None:
             connection.execute(
                 text(
@@ -679,10 +829,53 @@ def publish_ttf_surface(
         engine,
         trading,
         publication_id=publication_id,
+        commodity=product,
     )
     if (
         readback.get("publication_id") != publication_id
         or int(readback.get("row_count") or 0) != len(prepared)
     ):
-        raise TTFPublicationError("Published TTF surface failed post-commit readback.")
+        raise TTFPublicationError(
+            f"Published {product} surface failed post-commit readback."
+        )
     return readback
+
+
+def load_latest_hybrid_publication(
+    engine,
+    trading_date,
+    *,
+    commodity: str,
+    as_of: datetime | None = None,
+    publication_id: str | None = None,
+    prefer_exact_cob: bool = False,
+) -> dict:
+    return load_latest_ttf_publication(
+        engine,
+        trading_date,
+        as_of=as_of,
+        publication_id=publication_id,
+        prefer_exact_cob=prefer_exact_cob,
+        commodity=commodity,
+    )
+
+
+def hybrid_publication_frame(payload: Mapping | None) -> pd.DataFrame:
+    return ttf_publication_frame(payload)
+
+
+def publish_hybrid_surface(
+    engine,
+    surface: pd.DataFrame,
+    expiry_results: Iterable[Mapping],
+    *,
+    commodity: str,
+    **kwargs,
+) -> dict:
+    return publish_ttf_surface(
+        engine,
+        surface,
+        expiry_results,
+        commodity=commodity,
+        **kwargs,
+    )

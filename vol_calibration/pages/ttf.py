@@ -61,6 +61,7 @@ from vol_calibration.ttf_hybrid_surface import (
     TTF_HYBRID_POLICY_VERSION,
     evaluate_ttf_hybrid_candidate,
     fit_ttf_hybrid_candidate,
+    hybrid_iv,
     operational_surface_frame as ttf_hybrid_operational_surface_frame,
 )
 from vol_calibration.operational_surface import (
@@ -120,8 +121,10 @@ COMMODITY_LOWER = COMMODITY.lower()
 writes_enabled = _legacy_writes_enabled
 TTF_EXTRAPOLATED_STARTS = 3
 TTF_EXTRAPOLATED_RETRY_STARTS = 9
-TTF_EXTRAPOLATED_RETRY_TV_RMSE = 0.002
-TTF_BATCH_STATE_VERSION = 1
+TTF_BATCH_STATE_VERSION = 2
+TTF_BATCH_CALIBRATION_TARGET = 'settlement_nodes'
+TTF_INTRADAY_CALIBRATION_TARGET = 'latest_published_smile'
+TTF_NODE_REPRODUCTION_ATOL = 1e-10
 TTF_ADVANCED_PARAMS = [
     *PARAM_COLUMNS,
     'left_blend_width',
@@ -319,8 +322,26 @@ def _published_node_values(publication_payload, observations):
     }
 
 
-def _base_ttf_observations(market_data, expiry, publication_payload=None):
+def _settlement_ttf_observations(market_data, expiry):
+    """Return the selected COB nodes on the governed working forward and DTE."""
     observations = _select_ttf_expiry_inputs(market_data, expiry).copy()
+    forward = float(observations['forward'].iloc[0])
+    dte = float(observations['dte'].iloc[0])
+    observations['strike'] = [
+        delta_node_to_strike(
+            forward,
+            dte / 365.25,
+            float(delta),
+            float(iv),
+        )
+        for delta, iv in zip(observations['delta'], observations['iv'])
+    ]
+    return observations
+
+
+def _base_ttf_observations(market_data, expiry, publication_payload=None):
+    """Return the manual intraday base, preferring the latest published smile."""
+    observations = _settlement_ttf_observations(market_data, expiry)
     published = _published_node_values(publication_payload, observations)
     if published is not None:
         observations['iv'] = published['ivs']
@@ -662,15 +683,12 @@ def _run_ttf_candidate(
         first_error = exc
 
     accepted_first = [result for result in attempts if _accepted_calibration_result(result)]
-    best_first_rmse = (
-        min(float(result['tail_fit_tv_rmse']) for result in accepted_first)
-        if accepted_first
-        else np.inf
-    )
-    needs_retry = basis == 'extrapolated' and (
-        not accepted_first
-        or best_first_rmse >= TTF_EXTRAPOLATED_RETRY_TV_RMSE
-    )
+    # The PCHIP core is the operational smile inside the governed quote range;
+    # tail-fit TV RMSE is only a Wing approximation diagnostic.  Retry the
+    # extrapolated tail only when the first fit fails the complete hybrid gate,
+    # rather than repeatedly chasing a diagnostic threshold that does not
+    # improve the operational core.
+    needs_retry = basis == 'extrapolated' and not accepted_first
     if needs_retry:
         try:
             attempts.append(
@@ -1183,7 +1201,11 @@ def load_ttf_publication(trading_date, reload_clicks):
     selected = pd.to_datetime(trading_date or get_default_date()).date()
     try:
         engine = get_database_engine()
-        payload = load_latest_ttf_publication(engine, selected)
+        payload = load_latest_ttf_publication(
+            engine,
+            selected,
+            prefer_exact_cob=True,
+        )
     except Exception as exc:
         payload = {
             'publication_id': None,
@@ -2398,15 +2420,36 @@ def _publication_candidate_for_expiry(
     node_store,
     adjustment_store,
     publication_payload=None,
+    *,
+    calibration_target=TTF_INTRADAY_CALIBRATION_TARGET,
 ):
-    base_observations = _base_ttf_observations(
-        market_data,
-        expiry,
-        publication_payload,
-    )
+    if calibration_target == TTF_BATCH_CALIBRATION_TARGET:
+        base_observations = _settlement_ttf_observations(market_data, expiry)
+    elif calibration_target == TTF_INTRADAY_CALIBRATION_TARGET:
+        base_observations = _base_ttf_observations(
+            market_data,
+            expiry,
+            publication_payload,
+        )
+    else:
+        raise ValueError(f"Unsupported TTF calibration target: {calibration_target}")
     edited_market = _apply_node_edits(base_observations, node_store, expiry)
     observations = _select_ttf_expiry_inputs(edited_market, expiry)
     result = _evaluate_existing_hybrid(observations, table_row)
+    reproduced_ivs = hybrid_iv(
+        result['core'].strike_nodes,
+        result['core'],
+        result['params'],
+        left_blend_width=float(result['left_blend_width']),
+        right_blend_width=float(result['right_blend_width']),
+    )
+    node_error = np.asarray(reproduced_ivs) - result['core'].iv_nodes
+    max_node_error = float(np.max(np.abs(node_error)))
+    if not np.isfinite(max_node_error) or max_node_error > TTF_NODE_REPRODUCTION_ATOL:
+        raise ValueError(
+            "TTF publication candidate does not reproduce its governed 11-node "
+            f"core (max IV error {max_node_error:.12g})."
+        )
     surface = ttf_hybrid_operational_surface_frame(
         observations,
         _model_params(table_row),
@@ -2432,6 +2475,8 @@ def _publication_candidate_for_expiry(
         },
         'diagnostics': {
             **diagnostics,
+            'calibration_target': calibration_target,
+            'node_reproduction_max_iv_error': max_node_error,
             'core_tv_rmse': float(result['core_tv_rmse']),
             'tail_fit_tv_rmse': float(result['tail_fit_tv_rmse']),
             'iv_rmse': float(result['iv_rmse']),
@@ -2626,6 +2671,7 @@ def _build_ttf_batch_state(
     return {
         'schema_version': TTF_BATCH_STATE_VERSION,
         'calibration_policy_version': TTF_HYBRID_POLICY_VERSION,
+        'calibration_target': TTF_BATCH_CALIBRATION_TARGET,
         'trading_date': _normalized_trading_date(trading_date),
         'input_fingerprint': _batch_input_fingerprint(
             trading_date,
@@ -2660,6 +2706,8 @@ def _batch_state_ready(
         return False, "The calibration result is stale; run Calibrate All Expiries again."
     if batch_state.get('calibration_policy_version') != TTF_HYBRID_POLICY_VERSION:
         return False, "The calibration policy changed; run Calibrate All Expiries again."
+    if batch_state.get('calibration_target') != TTF_BATCH_CALIBRATION_TARGET:
+        return False, "The calibration target changed; run Calibrate All Expiries again."
     try:
         selected_date = _normalized_trading_date(trading_date)
     except ValueError as exc:
@@ -2848,6 +2896,11 @@ def publish_ttf_intraday_surface(
                 node_store,
                 adjustment_store,
                 current_publication,
+                calibration_target=(
+                    TTF_BATCH_CALIBRATION_TARGET
+                    if triggered_id == 'ttf-save-all-btn'
+                    else TTF_INTRADAY_CALIBRATION_TARGET
+                ),
             )
             surfaces.append(surface)
             results.append(result)
@@ -2892,7 +2945,12 @@ def publish_ttf_intraday_surface(
             ),
             manual_trade_ids=manual_trade_ids,
             expected_expiries=rows_by_expiry.keys(),
-            notes='Published from the TTF intraday adjustment workspace.',
+            notes=(
+                'Published from selected settlement nodes after complete batch '
+                'calibration.'
+                if triggered_id == 'ttf-save-all-btn'
+                else 'Published from the TTF intraday adjustment workspace.'
+            ),
         )
     except Exception as exc:
         message = dbc.Alert(
@@ -3312,7 +3370,7 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
         if observed_count or extrapolated_count:
             summary = (
                 f"{expiry_count} expiries: {observed_count} observed, "
-                f"{extrapolated_count} extrapolated"
+                f"{extrapolated_count} extrapolated · settlement-node target"
             )
         else:
             summary = str(expiry_count)
@@ -3392,11 +3450,10 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
         try:
             if row_index is None or row_index >= len(params_df):
                 raise ValueError("No editable parameter row exists for this expiry.")
-            exp_data = _base_ttf_observations(
-                market_data,
-                expiry,
-                publication_payload,
-            )
+            # Calibrate All establishes the selected settlement surface.  The
+            # previous publication remains the manual intraday adjustment base,
+            # but it must never replace the settlement IV target here.
+            exp_data = _settlement_ttf_observations(market_data, expiry)
             exp_data = _apply_node_edits(exp_data, node_store, expiry)
             exp_data = _select_ttf_expiry_inputs(exp_data, expiry)
             basis = _calibration_basis(exp_data)

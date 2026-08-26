@@ -44,10 +44,10 @@ def select_expiry_observations(
 ) -> pd.DataFrame:
     """Select one delivery month under the governed calibration contract.
 
-    The default path preserves the historical observed-only behavior used by
-    JKM and other callers.  TTF opts into ``include_extrapolated`` explicitly;
-    that path validates a complete homogeneous official smile before assigning
-    positive optimizer weights to an approved extrapolated copy.
+    The default path preserves the historical observed-only behavior. TTF and
+    JKM opt into ``include_extrapolated`` explicitly; that path validates a
+    complete homogeneous official smile before assigning positive optimizer
+    weights to an approved extrapolated copy.
     """
     if market_data is None or market_data.empty or "expiry" not in market_data:
         return pd.DataFrame()

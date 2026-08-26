@@ -38,6 +38,7 @@ def _normalized_surface():
             _surface_rows('BRENT', '2026-07-27', '2026-09-01'),
             _surface_rows('BRENT', '2026-07-30', '2026-09-01'),
             _surface_rows('HH', '2026-07-06', '2026-09-01'),
+            _surface_rows('NBP', '2026-07-27', '2026-09-01'),
             _surface_rows('TTF', '2026-07-27', '2026-09-01'),
         ],
         ignore_index=True,
@@ -96,6 +97,27 @@ def test_operational_snapshot_uses_product_scoped_prior_and_never_future(
     assert brent['date_fallback_used'] is True
     assert brent['actual_cob'] < brent['requested_cob']
     assert pd.Timestamp('2026-07-30') not in set(brent['data']['cob_date'])
+
+
+def test_operational_snapshot_supports_nbp_without_a_calibration_route(
+    governed_surface_cache,
+):
+    snapshot = vol_surface.get_operational_surface_snapshot(
+        'NBP',
+        '2026-07-30',
+    )
+
+    assert snapshot['product'] == 'NBP'
+    assert snapshot['actual_cob'] == pd.Timestamp('2026-07-27')
+    assert snapshot['date_fallback_used'] is True
+    assert set(snapshot['data']['code']) == {'NBP'}
+    href, style = vol_surface.build_calibration_link(
+        'NBP',
+        '2026-07-30',
+        '2026-09-01',
+    )
+    assert href == '/vol_calibration?product=ttf'
+    assert style == {'display': 'none'}
 
 
 def test_operational_snapshot_reports_no_prior_instead_of_using_future(

@@ -99,17 +99,28 @@ Publication remains disabled until verified option-expiry calendars and source
 eligibility rules are complete for every enabled product.
 
 The Brent market-data refreshes have separate fail-closed intake flags. Apply
-BBG `migrations/003_bbg_option_chain_intraday.sql` and
-`migrations/008_bbg_option_settlement_refresh.sql`, start the Bloomberg-host
-worker, and verify `/health/ready` before enabling either
+BBG `migrations/003_bbg_option_chain_intraday.sql`,
+`migrations/008_bbg_option_settlement_refresh.sql`, and
+`migrations/010_bbg_option_chain_worker_registry.sql`; register the worker in
+the logged-in Bloomberg user session; and verify `/health/ready` before enabling either
 `BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED` or
 `BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED` (or their `config.ini`
 equivalents). The web process only queues jobs; Bloomberg calls, persistence,
-and IV pricing run in the warmed worker:
+and IV pricing run in the warmed Python worker. The portable service manager
+uses a macOS user LaunchAgent or a Windows Task Scheduler task to start that
+same command at login and restart it after failure:
 
 ```bash
-python option_chain_refresh_worker.py --poll-seconds 1 --config /path/to/config.ini
+python option_chain_worker_service.py register --config /path/to/config.ini
+python option_chain_worker_service.py status
 ```
+
+Use `start`, `stop`, or `uninstall` in place of `status` for lifecycle control.
+For foreground diagnosis, run `python option_chain_refresh_worker.py
+--poll-seconds 1 --config /path/to/config.ini`. Worker readiness is independent
+from web readiness and requires a fresh row in
+`at_lng.bbg_option_chain_workers`; the Vol Trades page fails closed when no
+eligible Brent/TFO worker has heartbeated within 30 seconds.
 
 Rollback by disabling both flags before stopping the worker. Existing snapshots
 and the additive audit tables remain immutable.

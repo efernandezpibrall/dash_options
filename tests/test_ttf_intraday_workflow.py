@@ -14,6 +14,7 @@ from vol_calibration.ttf_intraday import normalize_ttf_intraday_trade
 from vol_calibration.ttf_market_context import load_ttf_trading_context
 from vol_calibration.ttf_publication import (
     TTFPublicationError,
+    _copy_surface_points,
     load_latest_ttf_publication,
     normalize_ttf_publication_surface,
     publish_ttf_surface,
@@ -154,6 +155,147 @@ def test_latest_publication_rolls_only_iv_shape_to_current_market_inputs():
     ) == pytest.approx(55.0)
 
 
+def test_publication_candidate_separates_batch_and_manual_targets(monkeypatch):
+    market = _observations()
+    calls = []
+    core = SimpleNamespace(
+        strike_nodes=market["strike"].to_numpy(dtype=float),
+        iv_nodes=market["iv"].to_numpy(dtype=float),
+    )
+
+    def fake_settlement(market_data, expiry):
+        del market_data, expiry
+        calls.append("settlement")
+        return market.copy()
+
+    def fake_published(market_data, expiry, publication_payload):
+        del market_data, expiry, publication_payload
+        calls.append("published")
+        return market.assign(iv=market["iv"] + 0.01)
+
+    def fake_evaluate(observations, table_row):
+        del observations
+        return {
+            "core": core,
+            "params": dict(table_row),
+            "core_tv_rmse": 0.0,
+            "tail_fit_tv_rmse": 0.001,
+            "iv_rmse": 0.002,
+            "left_blend_width": 0.10,
+            "right_blend_width": 0.10,
+            "validation": {"is_valid": True},
+        }
+
+    monkeypatch.setattr(ttf_page, "_settlement_ttf_observations", fake_settlement)
+    monkeypatch.setattr(ttf_page, "_base_ttf_observations", fake_published)
+    monkeypatch.setattr(
+        ttf_page,
+        "_apply_node_edits",
+        lambda observations, node_store, expiry=None: observations,
+    )
+    monkeypatch.setattr(
+        ttf_page,
+        "_select_ttf_expiry_inputs",
+        lambda observations, expiry: observations,
+    )
+    monkeypatch.setattr(ttf_page, "_evaluate_existing_hybrid", fake_evaluate)
+    monkeypatch.setattr(
+        ttf_page,
+        "hybrid_iv",
+        lambda *args, **kwargs: core.iv_nodes.copy(),
+    )
+    monkeypatch.setattr(
+        ttf_page,
+        "ttf_hybrid_operational_surface_frame",
+        lambda *args, **kwargs: pd.DataFrame({"iv": [0.5]}),
+    )
+    table_row = {
+        **ttf_page.get_defaults("TTF"),
+        "left_blend_width": 0.10,
+        "right_blend_width": 0.10,
+    }
+
+    _, batch_result = ttf_page._publication_candidate_for_expiry(
+        market,
+        table_row,
+        "2026-10-01",
+        {},
+        {},
+        {"publication_id": "prior"},
+        calibration_target=ttf_page.TTF_BATCH_CALIBRATION_TARGET,
+    )
+    _, manual_result = ttf_page._publication_candidate_for_expiry(
+        market,
+        table_row,
+        "2026-10-01",
+        {},
+        {},
+        {"publication_id": "prior"},
+        calibration_target=ttf_page.TTF_INTRADAY_CALIBRATION_TARGET,
+    )
+
+    assert calls == ["settlement", "published"]
+    assert (
+        batch_result["diagnostics"]["calibration_target"]
+        == ttf_page.TTF_BATCH_CALIBRATION_TARGET
+    )
+    assert (
+        manual_result["diagnostics"]["calibration_target"]
+        == ttf_page.TTF_INTRADAY_CALIBRATION_TARGET
+    )
+
+
+def test_publication_candidate_rejects_node_reproduction_failure(monkeypatch):
+    market = _observations()
+    core = build_ttf_pchip_core(market)
+    result = {
+        "core": core,
+        "params": ttf_page.get_defaults("TTF"),
+        "core_tv_rmse": 0.0,
+        "tail_fit_tv_rmse": 0.001,
+        "iv_rmse": 0.002,
+        "left_blend_width": 0.10,
+        "right_blend_width": 0.10,
+        "validation": {"is_valid": True},
+    }
+    monkeypatch.setattr(
+        ttf_page,
+        "_settlement_ttf_observations",
+        lambda market_data, expiry: market.copy(),
+    )
+    monkeypatch.setattr(
+        ttf_page,
+        "_apply_node_edits",
+        lambda observations, node_store, expiry=None: observations,
+    )
+    monkeypatch.setattr(
+        ttf_page,
+        "_select_ttf_expiry_inputs",
+        lambda observations, expiry: observations,
+    )
+    monkeypatch.setattr(
+        ttf_page,
+        "_evaluate_existing_hybrid",
+        lambda observations, table_row: result,
+    )
+    monkeypatch.setattr(
+        ttf_page,
+        "hybrid_iv",
+        lambda *args, **kwargs: core.iv_nodes + 0.001,
+    )
+
+    with pytest.raises(ValueError, match="does not reproduce"):
+        ttf_page._publication_candidate_for_expiry(
+            market,
+            ttf_page.get_defaults("TTF"),
+            "2026-10-01",
+            {},
+            {},
+            {},
+            calibration_target=ttf_page.TTF_BATCH_CALIBRATION_TARGET,
+        )
+
+
 def test_published_surface_and_tail_parameters_are_rebased_for_today():
     settlement = _observations().assign(forward=55.0, dte=50.0)
     payload = _publication_payload(settlement)
@@ -258,6 +400,109 @@ def test_post_commit_readback_can_select_historical_publication_by_id(monkeypatc
     assert payload["row_count"] == 1
     assert "CAST(:publication_id AS uuid)" in calls[0][0]
     assert calls[0][1] == {"publication_id": publication_id}
+
+
+def test_calibration_review_prefers_active_exact_cob_before_pit_fallback(
+    monkeypatch,
+):
+    publication_id = "139aa83d-775c-4de4-abad-3967dc393730"
+    run_id = "84f08398-fbe7-436c-bdf8-84f2ebfc8163"
+    calls = []
+
+    class Result:
+        def __init__(self, values):
+            self.values = values
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self.values[0] if self.values else None
+
+        def all(self):
+            return self.values
+
+    class Connection:
+        def execute(self, statement, params=None):
+            sql = str(statement)
+            calls.append((sql, params))
+            if "SELECT p.publication_id" in sql:
+                return Result(
+                    [
+                        {
+                            "publication_id": publication_id,
+                            "run_id": run_id,
+                            "cob_date": pd.Timestamp("2026-08-21"),
+                            "published_at": pd.Timestamp("2026-08-24T12:30:20Z"),
+                            "published_by": "publisher@example.com",
+                            "configuration": {},
+                        }
+                    ]
+                )
+            return Result([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class Engine:
+        def connect(self):
+            return Connection()
+
+    points = pd.DataFrame(
+        {
+            "publication_id": [publication_id],
+            "run_id": [run_id],
+            "contract_date": [pd.Timestamp("2026-10-01")],
+        }
+    )
+    monkeypatch.setattr(
+        ttf_publication,
+        "ttf_publication_storage_available",
+        lambda engine: True,
+    )
+    monkeypatch.setattr(ttf_publication.pd, "read_sql", lambda *args, **kwargs: points)
+
+    payload = load_latest_ttf_publication(
+        Engine(),
+        "2026-08-21",
+        as_of=datetime(2026, 8, 21, 23, 59, tzinfo=timezone.utc),
+        prefer_exact_cob=True,
+    )
+
+    sql, params = calls[0]
+    assert payload["publication_id"] == publication_id
+    assert "p.cob_date = :trading_date" in sql
+    assert "p.cob_date < :trading_date AND p.published_at <= :as_of" in sql
+    assert "CASE WHEN p.cob_date = :trading_date THEN 0 ELSE 1 END" in sql
+    assert params["trading_date"] == pd.Timestamp("2026-08-21").date()
+
+
+def test_ttf_page_requests_exact_cob_publication_for_review(monkeypatch):
+    captured = {}
+
+    def fake_load(engine, trading_date, **kwargs):
+        captured.update(engine=engine, trading_date=trading_date, kwargs=kwargs)
+        return {
+            "publication_id": "publication-21aug",
+            "publication_date": "2026-08-21",
+            "published_at": "2026-08-24T12:30:20Z",
+            "expiry_count": 64,
+        }
+
+    monkeypatch.setattr(ttf_page, "get_database_engine", lambda: "engine")
+    monkeypatch.setattr(ttf_page, "load_latest_ttf_publication", fake_load)
+
+    payload, _ = ttf_page.load_ttf_publication("2026-08-21", 0)
+
+    assert payload["publication_id"] == "publication-21aug"
+    assert captured == {
+        "engine": "engine",
+        "trading_date": pd.Timestamp("2026-08-21").date(),
+        "kwargs": {"prefer_exact_cob": True},
+    }
 
 
 def test_toolbar_save_publishes_a_complete_successful_batch(monkeypatch):
@@ -495,7 +740,7 @@ def test_requested_expiry_initializes_both_ttf_workspaces():
     assert trade == "Oct-26"
 
 
-def test_extrapolated_tail_retries_when_first_valid_fit_is_above_threshold(
+def test_extrapolated_tail_accepts_first_valid_fit_regardless_of_diagnostic_rmse(
     monkeypatch,
 ):
     calls = []
@@ -507,7 +752,7 @@ def test_extrapolated_tail_retries_when_first_valid_fit_is_above_threshold(
         return {
             "params": dict(initial_params),
             "core_tv_rmse": 0.0,
-            "tail_fit_tv_rmse": 0.003 if n_starts == 3 else 0.001,
+            "tail_fit_tv_rmse": 0.003,
             "iv_rmse": 0.01,
             "left_blend_width": 0.10,
             "right_blend_width": 0.10,
@@ -525,8 +770,43 @@ def test_extrapolated_tail_retries_when_first_valid_fit_is_above_threshold(
         basis="extrapolated",
     )
 
+    assert calls == [3]
+    assert result["tail_fit_tv_rmse"] == pytest.approx(0.003)
+
+
+def test_extrapolated_tail_retries_when_first_fit_fails_complete_gate(monkeypatch):
+    calls = []
+    initial = ttf_page.get_defaults("TTF")
+
+    def fake_fit(observations, initial_params, *, n_starts, seed):
+        del observations, seed
+        calls.append(n_starts)
+        return {
+            "params": dict(initial_params),
+            "core_tv_rmse": 0.0,
+            "tail_fit_tv_rmse": 0.003 if n_starts == 3 else 0.0025,
+            "iv_rmse": 0.01,
+            "left_blend_width": 0.10,
+            "right_blend_width": 0.10,
+            "validation": {
+                "is_valid": n_starts == 9,
+                "min_g": 0.01 if n_starts == 9 else -0.01,
+            },
+        }
+
+    monkeypatch.setattr(ttf_page, "fit_ttf_hybrid_candidate", fake_fit)
+    result = ttf_page._run_ttf_candidate(
+        _observations().assign(
+            quote_class="extrapolated",
+            calibration_basis="extrapolated",
+            source_name="official_surface_ttf_shape_smile_template_v1:extrap",
+        ),
+        initial,
+        basis="extrapolated",
+    )
+
     assert calls == [3, 9]
-    assert result["tail_fit_tv_rmse"] == pytest.approx(0.001)
+    assert result["validation"]["is_valid"] is True
 
 
 def test_manual_trade_with_entered_iv_computes_delta():
@@ -650,6 +930,38 @@ def test_publication_rejects_self_approval_before_touching_storage():
             expected_current_publication_id=None,
             idempotency_key="test",
         )
+
+
+def test_surface_points_use_postgres_copy_with_csv_escaping():
+    copied = {}
+
+    class Cursor:
+        def copy_expert(self, sql, buffer):
+            copied["sql"] = sql
+            copied["payload"] = buffer.read()
+
+        def close(self):
+            copied["closed"] = True
+
+    connection = SimpleNamespace(
+        connection=SimpleNamespace(
+            driver_connection=SimpleNamespace(cursor=lambda: Cursor())
+        )
+    )
+    row = {
+        column: f"value-{column}"
+        for column in ttf_publication._SURFACE_INSERT_COLUMNS
+    }
+    row["source_name"] = "official,with-comma"
+    row["input_fingerprint"] = None
+
+    assert _copy_surface_points(connection, [row]) is True
+    assert copied["sql"].startswith(
+        "COPY at_lng.implied_volatility_surface_calibrated"
+    )
+    assert '"official,with-comma"' in copied["payload"]
+    assert copied["payload"].rstrip().endswith(r"\N")
+    assert copied["closed"] is True
 
 
 MIGRATION_PATH = (

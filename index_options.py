@@ -1,6 +1,7 @@
 # index.py
+import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from urllib.parse import parse_qs
 
 from dash import html, dcc, clientside_callback
@@ -17,12 +18,33 @@ import pages.brent_vol_history
 import pages.ice_chat_quotes
 import pages.prices
 import pages.pricer
+import pages.pricer_new
 import pages.correlations
 import pages.scenarios
 import pages.pnl_explain
 
 
 server = app.server
+
+
+PAGE_TITLES = {
+    '/': 'Greeks',
+    '/greeks': 'Greeks',
+    '/valuation': 'Valuation',
+    '/trades': 'Trades',
+    '/prices': 'Underlying Prices',
+    '/vol_surface': 'Volatility Surface',
+    '/vol_calibration': 'Vol Calibration',
+    '/brent_vol_history': 'Vol Trades',
+    '/ice_chat_quotes': 'ICE Quotes',
+    '/correlations': 'Correlations',
+    '/scenarios': 'Scenarios',
+    '/pnl_explain': 'P&L Explain',
+    '/pricer': 'Pricer',
+    '/pricer_old': 'Pricer Old',
+}
+PAGE_NOT_FOUND_TITLE = 'Page Not Found'
+PNL_EXPLAIN_VIEWS = ('pnl-explain', 'pnl_explain')
 
 
 def _valuation_workspace(search=None, *, default_view='valuation'):
@@ -139,12 +161,20 @@ nav_links = html.Header([
 
             # Terminal workflow - visually separated and always last
             html.Div(
-                dcc.Link(
-                    'Pricer',
-                    href='/pricer',
-                    id='nav-pricer',
-                    className='nav-link-secondary',
-                ),
+                [
+                    dcc.Link(
+                        'Pricer',
+                        href='/pricer',
+                        id='nav-pricer',
+                        className='nav-link-secondary',
+                    ),
+                    dcc.Link(
+                        'Pricer Old',
+                        href='/pricer_old',
+                        id='nav-pricer-old',
+                        className='nav-link-secondary',
+                    ),
+                ],
                 className='nav-group-pricer',
             ),
         ], className='main-navigation'),
@@ -156,14 +186,61 @@ nav_links = html.Header([
     ], className='top-bar-content')
 ], className='top-bar-header')
 
+
+pricer_global_valuation_control = html.Div(
+    [
+        html.Label('Valuation', className='pricer-field-label'),
+        dcc.DatePickerSingle(
+            id='pricer-global-valuation-date',
+            date=date.today().isoformat(),
+            display_format='YYYY-MM-DD',
+            clearable=False,
+            persistence=False,
+            className='pricer-date-picker pricer-global-valuation-picker',
+        ),
+    ],
+    id='pricer-global-valuation-control',
+    className=(
+        'pricer-field pricer-global-valuation-control '
+        'pricer-global-valuation-control-hidden'
+    ),
+)
+
 app.layout = html.Div([
     dcc.Location(id='url', refresh=False),
     dcc.Store(id='dashboard-source-status-store'),
+    dcc.Interval(
+        id='pricer-valuation-today-ticker',
+        interval=60_000,
+        n_intervals=0,
+    ),
     nav_links,
     html.Div(id='nav-active-sink', style={'display': 'none'}),
-    html.Div(id='dashboard-source-status-banner', className='dashboard-source-status-banner'),
+    html.Div(
+        [
+            pricer_global_valuation_control,
+            html.Div(
+                id='dashboard-source-status-banner',
+                className='dashboard-source-status-banner',
+            ),
+        ],
+        id='dashboard-source-status-row',
+        className='dashboard-source-status-row',
+    ),
     html.Div(id='page-content')
 ])
+
+
+@app.callback(
+    Output('pricer-global-valuation-control', 'className'),
+    Output('pricer-global-valuation-date', 'date'),
+    Input('url', 'pathname'),
+)
+def configure_pricer_global_valuation(pathname):
+    base_class = 'pricer-field pricer-global-valuation-control'
+    if pathname == '/pricer':
+        return f'{base_class} pricer-global-valuation-control-visible', date.today().isoformat()
+    return f'{base_class} pricer-global-valuation-control-hidden', date.today().isoformat()
 
 
 def _compact_source_date(value):
@@ -265,6 +342,82 @@ def _build_dashboard_source_status(statuses, *, compact=False):
     )
 
 
+def _coerce_iso_date(value):
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    try:
+        return date.fromisoformat(str(value).split('T', 1)[0]).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_pricer_valuation_warning(statuses, valuation_date):
+    today_iso = date.today().isoformat()
+    selected_iso = _coerce_iso_date(valuation_date)
+    selected_label = selected_iso or str(valuation_date or 'not selected')
+    warning_text = (
+        f'Warning: valuation date {selected_label} is not today. '
+        f'Today is {today_iso}.'
+    )
+    source_children = []
+    accessible_parts = [warning_text]
+    if statuses:
+        source_status = _build_dashboard_source_status(statuses)
+        source_children.append(
+            html.Span(
+                source_status.children[0].children,
+                className=(
+                    'dashboard-source-status-chip '
+                    'dashboard-source-status-context'
+                ),
+            )
+        )
+        source_children.extend(source_status.children[1:])
+        accessible_parts.append(source_status.children[0].children)
+        for status in statuses:
+            if status.get('label') == 'Portfolio':
+                continue
+            detail = (
+                'unavailable'
+                if status.get('error')
+                else status.get('latest_cob') or 'no COB'
+            )
+            accessible_parts.append(f"{status['label']}: {detail}")
+
+    return html.Div(
+        [
+            html.Span(
+                '!',
+                className='dashboard-source-status-alert-icon',
+                **{'aria-hidden': 'true'},
+            ),
+            html.Span(
+                'WARNING — VALUATION DATE IS NOT TODAY',
+                className='dashboard-source-status-headline',
+            ),
+            html.Span(
+                f'Selected: {selected_label} · Today: {today_iso}',
+                className='dashboard-source-status-alert-detail',
+            ),
+            *source_children,
+        ],
+        className=(
+            'dashboard-source-status-content dashboard-source-status-danger '
+            'dashboard-source-status-valuation-warning'
+        ),
+        title=warning_text,
+        role='alert',
+        tabIndex=0,
+        **{
+            'aria-label': ' · '.join(accessible_parts),
+            'aria-live': 'assertive',
+            'aria-atomic': 'true',
+        },
+    )
+
+
 @app.callback(
     Output('dashboard-source-status-store', 'data'),
     Input('refresh-options-data', 'n_clicks'),
@@ -276,12 +429,31 @@ def update_dashboard_source_status_store(refresh_clicks):
 @app.callback(
     Output('dashboard-source-status-banner', 'children'),
     Output('dashboard-source-status-banner', 'className'),
+    Output('dashboard-source-status-row', 'className'),
     Input('dashboard-source-status-store', 'data'),
     Input('url', 'pathname'),
     Input('url', 'search'),
+    Input('pricer-global-valuation-date', 'date'),
+    Input('pricer-valuation-today-ticker', 'n_intervals'),
 )
-def render_dashboard_source_status(statuses, pathname, search=None):
+def render_dashboard_source_status(
+    statuses,
+    pathname,
+    search=None,
+    valuation_date=None,
+    _today_tick=None,
+):
     base_class = 'dashboard-source-status-banner'
+    row_class = 'dashboard-source-status-row'
+    is_pricer = pathname == '/pricer'
+    valuation_date_is_not_today = (
+        is_pricer
+        and _coerce_iso_date(valuation_date) != date.today().isoformat()
+    )
+    if is_pricer:
+        row_class += ' dashboard-source-status-row-pricer'
+    if valuation_date_is_not_today:
+        row_class += ' dashboard-source-status-row-pricer-valuation-warning'
     valuation_view = parse_qs((search or '').lstrip('?')).get(
         'view',
         ['valuation'],
@@ -301,10 +473,20 @@ def render_dashboard_source_status(statuses, pathname, search=None):
         )
     )
     if status_is_inline:
-        return None, f'{base_class} dashboard-source-status-banner-hidden'
+        return (
+            None,
+            f'{base_class} dashboard-source-status-banner-hidden',
+            row_class,
+        )
+    if valuation_date_is_not_today:
+        return (
+            _build_pricer_valuation_warning(statuses, valuation_date),
+            base_class,
+            row_class,
+        )
     if not statuses:
-        return None, base_class
-    return _build_dashboard_source_status(statuses), base_class
+        return None, base_class, row_class
+    return _build_dashboard_source_status(statuses), base_class, row_class
 
 
 @app.callback(
@@ -380,6 +562,8 @@ def display_page(pathname, search):
     elif pathname == '/prices':
         return pages.prices.layout
     elif pathname == '/pricer':
+        return pages.pricer_new.layout
+    elif pathname == '/pricer_old':
         return pages.pricer.layout
     elif pathname == '/correlations':
         return pages.correlations.layout
@@ -392,20 +576,31 @@ def display_page(pathname, search):
 
 # Clientside callback for active navigation states
 clientside_callback(
-    """
-    function(pathname) {
+    f"""
+    function(pathname, search) {{
+        var currentPath = pathname || '/';
+        var pageTitles = {json.dumps(PAGE_TITLES, sort_keys=True)};
+        var pageTitle = pageTitles[currentPath] || {json.dumps(PAGE_NOT_FOUND_TITLE)};
+        if (currentPath === '/valuation') {{
+            var valuationView = new URLSearchParams(search || '').get('view');
+            if ({json.dumps(PNL_EXPLAIN_VIEWS)}.indexOf(valuationView) !== -1) {{
+                pageTitle = 'P&L Explain';
+            }}
+        }}
+        document.title = pageTitle;
+
         // Remove active class from all nav links
         var allLinks = document.querySelectorAll('.nav-link-primary, .nav-link-secondary');
-        allLinks.forEach(function(link) {
+        allLinks.forEach(function(link) {{
             link.classList.remove('active');
-        });
+        }});
         
         // Add active class based on current pathname
         var activeLink = null;
-        if (pathname === '/greeks' || pathname === '/') {
+        if (currentPath === '/greeks' || currentPath === '/') {{
             activeLink = document.getElementById('nav-greeks');
-        } else {
-            var linkMap = {
+        }} else {{
+            var linkMap = {{
                 '/valuation': 'nav-valuation',
                 '/trades': 'nav-trades',
                 '/prices': 'nav-prices',
@@ -416,23 +611,24 @@ clientside_callback(
                 '/correlations': 'nav-correlations',
                 '/scenarios': 'nav-scenarios',
                 '/pnl_explain': 'nav-valuation',
-                '/pricer': 'nav-pricer'
-            };
+                '/pricer': 'nav-pricer',
+                '/pricer_old': 'nav-pricer-old'
+            }};
             
-            if (linkMap[pathname]) {
-                activeLink = document.getElementById(linkMap[pathname]);
-            }
-        }
+            if (linkMap[currentPath]) {{
+                activeLink = document.getElementById(linkMap[currentPath]);
+            }}
+        }}
         
-        if (activeLink) {
+        if (activeLink) {{
             activeLink.classList.add('active');
-        }
+        }}
         
         return '';
-    }
+    }}
     """,
     Output('nav-active-sink', 'children'),
-    [Input('url', 'pathname')]
+    [Input('url', 'pathname'), Input('url', 'search')]
 )
 
 app.validation_layout = html.Div([

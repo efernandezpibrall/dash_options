@@ -15,6 +15,8 @@ from runtime_config import config_bool, config_value, get_database_engine
 
 
 JOB_TABLE = "at_lng.bbg_option_chain_refresh_jobs"
+WORKER_TABLE = "at_lng.bbg_option_chain_workers"
+WORKER_FRESHNESS_SECONDS = 30
 DEFAULT_PRODUCT = "BRENT"
 SUPPORTED_PRODUCTS = frozenset({"BRENT", "TFO"})
 DUBAI = ZoneInfo("Asia/Dubai")
@@ -138,6 +140,99 @@ class RefreshJobView:
 
     def as_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
+
+
+@dataclass(frozen=True)
+class WorkerReadiness:
+    product: str
+    ready: bool
+    reason: str
+    worker_id: str | None = None
+    lifecycle_status: str | None = None
+    bloomberg_session_status: str | None = None
+    heartbeat_at: str | None = None
+
+
+def get_worker_readiness(
+    product: str,
+    *,
+    engine=None,
+    freshness_seconds: int = WORKER_FRESHNESS_SECONDS,
+) -> WorkerReadiness:
+    """Return whether a fresh, running worker can serve ``product``.
+
+    Registry failures intentionally fail closed so the dashboard cannot queue a
+    request that no observable worker is available to claim.
+    """
+
+    normalized_product = normalize_product(product)
+    if freshness_seconds <= 0:
+        raise ValueError("Worker freshness must be positive")
+    db_engine = engine or get_database_engine(required=False)
+    if db_engine is None:
+        return WorkerReadiness(
+            product=normalized_product,
+            ready=False,
+            reason="registry_unavailable",
+        )
+    try:
+        with db_engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    f"""
+                    SELECT worker_id,
+                           lifecycle_status,
+                           bloomberg_session_status,
+                           heartbeat_at,
+                           lifecycle_status IN ('starting', 'idle', 'running')
+                               AS lifecycle_is_available,
+                           heartbeat_at >= CURRENT_TIMESTAMP
+                               - CAST(:freshness_seconds AS integer)
+                                 * INTERVAL '1 second'
+                               AS heartbeat_is_fresh
+                    FROM {WORKER_TABLE}
+                    WHERE :product = ANY(enabled_products)
+                    ORDER BY heartbeat_at DESC NULLS LAST, worker_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "product": normalized_product,
+                    "freshness_seconds": int(freshness_seconds),
+                },
+            ).mappings().first()
+    except Exception:
+        return WorkerReadiness(
+            product=normalized_product,
+            ready=False,
+            reason="registry_unavailable",
+        )
+
+    if row is None:
+        return WorkerReadiness(
+            product=normalized_product,
+            ready=False,
+            reason="no_eligible_worker",
+        )
+    value = dict(row)
+    lifecycle_available = bool(value.get("lifecycle_is_available"))
+    heartbeat_is_fresh = bool(value.get("heartbeat_is_fresh"))
+    if not lifecycle_available:
+        reason = "worker_not_running"
+    elif not heartbeat_is_fresh:
+        reason = "stale_heartbeat"
+    else:
+        reason = "ready"
+    heartbeat_at = value.get("heartbeat_at")
+    return WorkerReadiness(
+        product=normalized_product,
+        ready=reason == "ready",
+        reason=reason,
+        worker_id=(str(value["worker_id"]) if value.get("worker_id") else None),
+        lifecycle_status=value.get("lifecycle_status"),
+        bloomberg_session_status=value.get("bloomberg_session_status"),
+        heartbeat_at=(heartbeat_at.isoformat() if heartbeat_at else None),
+    )
 
 
 def submit_refresh_job(

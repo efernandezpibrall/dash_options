@@ -10,24 +10,53 @@ from datetime import date, timedelta
 import dash_ag_grid as dag
 import numpy as np
 import plotly.graph_objects as go
-from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
+from dash import (
+    ALL,
+    MATCH,
+    Input,
+    Output,
+    Patch,
+    State,
+    callback,
+    clientside_callback,
+    ctx,
+    dcc,
+    html,
+    no_update,
+)
 
 from options.options_library import asian_76, black_76
+from pricer_surface_reference import (
+    REFERENCE_SCHEMA_VERSION,
+    build_published_surface_reference,
+    build_surface_comparison_views,
+)
 from pricer_structure import (
     DEFAULT_ASSET,
-    DEFAULT_STRUCTURE_TYPE,
+    DELIVERY_SHAPE_LABELS,
+    GREEK_FIELDS,
+    GREEK_LABELS,
     MAX_LEGS,
+    MAX_OPTION_HORIZON_DAYS,
     MODEL_LABELS,
+    PREMIUM_CONVENTION_LABELS,
     SCHEMA_VERSION,
     SUPPORTED_ASSETS,
-    SUPPORTED_STRUCTURE_TYPES,
+    SUPPORTED_DELIVERY_SHAPES,
+    SUPPORTED_PREMIUM_CONVENTIONS,
     StructureValidationError,
+    asset_price_spec,
+    available_delivery_months,
+    build_delivery_month_component,
     calculate_structure,
     correlation_sensitivity_series,
     count_business_days,
+    default_contract_size,
     default_context,
     default_draft,
     default_leg,
+    default_model_for_asset,
+    default_premium_convention,
     expiration_extension_series,
     parallel_volatility_series,
     payoff_series,
@@ -38,15 +67,24 @@ from pricer_structure import (
 
 
 option_types = [
-    {"label": "Commodity Options (Black-76)", "value": "black76"},
-    {"label": "Average Price Options (Asian-76)", "value": "asian76"},
-    {"label": "Spread Options (Kirk)", "value": "kirk"},
+    {"label": "Black-76", "value": "black76"},
+    {"label": "Asian-76", "value": "asian76"},
+    {"label": "Kirk", "value": "kirk"},
 ]
 asset_options = [{"label": asset, "value": asset} for asset in SUPPORTED_ASSETS]
-structure_type_options = [
-    {"label": structure_type, "value": structure_type}
-    for structure_type in SUPPORTED_STRUCTURE_TYPES
+premium_convention_options = [
+    {"label": PREMIUM_CONVENTION_LABELS[value], "value": value}
+    for value in SUPPORTED_PREMIUM_CONVENTIONS
 ]
+COMPACT_DELIVERY_SHAPE_LABELS = {
+    "MONTH": "Month",
+    "Q1": "Q1",
+    "Q2": "Q2",
+    "Q3": "Q3",
+    "Q4": "Q4",
+    "SUM": "Summer",
+    "WIN": "Winter",
+}
 
 MAX_PRICER_DECIMALS = 20
 PRICER_CHART_FONT = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
@@ -60,6 +98,315 @@ PRICER_GRAPH_CONFIG = {
     "responsive": True,
     "modeBarButtonsToRemove": ["lasso2d", "select2d"],
 }
+
+PRICER_WORKSPACE_SCHEMA_VERSION = 6
+DEFAULT_STRUCTURE_ID = "structure-1"
+VOLATILITY_ADJUSTMENT_FIELDS = (
+    "atm_vol_adjustment",
+    "skew_vol_adjustment",
+    "smile_vol_adjustment",
+)
+VOLATILITY_ADJUSTMENT_SCALE = 0.01
+MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT = 50.0
+FUTURES_STYLE_RATE_NOTE = (
+    "The futures-style premium convention is undiscounted; the risk-free rate "
+    "and Rho are not applicable."
+)
+UPFRONT_RATE_NOTE = (
+    "Risk-free rate used to discount the upfront option premium and calculate Rho."
+)
+
+
+def _instance_id(component_type, structure_id):
+    return {"type": component_type, "structure_id": structure_id}
+
+
+def _month_only_field_id(structure_id, field):
+    return {
+        "type": "pricer-month-only-field",
+        "structure_id": structure_id,
+        "field": field,
+    }
+
+
+def _instance_persistence(structure_id, key):
+    return f"pricer-{structure_id}-{key}"
+
+
+def _nonnegative_click_count(value):
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _structure_display_label(structure_id, fallback_sequence=1):
+    prefix, separator, suffix = str(structure_id or "").rpartition("-")
+    if separator and prefix == "structure" and suffix.isdigit():
+        return f"S{int(suffix)}"
+    return f"S{fallback_sequence}"
+
+
+def _default_workspace():
+    return {
+        "schema_version": PRICER_WORKSPACE_SCHEMA_VERSION,
+        "next_structure_sequence": 2,
+        "drafts": {},
+        "structures": [
+            {
+                "structure_id": DEFAULT_STRUCTURE_ID,
+                "label": "S1",
+                "template": None,
+            }
+        ],
+    }
+
+
+def _migrate_template_premium_convention(
+    template,
+    *,
+    migrate_legacy_contract_size=False,
+):
+    if not isinstance(template, dict):
+        return template
+    template.pop("structure_type", None)
+    context = template.get("context")
+    if not isinstance(context, dict):
+        return template
+    context.pop("structure_type", None)
+    model = template.get("model")
+    if model not in MODEL_LABELS:
+        model = "black76"
+    asset = template.get("asset")
+    if asset not in SUPPORTED_ASSETS:
+        asset = DEFAULT_ASSET
+    premium_convention = context.get("premium_convention")
+    if premium_convention in (None, "", "product_default") or (
+        model == "kirk" and premium_convention == "upfront"
+    ):
+        context["premium_convention"] = default_premium_convention(asset, model)
+    if (
+        model in {"black76", "asian76"}
+        and context.get("premium_convention") == "futures_style"
+    ):
+        context["rate"] = 0.0
+    context.setdefault("delivery_shape", "MONTH")
+    if migrate_legacy_contract_size:
+        try:
+            legacy_size = float(template.get("contract_multiplier", 1))
+        except (TypeError, ValueError, OverflowError):
+            legacy_size = None
+        if legacy_size == 1.0:
+            valuation_date = parse_date(
+                template.get("valuation_date"),
+                date.today(),
+            )
+            resolved_context = default_context(model, valuation_date)
+            resolved_context.update(context)
+            resolved_context["asset"] = asset
+            try:
+                template["contract_multiplier"] = default_contract_size(
+                    asset,
+                    resolved_context,
+                    as_of=valuation_date,
+                )
+            except StructureValidationError:
+                pass
+    return template
+
+
+def _is_valid_calculation_snapshot(snapshot):
+    if not (
+        isinstance(snapshot, dict)
+        and snapshot.get("schema_version") == SCHEMA_VERSION
+        and snapshot.get("model") in MODEL_LABELS
+        and isinstance(snapshot.get("context"), dict)
+        and isinstance(snapshot.get("legs"), list)
+        and snapshot.get("legs")
+        and isinstance(snapshot.get("totals"), dict)
+        and isinstance(snapshot.get("greek_fields"), list)
+        and isinstance(snapshot.get("greek_labels"), dict)
+        and isinstance(snapshot.get("model_label"), str)
+        and isinstance(snapshot.get("calculation_date"), str)
+    ):
+        return False
+    context = snapshot["context"]
+    common_context = {
+        "asset",
+        "premium_convention",
+        "resolved_premium_convention",
+        "delivery_shape",
+        "margin_style",
+        "expiration_date",
+        "contract_expiration_date",
+        "time_to_expiry",
+        "vol_adjustment_factor",
+        "variance_calendar_code",
+        "day_count_basis",
+    }
+    model_context = (
+        {"forward", "rate"}
+        if snapshot["model"] in {"black76", "asian76"}
+        else {"asset_1", "asset_2", "correlation"}
+    )
+    if snapshot["model"] == "asian76":
+        model_context |= {"averaging_start_date", "time_to_averaging_start"}
+    if not common_context.issubset(context) or not model_context.issubset(context):
+        return False
+    if not context.get("delivery_components") and not {
+        "option_business_days",
+        "contract_business_days",
+    }.issubset(context):
+        return False
+    totals = snapshot["totals"]
+    if not {
+        "trade_value",
+        "unit_structure_value",
+        "trade_greeks",
+        "unit_structure_greeks",
+    }.issubset(totals):
+        return False
+    if not isinstance(totals["trade_greeks"], dict) or not isinstance(
+        totals["unit_structure_greeks"], dict
+    ):
+        return False
+    for leg in snapshot["legs"]:
+        if not isinstance(leg, dict) or not {
+            "leg_id",
+            "name",
+            "side",
+            "ratio",
+            "call_put",
+            "strike",
+            "unit",
+            "trade_contribution",
+        }.issubset(leg):
+            return False
+        if not all(
+            isinstance(leg.get(group), dict)
+            and "value" in leg[group]
+            and isinstance(leg[group].get("greeks"), dict)
+            for group in ("unit", "trade_contribution")
+        ):
+            return False
+        quote_fields = (
+            {"quote_basis", "entered_premium", "raw_volatility", "volatility_used"}
+            if snapshot["model"] in {"black76", "asian76"}
+            else {"raw_volatility_asset_1", "raw_volatility_asset_2"}
+        )
+        if not quote_fields.issubset(leg):
+            return False
+    return True
+
+
+def _normalize_workspace(workspace):
+    if not isinstance(workspace, dict):
+        return _default_workspace()
+    raw_structures = workspace.get("structures")
+    if not isinstance(raw_structures, list):
+        return _default_workspace()
+    try:
+        migrate_legacy_contract_size = (
+            int(workspace.get("schema_version", 0))
+            < PRICER_WORKSPACE_SCHEMA_VERSION
+        )
+    except (TypeError, ValueError, OverflowError):
+        migrate_legacy_contract_size = True
+    structures = []
+    seen = set()
+    for index, raw_structure in enumerate(raw_structures, start=1):
+        if not isinstance(raw_structure, dict):
+            continue
+        structure_id = str(raw_structure.get("structure_id") or "").strip()
+        if not structure_id or structure_id in seen:
+            continue
+        seen.add(structure_id)
+        template = (
+            copy.deepcopy(raw_structure.get("template"))
+            if isinstance(raw_structure.get("template"), dict)
+            else None
+        )
+        if template is not None:
+            _migrate_template_premium_convention(
+                template,
+                migrate_legacy_contract_size=migrate_legacy_contract_size,
+            )
+        structures.append(
+            {
+                "structure_id": structure_id,
+                "label": _structure_display_label(structure_id, index),
+                "template": template,
+            }
+        )
+    if not structures:
+        return _default_workspace()
+    numeric_sequences = []
+    for structure in structures:
+        prefix, separator, suffix = structure["structure_id"].rpartition("-")
+        if separator and prefix == "structure" and suffix.isdigit():
+            numeric_sequences.append(int(suffix))
+    next_sequence = workspace.get("next_structure_sequence")
+    try:
+        next_sequence = max(
+            int(next_sequence),
+            len(structures) + 1,
+            max(numeric_sequences, default=0) + 1,
+        )
+    except (TypeError, ValueError):
+        next_sequence = max(len(structures) + 1, max(numeric_sequences, default=0) + 1)
+    while f"structure-{next_sequence}" in seen:
+        next_sequence += 1
+    raw_drafts = workspace.get("drafts")
+    drafts = {
+        structure_id: copy.deepcopy(template)
+        for structure_id, template in (
+            raw_drafts.items() if isinstance(raw_drafts, dict) else []
+        )
+        if structure_id in seen and isinstance(template, dict)
+    }
+    for template in drafts.values():
+        _migrate_template_premium_convention(
+            template,
+            migrate_legacy_contract_size=migrate_legacy_contract_size,
+        )
+    return {
+        "schema_version": PRICER_WORKSPACE_SCHEMA_VERSION,
+        "next_structure_sequence": next_sequence,
+        "drafts": drafts,
+        "structures": structures,
+    }
+
+
+def _reduce_workspace(workspace, action, structure_id=None, template=None):
+    normalized = _normalize_workspace(workspace)
+    structures = copy.deepcopy(normalized["structures"])
+    drafts = copy.deepcopy(normalized["drafts"])
+    next_sequence = normalized["next_structure_sequence"]
+    if action in {"add", "duplicate"}:
+        new_id = f"structure-{next_sequence}"
+        structures.append(
+            {
+                "structure_id": new_id,
+                "label": _structure_display_label(new_id, next_sequence),
+                "template": copy.deepcopy(template) if action == "duplicate" else None,
+            }
+        )
+        if action == "duplicate" and isinstance(template, dict):
+            drafts[new_id] = copy.deepcopy(template)
+        next_sequence += 1
+    elif action == "remove" and len(structures) > 1:
+        structures = [
+            structure
+            for structure in structures
+            if structure["structure_id"] != structure_id
+        ]
+        drafts.pop(structure_id, None)
+    return {
+        "schema_version": PRICER_WORKSPACE_SCHEMA_VERSION,
+        "next_structure_sequence": next_sequence,
+        "drafts": drafts,
+        "structures": structures,
+    }
 
 
 def parse_date(date_str, default_date=None):
@@ -214,6 +561,7 @@ def _build_pricer_message(message, tone="neutral"):
         message,
         className=f"pricer-empty-state pricer-empty-state-{tone}",
         role="status" if tone != "danger" else "alert",
+        title=message,
     )
 
 
@@ -224,9 +572,10 @@ def _build_pricer_result_card(
     tone="neutral",
     *,
     detail_on_hover=False,
+    structure_id=DEFAULT_STRUCTURE_ID,
 ):
     detail_id = (
-        f"pricer-result-card-{tone}-detail"
+        f"pricer-{structure_id}-result-card-{tone}-detail"
         if detail and detail_on_hover
         else None
     )
@@ -262,7 +611,11 @@ def _build_pricer_result_card(
 
 
 def _build_pricer_section_header(title, actions=None, *, heading_level=2):
-    heading_component = html.H1 if heading_level == 1 else html.H2
+    heading_component = {
+        1: html.H1,
+        2: html.H2,
+        3: html.H3,
+    }.get(heading_level, html.H2)
     return html.Div(
         [
             heading_component(
@@ -272,6 +625,112 @@ def _build_pricer_section_header(title, actions=None, *, heading_level=2):
             html.Div(actions or [], className="pricer-section-actions"),
         ],
         className="pricer-section-header",
+    )
+
+
+def _build_delivery_shape_field(
+    model="black76",
+    structure_id=DEFAULT_STRUCTURE_ID,
+    value="MONTH",
+    asset=DEFAULT_ASSET,
+):
+    supports_strips = (
+        (asset == "TTF" and model == "black76")
+        or (asset == "JKM" and model in {"black76", "asian76"})
+    )
+    available_shapes = (
+        SUPPORTED_DELIVERY_SHAPES if supports_strips else ("MONTH",)
+    )
+    resolved_value = value if value in available_shapes else "MONTH"
+    return _build_pricer_field(
+        "Shape",
+        dcc.Dropdown(
+            id=_context_id(
+                model,
+                "delivery_shape",
+                structure_id=structure_id,
+            ),
+            options=[
+                {
+                    "label": COMPACT_DELIVERY_SHAPE_LABELS[shape],
+                    "value": shape,
+                }
+                for shape in available_shapes
+            ],
+            value=resolved_value,
+            clearable=False,
+            disabled=not supports_strips,
+            persistence=f"pricer-{structure_id}-{model}-delivery-shape",
+            persistence_type="session",
+            className="pricer-filter-dropdown pricer-shape-dropdown",
+        ),
+        class_name="pricer-shape-field",
+        hint=(
+            "Strips use exact JKM exchange expiries selected by pricing model."
+            if asset == "JKM"
+            else "Monthly and seasonal strips use exact TTF TFO expiries."
+        ),
+    )
+
+
+def _delivery_month_options(asset, model, as_of):
+    return [
+        {
+            "label": delivery_month.strftime("%b-%y"),
+            "value": delivery_month.isoformat(),
+        }
+        for delivery_month in available_delivery_months(asset, model, as_of)
+    ]
+
+
+def _resolved_delivery_month(value, options):
+    valid_values = {option["value"] for option in options}
+    if value:
+        try:
+            parsed = parse_date(value)
+            normalized = date(parsed.year, parsed.month, 1).isoformat()
+        except (TypeError, ValueError):
+            normalized = None
+        if normalized in valid_values:
+            return normalized
+    return options[0]["value"] if options else None
+
+
+def _build_delivery_month_field(
+    model="black76",
+    structure_id=DEFAULT_STRUCTURE_ID,
+    value=None,
+    *,
+    asset=DEFAULT_ASSET,
+    delivery_shape="MONTH",
+    as_of=None,
+):
+    as_of = parse_date(as_of, date.today())
+    is_governed_month = (
+        str(delivery_shape or "MONTH").strip().upper() == "MONTH"
+    )
+    options = _delivery_month_options(asset, model, as_of)
+    resolved_value = _resolved_delivery_month(value, options)
+    return _build_pricer_field(
+        "Delivery",
+        dcc.Dropdown(
+            id=_context_id(
+                model,
+                "delivery_month",
+                structure_id=structure_id,
+            ),
+            options=options,
+            value=resolved_value,
+            clearable=False,
+            disabled=not is_governed_month or not options,
+            persistence=f"pricer-{structure_id}-{model}-delivery-month",
+            persistence_type="session",
+            className="pricer-filter-dropdown pricer-delivery-month-dropdown",
+        ),
+        class_name="pricer-delivery-month-field",
+        hint="Selects the governed monthly contract and its exchange expiry.",
+        field_id=_instance_id("pricer-delivery-month-field", structure_id),
+        style={} if is_governed_month else {"display": "none"},
     )
 
 
@@ -297,18 +756,313 @@ def _build_pricer_chart_card(graph_id, title, empty_message, class_name=None):
     )
 
 
-def _build_pricer_field(label, control, class_name=None, hint=None):
+def _surface_comparison_figure(view):
+    curve_points = view.get("curve_points") or []
+    quote_points = view.get("quote_points") or []
+    governed = view.get("source_kind") == "governed"
+    curve_name = "Calibrated surface" if governed else "Operational surface"
+    curve_color = "#1d4ed8" if governed else "#0f766e"
+    curve_dash = "solid" if governed else "dash"
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=[point["delta"] for point in curve_points],
+            y=[100.0 * point["input_volatility"] for point in curve_points],
+            customdata=[
+                [
+                    point["strike"],
+                    100.0 * point["pricing_volatility"],
+                    100.0 * point["call_delta"],
+                ]
+                for point in curve_points
+            ],
+            mode="lines",
+            name=curve_name,
+            line={"color": curve_color, "width": 2.2, "dash": curve_dash},
+            hovertemplate=(
+                f"<b>{curve_name}</b><br>"
+                "Strike %{customdata[0]:.4f}<br>"
+                "Input IV %{y:.2f}%<br>"
+                "Pricing IV %{customdata[1]:.2f}%<br>"
+                "Call delta %{customdata[2]:.2f}%<extra></extra>"
+            ),
+        )
+    )
+    if quote_points:
+        connector_x = []
+        connector_y = []
+        for point in quote_points:
+            connector_x.extend([point["delta"], point["delta"], None])
+            connector_y.extend(
+                [
+                    100.0 * point["reference_volatility"],
+                    100.0 * point["contract_volatility"],
+                    None,
+                ]
+            )
+        figure.add_trace(
+            go.Scatter(
+                x=connector_x,
+                y=connector_y,
+                mode="lines",
+                line={"color": "rgba(217, 119, 6, 0.48)", "width": 1.2},
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+        figure.add_trace(
+            go.Scatter(
+                x=[point["delta"] for point in quote_points],
+                y=[100.0 * point["contract_volatility"] for point in quote_points],
+                customdata=[
+                    [
+                        point["structure_label"],
+                        point["leg_label"],
+                        "Call" if point["call_put"] == "C" else "Put",
+                        point["strike"],
+                        point["quote_basis_label"],
+                        100.0 * point["contract_volatility"],
+                        100.0 * point["reference_volatility"],
+                        f"{point['difference_vol_points']:+.2f}",
+                        100.0 * point["delta"],
+                        point["surface_cob"],
+                        point["source"],
+                    ]
+                    for point in quote_points
+                ],
+                mode="markers",
+                name="Contract vol",
+                marker={
+                    "color": "#d97706",
+                    "size": 9,
+                    "symbol": [
+                        "triangle-up" if point["call_put"] == "C" else "triangle-down"
+                        for point in quote_points
+                    ],
+                    "line": {"color": "#7c2d12", "width": 1},
+                },
+                hovertemplate=(
+                    "<b>%{customdata[0]} · %{customdata[1]}</b><br>"
+                    "%{customdata[2]} · Strike %{customdata[3]:.4f}<br>"
+                    "Quote basis %{customdata[4]}<br>"
+                    "Contract vol %{customdata[5]:.2f}%<br>"
+                    "Reference vol %{customdata[6]:.2f}%<br>"
+                    "Difference %{customdata[7]} vol pts<br>"
+                    "Model delta %{customdata[8]:.2f}%<br>"
+                    "Surface COB %{customdata[9]}<br>"
+                    "Source %{customdata[10]}<extra></extra>"
+                ),
+            )
+        )
+    figure.update_layout(
+        xaxis=_pricer_axis(
+            "Delta",
+            range=[0.0, 1.0],
+            fixedrange=False,
+            tickmode="array",
+            tickvals=[0.10, 0.25, 0.50, 0.75, 0.90],
+            ticktext=["10P", "25P", "ATM", "25C", "10C"],
+        ),
+        yaxis=_pricer_axis("IV (%)", ticksuffix="%"),
+        shapes=[
+            {
+                "type": "line",
+                "xref": "x",
+                "yref": "paper",
+                "x0": 0.5,
+                "x1": 0.5,
+                "y0": 0.0,
+                "y1": 1.0,
+                "line": {"color": "rgba(100, 116, 139, 0.28)", "width": 1},
+                "layer": "below",
+            }
+        ],
+        hovermode="closest",
+        margin={"l": 48, "r": 12, "t": 8, "b": 52},
+        legend={
+            "orientation": "h",
+            "yanchor": "top",
+            "y": -0.16,
+            "xanchor": "center",
+            "x": 0.5,
+            "font": {"size": 9, "color": PRICER_CHART_MUTED},
+        },
+        uirevision=f"surface-comparison-{view.get('context_key')}",
+    )
+    return _style_pricer_figure(figure, height=270).update_layout(
+        hovermode="closest",
+        margin={"l": 48, "r": 12, "t": 8, "b": 52},
+        uirevision=f"surface-comparison-{view.get('context_key')}",
+    )
+
+
+def _surface_publication_label(value):
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return str(value)
+    timezone_suffix = " UTC" if parsed.tzinfo is not None else ""
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(dt.timezone.utc)
+    return parsed.strftime("%Y-%m-%d %H:%M") + timezone_suffix
+
+
+def _surface_comparison_card(view):
+    title = (
+        f"{view.get('structure_label')} · {view.get('asset')} · "
+        f"{view.get('delivery_label')} · {view.get('model_label')}"
+    )
+    status = view.get("status")
+    card_children = [
+        html.Div(
+            [html.H3(title, className="pricer-surface-card-title")],
+            className="pricer-surface-card-header",
+        )
+    ]
+    if status != "ready":
+        tone = "warning" if status == "unsupported" else "danger"
+        card_children.append(_build_pricer_message(view.get("message"), tone=tone))
+        return html.Section(
+            card_children,
+            className=f"pricer-surface-card pricer-surface-card-{status}",
+            **{"aria-label": title},
+        )
+
+    published_label = _surface_publication_label(view.get("published_at"))
+    metadata = [
+        html.Span(view.get("source_label"), className="pricer-surface-source"),
+        html.Span(f"COB {view.get('surface_cob')}"),
+    ]
+    if published_label:
+        metadata.append(html.Span(f"Published {published_label}"))
+    card_children.append(
+        html.Div(metadata, className="pricer-surface-card-meta")
+    )
+    warnings = view.get("warnings") or []
+    if warnings:
+        card_children.append(
+            html.Div(
+                [html.Span(message) for message in warnings],
+                className="pricer-surface-card-warnings",
+                role="status",
+            )
+        )
+    card_children.append(
+        dcc.Loading(
+            dcc.Graph(
+                figure=_surface_comparison_figure(view),
+                config=PRICER_GRAPH_CONFIG,
+                className="pricer-surface-card-graph",
+            ),
+            type="circle",
+        )
+    )
+    quote_items = []
+    for point in view.get("quote_points") or []:
+        difference = point["difference_vol_points"]
+        quote_items.append(
+            html.Span(
+                (
+                    f"{point['short_label']} "
+                    f"{point['contract_volatility']:.2%} vs "
+                    f"{point['reference_volatility']:.2%} "
+                    f"({difference:+.2f} vol pts)"
+                ),
+                className=(
+                    "pricer-surface-quote-key-item "
+                    + (
+                        "pricer-surface-quote-above"
+                        if difference > 0.0
+                        else "pricer-surface-quote-below"
+                        if difference < 0.0
+                        else "pricer-surface-quote-flat"
+                    )
+                ),
+            )
+        )
+    if quote_items:
+        card_children.append(
+            html.Div(quote_items, className="pricer-surface-quote-key")
+        )
+    return html.Section(
+        card_children,
+        className="pricer-surface-card",
+        **{"aria-label": title},
+    )
+
+
+def _calculated_surface_structures(workspace, persisted_calculations):
+    workspace = _normalize_workspace(workspace)
+    calculations = (
+        persisted_calculations if isinstance(persisted_calculations, dict) else {}
+    )
+    structures = []
+    for structure in workspace["structures"]:
+        structure_id = structure["structure_id"]
+        snapshot = calculations.get(structure_id)
+        if not _is_valid_calculation_snapshot(snapshot):
+            continue
+        structures.append(
+            {
+                "structure_id": structure_id,
+                "structure_label": structure["label"],
+                "snapshot": snapshot,
+            }
+        )
+    return structures
+
+
+def _build_pricer_field(
+    label,
+    control,
+    class_name=None,
+    hint=None,
+    *,
+    field_id=None,
+    style=None,
+):
     classes = ["pricer-field"]
     if class_name:
         classes.append(class_name)
-    return html.Div(
+    properties = {"className": " ".join(classes)}
+    if field_id is not None:
+        properties["id"] = field_id
+    if style is not None:
+        properties["style"] = style
+    if hint:
+        properties["title"] = hint
+    return html.Label(
         [
-            html.Label(label, className="pricer-field-label"),
+            html.Span(
+                label,
+                className="pricer-field-label",
+                title=hint,
+            ),
             control,
-            html.Span(hint, className="pricer-field-hint") if hint else None,
+            (
+                html.Span(
+                    hint,
+                    className="pricer-field-hint",
+                    title=hint,
+                )
+                if hint
+                else None
+            ),
         ],
-        className=" ".join(classes),
+        **properties,
     )
+
+
+def _delivery_year_field_style(delivery_shape):
+    shape = str(delivery_shape or "MONTH").strip().upper()
+    return {} if shape != "MONTH" else {"display": "none"}
+
+
+def _month_only_field_style(delivery_shape):
+    shape = str(delivery_shape or "MONTH").strip().upper()
+    return {} if shape == "MONTH" else {"display": "none"}
 
 
 def _build_pricer_number_input(
@@ -319,6 +1073,7 @@ def _build_pricer_number_input(
     maximum=None,
     step=None,
     persistence_key=None,
+    disabled=False,
 ):
     resolved_step = "any" if step is None else step
     resolved_persistence = persistence_key or True
@@ -334,6 +1089,7 @@ def _build_pricer_number_input(
         debounce=False,
         persistence=resolved_persistence,
         persistence_type="session",
+        disabled=disabled,
         className="pricer-number-input",
     )
 
@@ -343,126 +1099,311 @@ def _build_pricer_date_picker(
     value,
     *,
     minimum=None,
+    maximum=None,
     allow_past=False,
     persistence_key=None,
+    disabled=False,
 ):
     resolved_minimum = minimum
     if resolved_minimum is None and not allow_past:
         resolved_minimum = date.today()
+    resolved_maximum = maximum or (
+        date.today() + timedelta(days=MAX_OPTION_HORIZON_DAYS)
+    )
     return dcc.DatePickerSingle(
         id=picker_id,
         min_date_allowed=resolved_minimum,
-        initial_visible_month=parse_date(value, date.today()),
+        max_date_allowed=resolved_maximum,
         date=value,
         display_format="YYYY-MM-DD",
-        persistence=persistence_key or True,
+        persistence=True if persistence_key is None else persistence_key,
         persistence_type="session",
+        disabled=disabled,
         className="pricer-date-picker",
     )
 
 
-def _context_id(model, param, is_date=False):
+def _context_id(model, param, is_date=False, structure_id=DEFAULT_STRUCTURE_ID):
     return {
         "type": "pricer-context-date" if is_date else "pricer-context-param",
+        "structure_id": structure_id,
         "model": model,
         "param": param,
     }
 
 
-def _build_context_form(model):
+def _build_context_form(
+    model,
+    structure_id=DEFAULT_STRUCTURE_ID,
+    values=None,
+    *,
+    include_delivery_shape=True,
+    asset=DEFAULT_ASSET,
+):
     defaults = default_context(model, date.today())
+    if isinstance(values, dict):
+        defaults.update(values)
+    if not isinstance(values, dict) or values.get("premium_convention") in (
+        None,
+        "",
+        "product_default",
+    ):
+        defaults["premium_convention"] = default_premium_convention(asset, model)
+    governed_delivery_month = None
+    governed_jkm_apo = False
+    if str(defaults.get("delivery_shape") or "MONTH").strip().upper() == "MONTH":
+        delivery_options = _delivery_month_options(asset, model, date.today())
+        requested_delivery_month = defaults.get("delivery_month")
+        governed_delivery_month = _resolved_delivery_month(
+            requested_delivery_month,
+            delivery_options,
+        )
+        defaults["delivery_month"] = governed_delivery_month
+        if governed_delivery_month:
+            component = build_delivery_month_component(
+                asset,
+                model,
+                governed_delivery_month,
+                date.today(),
+                defaults.get("forward", 1.0),
+            )
+            defaults["contract_expiration_date"] = component[
+                "contract_expiration_date"
+            ]
+            governed_jkm_apo = asset == "JKM" and model == "asian76"
+            resolved_requested_month = _resolved_delivery_month(
+                requested_delivery_month,
+                delivery_options,
+            )
+            selection_changed = resolved_requested_month != requested_delivery_month
+            if governed_jkm_apo:
+                defaults["averaging_start_date"] = component[
+                    "averaging_start_date"
+                ]
+            if governed_jkm_apo or selection_changed:
+                defaults["expiration_date"] = component[
+                    "option_expiration_date"
+                ]
+    is_futures_style = defaults.get("premium_convention") == "futures_style"
+    persistence_prefix = f"pricer-{structure_id}-{model}"
     fields = []
     if model == "black76":
+        if include_delivery_shape:
+            fields.append(
+                _build_delivery_shape_field(
+                    model,
+                    structure_id,
+                    defaults["delivery_shape"],
+                    asset,
+                )
+            )
         fields.extend(
             [
                 _build_pricer_field(
-                    "Forward price",
+                    "First year",
                     _build_pricer_number_input(
-                        _context_id(model, "forward"),
+                        _context_id(model, "delivery_year", structure_id=structure_id),
+                        defaults["delivery_year"],
+                        minimum=2000,
+                        maximum=2100,
+                        step=1,
+                        persistence_key=f"{persistence_prefix}-delivery-year",
+                    ),
+                    class_name="pricer-number-field",
+                    hint=(
+                        "Winter runs from October of the first delivery year "
+                        "to March of the following year."
+                    ),
+                    field_id=_instance_id(
+                        "pricer-delivery-year-field",
+                        structure_id,
+                    ),
+                    style=_delivery_year_field_style(
+                        defaults.get("delivery_shape")
+                    ),
+                ),
+                _build_pricer_field(
+                    "Forward",
+                    _build_pricer_number_input(
+                        _context_id(model, "forward", structure_id=structure_id),
                         defaults["forward"],
                         minimum=0.01,
-                        persistence_key="pricer-black76-forward",
+                        persistence_key=f"{persistence_prefix}-forward",
                     ),
+                    class_name="pricer-number-field pricer-forward-field",
                 ),
                 _build_pricer_field(
-                    "Option expiration",
+                    "Option exp",
                     _build_pricer_date_picker(
-                        _context_id(model, "expiration_date", True),
+                        _context_id(model, "expiration_date", True, structure_id),
                         defaults["expiration_date"],
                         allow_past=True,
-                        persistence_key="pricer-black76-expiration",
+                        persistence_key=f"{persistence_prefix}-expiration",
                     ),
+                    class_name="pricer-date-field",
+                    hint="Used for Month only; strips derive each monthly expiry.",
+                    field_id=_month_only_field_id(
+                        structure_id, "option-expiration"
+                    ),
+                    style=_month_only_field_style(defaults.get("delivery_shape")),
                 ),
                 _build_pricer_field(
-                    "Contract expiration",
+                    "Exchange exp",
                     _build_pricer_date_picker(
-                        _context_id(model, "contract_expiration_date", True),
+                        _context_id(
+                            model,
+                            "contract_expiration_date",
+                            True,
+                            structure_id,
+                        ),
                         defaults["contract_expiration_date"],
                         allow_past=True,
-                        persistence_key="pricer-black76-contract-expiration",
+                        persistence_key=f"{persistence_prefix}-contract-expiration",
+                        disabled=bool(governed_delivery_month),
                     ),
+                    class_name="pricer-date-field",
+                    hint="Used for Month only.",
+                    field_id=_month_only_field_id(
+                        structure_id, "contract-expiration"
+                    ),
+                    style=_month_only_field_style(defaults.get("delivery_shape")),
                 ),
                 _build_pricer_field(
-                    "Risk-free rate",
+                    "Rate",
                     _build_pricer_number_input(
-                        _context_id(model, "rate"),
-                        defaults["rate"],
+                        _context_id(model, "rate", structure_id=structure_id),
+                        0.0 if is_futures_style else defaults["rate"],
                         minimum=-1,
                         maximum=2,
                         step=0.000001,
-                        persistence_key="pricer-black76-rate",
+                        persistence_key=f"{persistence_prefix}-rate",
+                        disabled=is_futures_style,
+                    ),
+                    class_name="pricer-number-field pricer-rate-field",
+                    field_id=_instance_id("pricer-rate-field", structure_id),
+                    hint=(
+                        FUTURES_STYLE_RATE_NOTE
+                        if is_futures_style
+                        else UPFRONT_RATE_NOTE
                     ),
                 ),
             ]
         )
     elif model == "asian76":
+        if include_delivery_shape:
+            fields.append(
+                _build_delivery_shape_field(
+                    model,
+                    structure_id,
+                    defaults["delivery_shape"],
+                    asset,
+                )
+            )
         fields.extend(
             [
                 _build_pricer_field(
-                    "Forward price",
+                    "First year",
                     _build_pricer_number_input(
-                        _context_id(model, "forward"),
+                        _context_id(model, "delivery_year", structure_id=structure_id),
+                        defaults["delivery_year"],
+                        minimum=2000,
+                        maximum=2100,
+                        step=1,
+                        persistence_key=f"{persistence_prefix}-delivery-year",
+                    ),
+                    class_name="pricer-number-field",
+                    hint=(
+                        "Winter runs from October of the first delivery year "
+                        "to March of the following year."
+                    ),
+                    field_id=_instance_id(
+                        "pricer-delivery-year-field",
+                        structure_id,
+                    ),
+                    style=_delivery_year_field_style(
+                        defaults.get("delivery_shape")
+                    ),
+                ),
+                _build_pricer_field(
+                    "Forward",
+                    _build_pricer_number_input(
+                        _context_id(model, "forward", structure_id=structure_id),
                         defaults["forward"],
                         minimum=0.01,
-                        persistence_key="pricer-asian76-forward",
+                        persistence_key=f"{persistence_prefix}-forward",
                     ),
+                    class_name="pricer-number-field pricer-forward-field",
                 ),
                 _build_pricer_field(
-                    "Averaging start",
+                    "Avg start",
                     _build_pricer_date_picker(
-                        _context_id(model, "averaging_start_date", True),
+                        _context_id(model, "averaging_start_date", True, structure_id),
                         defaults["averaging_start_date"],
                         allow_past=True,
-                        persistence_key="pricer-asian76-averaging-start",
+                        persistence_key=f"{persistence_prefix}-averaging-start",
+                        disabled=governed_jkm_apo,
                     ),
+                    class_name="pricer-date-field",
+                    hint="Used for Month only; strips derive each monthly start.",
+                    field_id=_month_only_field_id(
+                        structure_id, "averaging-start"
+                    ),
+                    style=_month_only_field_style(defaults.get("delivery_shape")),
                 ),
                 _build_pricer_field(
-                    "Expiration / averaging end",
+                    "Avg end",
                     _build_pricer_date_picker(
-                        _context_id(model, "expiration_date", True),
+                        _context_id(model, "expiration_date", True, structure_id),
                         defaults["expiration_date"],
                         allow_past=True,
-                        persistence_key="pricer-asian76-expiration",
+                        persistence_key=f"{persistence_prefix}-expiration",
+                        disabled=governed_jkm_apo,
                     ),
+                    class_name="pricer-date-field",
+                    hint="Used for Month only; strips derive each monthly expiry.",
+                    field_id=_month_only_field_id(
+                        structure_id, "option-expiration"
+                    ),
+                    style=_month_only_field_style(defaults.get("delivery_shape")),
                 ),
                 _build_pricer_field(
-                    "Contract expiration",
+                    "Exchange exp",
                     _build_pricer_date_picker(
-                        _context_id(model, "contract_expiration_date", True),
+                        _context_id(
+                            model,
+                            "contract_expiration_date",
+                            True,
+                            structure_id,
+                        ),
                         defaults["contract_expiration_date"],
                         allow_past=True,
-                        persistence_key="pricer-asian76-contract-expiration",
+                        persistence_key=f"{persistence_prefix}-contract-expiration",
+                        disabled=bool(governed_delivery_month),
                     ),
+                    class_name="pricer-date-field",
+                    hint="Used for Month only.",
+                    field_id=_month_only_field_id(
+                        structure_id, "contract-expiration"
+                    ),
+                    style=_month_only_field_style(defaults.get("delivery_shape")),
                 ),
                 _build_pricer_field(
-                    "Risk-free rate",
+                    "Rate",
                     _build_pricer_number_input(
-                        _context_id(model, "rate"),
-                        defaults["rate"],
+                        _context_id(model, "rate", structure_id=structure_id),
+                        0.0 if is_futures_style else defaults["rate"],
                         minimum=-1,
                         maximum=2,
                         step=0.000001,
-                        persistence_key="pricer-asian76-rate",
+                        persistence_key=f"{persistence_prefix}-rate",
+                        disabled=is_futures_style,
+                    ),
+                    class_name="pricer-number-field pricer-rate-field",
+                    field_id=_instance_id("pricer-rate-field", structure_id),
+                    hint=(
+                        FUTURES_STYLE_RATE_NOTE
+                        if is_futures_style
+                        else UPFRONT_RATE_NOTE
                     ),
                 ),
             ]
@@ -470,55 +1411,73 @@ def _build_context_form(model):
     elif model == "kirk":
         fields.extend(
             [
+                html.Div(
+                    id=_instance_id("pricer-rate-field", structure_id),
+                    className="pricer-rate-field",
+                    style={"display": "none"},
+                ),
                 _build_pricer_field(
-                    "Asset 1 price",
+                    "Asset 1",
                     _build_pricer_number_input(
-                        _context_id(model, "asset_1"),
+                        _context_id(model, "asset_1", structure_id=structure_id),
                         defaults["asset_1"],
                         minimum=0.01,
-                        persistence_key="pricer-kirk-asset-1",
+                        persistence_key=f"{persistence_prefix}-asset-1",
                     ),
+                    class_name="pricer-number-field",
                 ),
                 _build_pricer_field(
-                    "Asset 2 price",
+                    "Asset 2",
                     _build_pricer_number_input(
-                        _context_id(model, "asset_2"),
+                        _context_id(model, "asset_2", structure_id=structure_id),
                         defaults["asset_2"],
                         minimum=0.01,
-                        persistence_key="pricer-kirk-asset-2",
+                        persistence_key=f"{persistence_prefix}-asset-2",
                     ),
+                    class_name="pricer-number-field",
                 ),
                 _build_pricer_field(
-                    "Option expiration",
+                    "Option exp",
                     _build_pricer_date_picker(
-                        _context_id(model, "expiration_date", True),
+                        _context_id(model, "expiration_date", True, structure_id),
                         defaults["expiration_date"],
                         allow_past=True,
-                        persistence_key="pricer-kirk-expiration",
+                        persistence_key=f"{persistence_prefix}-expiration",
                     ),
+                    class_name="pricer-date-field",
                 ),
                 _build_pricer_field(
-                    "Contract expiration",
+                    "Exchange exp",
                     _build_pricer_date_picker(
-                        _context_id(model, "contract_expiration_date", True),
+                        _context_id(
+                            model,
+                            "contract_expiration_date",
+                            True,
+                            structure_id,
+                        ),
                         defaults["contract_expiration_date"],
                         allow_past=True,
-                        persistence_key="pricer-kirk-contract-expiration",
+                        persistence_key=f"{persistence_prefix}-contract-expiration",
+                        disabled=bool(governed_delivery_month),
                     ),
+                    class_name="pricer-date-field",
                 ),
                 _build_pricer_field(
-                    "Correlation",
+                    "Corr",
                     _build_pricer_number_input(
-                        _context_id(model, "correlation"),
+                        _context_id(model, "correlation", structure_id=structure_id),
                         defaults["correlation"],
                         minimum=-1,
                         maximum=1,
                         step=0.00001,
-                        persistence_key="pricer-kirk-correlation",
+                        persistence_key=f"{persistence_prefix}-correlation",
                     ),
+                    class_name="pricer-number-field",
                 ),
                 html.Div(
-                    "Kirk is undiscounted in the current library; rate and Rho are not applicable.",
+                    "Kirk is undiscounted, so rate and Rho are not applicable. "
+                    "It requires two input vols; PREMIUM quoting is unavailable "
+                    "because one premium cannot determine both vols.",
                     className="pricer-inline-method-note",
                     role="note",
                 ),
@@ -527,27 +1486,745 @@ def _build_context_form(model):
     return html.Div(fields, className="pricer-context-grid")
 
 
-def _leg_column_defs(model):
+def _calculated_value_getter(field):
+    return {
+        "function": (
+            "params.context && params.context.pricingRows && params.data && "
+            "params.context.pricingRows[params.data.leg_id] "
+            f"? params.context.pricingRows[params.data.leg_id][{field!r}] "
+            ": null"
+        )
+    }
+
+
+def _surface_value_getter(field):
+    return {
+        "function": (
+            "params.context && params.context.surfaceRows && params.data && "
+            "params.context.surfaceRows[params.data.leg_id] "
+            f"? params.context.surfaceRows[params.data.leg_id][{field!r}] "
+            ": null"
+        )
+    }
+
+
+def _surface_or_calculated_value_getter(surface_field, calculated_field=None):
+    calculated_lookup = (
+        "params.context && params.context.pricingRows && params.data && "
+        "params.context.pricingRows[params.data.leg_id] && "
+        f"params.context.pricingRows[params.data.leg_id][{calculated_field!r}] "
+        "!= null ? "
+        f"params.context.pricingRows[params.data.leg_id][{calculated_field!r}] : "
+        if calculated_field
+        else ""
+    )
+    return {
+        "function": (
+            calculated_lookup
+            + "params.context && params.context.surfaceRows && params.data && "
+            "params.context.surfaceRows[params.data.leg_id] "
+            f"? params.context.surfaceRows[params.data.leg_id][{surface_field!r}] "
+            ": null"
+        )
+    }
+
+
+def _adjusted_surface_or_calculated_value_getter(
+    surface_field,
+    calculated_field,
+    *,
+    scale_from_surface_input=False,
+):
+    adjustment_terms = [
+        f"Number(params.data[{field!r}] == null ? 0 : params.data[{field!r}])"
+        for field in VOLATILITY_ADJUSTMENT_FIELDS
+    ]
+    adjustment = (
+        f"{VOLATILITY_ADJUSTMENT_SCALE!r} * ("
+        + " + ".join(adjustment_terms)
+        + ")"
+    )
+    surface_value = f"Number(surfaceRow[{surface_field!r}])"
+    if scale_from_surface_input:
+        adjusted_value = (
+            f"{surface_value} * (Number(surfaceRow['surface_input_vol']) + {adjustment}) "
+            "/ Number(surfaceRow['surface_input_vol'])"
+        )
+        surface_is_valid = "Number(surfaceRow['surface_input_vol']) > 0"
+    else:
+        adjusted_value = f"{surface_value} + {adjustment}"
+        surface_is_valid = "true"
+    calculated_lookup = (
+        "params.context && params.context.pricingRows && params.data && "
+        "params.context.pricingRows[params.data.leg_id] && "
+        f"params.context.pricingRows[params.data.leg_id][{calculated_field!r}] "
+        "!= null ? "
+        f"params.context.pricingRows[params.data.leg_id][{calculated_field!r}] : "
+    )
+    surface_lookup = (
+        "params.context && params.context.surfaceRows && params.data && "
+        "params.context.surfaceRows[params.data.leg_id]"
+    )
+    adjusted_surface_value = adjusted_value.replace(
+        "surfaceRow",
+        "params.context.surfaceRows[params.data.leg_id]",
+    )
+    valid_surface = surface_is_valid.replace(
+        "surfaceRow",
+        "params.context.surfaceRows[params.data.leg_id]",
+    )
+    return {
+        "function": (
+            calculated_lookup
+            + surface_lookup
+            + f" && {valid_surface} ? "
+            + adjusted_surface_value
+            + " : null"
+        )
+    }
+
+
+def _surface_tooltip_getter(field):
+    return {
+        "function": (
+            "params.context && params.context.surfaceRows && params.data && "
+            "params.context.surfaceRows[params.data.leg_id] "
+            f"? params.context.surfaceRows[params.data.leg_id][{field!r}] "
+            ": 'Published surface reference is unavailable.'"
+        )
+    }
+
+
+def _published_pricer_volatility_column(
+    surface_field,
+    header,
+    *,
+    calculated_field=None,
+    width=82,
+    tooltip=None,
+    sign_coloring=False,
+):
+    column = _result_numeric_column(
+        surface_field,
+        header,
+        min_width=width,
+        sign_coloring=sign_coloring,
+    )
+    column.pop("field", None)
+    column["colId"] = surface_field
+    column["width"] = width
+    column["editable"] = False
+    column["valueGetter"] = _surface_or_calculated_value_getter(
+        surface_field,
+        calculated_field,
+    )
+    column["valueFormatter"] = {
+        "function": (
+            "params.value == null || !isFinite(Number(params.value)) "
+            "? '—' : d3.format('.2%')(Number(params.value))"
+        )
+    }
+    column["tooltipValueGetter"] = _surface_tooltip_getter(
+        "surface_input_tooltip"
+    )
+    if tooltip:
+        column["headerTooltip"] = tooltip
+    return column
+
+
+def _published_pricer_volatility_columns():
+    input_vol_column = _published_pricer_volatility_column(
+        "surface_input_vol",
+        "Input vol",
+        calculated_field="raw_volatility",
+        width=82,
+        tooltip=(
+            "Effective input volatility: published strike-specific volatility plus "
+            "the ATM, Skew, and Smile adjustments."
+        ),
+    )
+    input_vol_column["valueGetter"] = _adjusted_surface_or_calculated_value_getter(
+        "surface_input_vol",
+        "raw_volatility",
+    )
+    return {
+        "headerName": "Volatility",
+        "headerClass": (
+            "pricer-result-column-group "
+            "pricer-result-column-group-volatility"
+        ),
+        "children": [
+            input_vol_column,
+            _published_pricer_volatility_column(
+                "surface_atm_input_vol",
+                "ATM",
+                width=72,
+                tooltip="Published 50-delta call ATM contribution to Input vol.",
+            ),
+            _published_pricer_volatility_column(
+                "surface_skew_input_vol",
+                "Skew",
+                width=72,
+                tooltip="Strike-specific skew contribution: Input vol minus ATM.",
+                sign_coloring=True,
+            ),
+        ],
+    }
+
+
+def _published_pricer_pricing_volatility_columns():
+    column = _published_pricer_volatility_column(
+        "surface_pricing_vol",
+        "Pricing vol",
+        calculated_field="volatility_used",
+        width=82,
+        tooltip=(
+            "Effective Input vol after the governed contract-date adjustment."
+        ),
+    )
+    column["valueGetter"] = _adjusted_surface_or_calculated_value_getter(
+        "surface_pricing_vol",
+        "volatility_used",
+        scale_from_surface_input=True,
+    )
+    return {
+        "headerName": "",
+        "headerClass": (
+            "pricer-result-column-group "
+            "pricer-result-column-group-volatility"
+        ),
+        "children": [column],
+    }
+
+
+def _volatility_adjustment_column(field, header):
+    return {
+        "headerName": header,
+        "field": field,
+        "width": 72,
+        "minWidth": 68,
+        "type": "numericColumn",
+        "editable": {"function": "!params.node.rowPinned"},
+        "cellClass": (
+            "pricer-editable-cell pricer-table-number-cell "
+            "pricer-volatility-adjustment-cell"
+        ),
+        "valueParser": {"function": "Number(params.newValue)"},
+        "valueFormatter": {
+            "function": (
+                "params.value == null || !isFinite(Number(params.value)) "
+                "? '—' : d3.format(',.2f')(Number(params.value))"
+            )
+        },
+        "cellClassRules": {
+            "pricer-invalid-cell": (
+                "!params.node.rowPinned && (params.value == null || "
+                "!isFinite(Number(params.value)) || "
+                f"Math.abs(Number(params.value)) > {MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT!r})"
+            )
+        },
+        "headerTooltip": (
+            f"{header} adjustment in volatility percentage points; "
+            "1.00 adds one vol point and -1.00 removes one vol point."
+        ),
+    }
+
+
+def _volatility_adjustment_columns():
+    return {
+        "headerName": "Volatility adjustment",
+        "headerClass": (
+            "pricer-result-column-group "
+            "pricer-result-column-group-adjustment"
+        ),
+        "children": [
+            _volatility_adjustment_column("atm_vol_adjustment", "ATM"),
+            _volatility_adjustment_column("skew_vol_adjustment", "Skew"),
+            _volatility_adjustment_column("smile_vol_adjustment", "Smile"),
+        ],
+    }
+
+
+def _published_surface_columns():
+    columns = []
+    for field, tooltip_field, header in (
+        (
+            "surface_input_vol",
+            "surface_input_tooltip",
+            "Input vol",
+        ),
+        (
+            "surface_pricing_vol",
+            "surface_pricing_tooltip",
+            "Pricing vol",
+        ),
+    ):
+        columns.append(
+            {
+                "headerName": header,
+                "colId": field,
+                "width": 112,
+                "minWidth": 104,
+                "type": "numericColumn",
+                "editable": False,
+                "valueGetter": _surface_value_getter(field),
+                "valueFormatter": {
+                    "function": (
+                        "params.value == null || !isFinite(Number(params.value)) "
+                        "? '—' : d3.format('.2%')(Number(params.value))"
+                    )
+                },
+                "tooltipValueGetter": _surface_tooltip_getter(tooltip_field),
+                "cellClass": "pricer-table-number-cell",
+                "cellClassRules": {
+                    "pricer-missing-cell": "params.value == null",
+                },
+            }
+        )
+    return {
+        "headerName": "Published surface",
+        "headerClass": (
+            "pricer-result-column-group "
+            "pricer-result-column-group-published"
+        ),
+        "children": columns,
+    }
+
+
+def _unified_result_numeric_column(
+    field,
+    header,
+    *,
+    min_width=72,
+    decimal_places=None,
+    percentage=False,
+    sign_coloring=True,
+    tooltip=None,
+):
+    column = _result_numeric_column(
+        field,
+        header,
+        min_width=min_width,
+        decimal_places=decimal_places,
+        sign_coloring=sign_coloring,
+    )
+    column["width"] = min_width
+    column["valueGetter"] = _calculated_value_getter(field)
+    if percentage:
+        column["valueFormatter"] = {
+            "function": (
+                "params.value == null || !isFinite(Number(params.value)) "
+                "? '—' : d3.format('.2%')(Number(params.value))"
+            )
+        }
+    if tooltip:
+        column["headerTooltip"] = tooltip
+    return column
+
+
+def _compact_greek_label(field):
+    return {
+        "delta_s1": "Delta 1",
+        "delta_s2": "Delta 2",
+        "gamma_s1": "Gamma 1",
+        "gamma_s2": "Gamma 2",
+        "gamma_s1s2": "Cross gamma",
+        "vega_sigma1": "Vega 1",
+        "vega_sigma2": "Vega 2",
+        "corr_sensitivity": "Corr sens.",
+        "vega_equiv": "Equiv. vega",
+    }.get(field, field.title())
+
+
+def _model_greek_tooltip(model, field):
+    if field == "theta":
+        return (
+            "Instantaneous annual derivative divided by 365."
+            if model == "black76"
+            else "One-calendar-day repricing change."
+        )
+    return GREEK_LABELS[field]
+
+
+def _unified_result_columns(model, *, use_published_surface=False):
+    columns = []
+    greek_widths = {
+        "gamma_s1s2": 96,
+        "corr_sensitivity": 88,
+        "vega_equiv": 92,
+    }
+    if model in {"black76", "asian76"} and use_published_surface:
+        columns.extend(
+            [
+                _published_pricer_volatility_columns(),
+                _volatility_adjustment_columns(),
+                _published_pricer_pricing_volatility_columns(),
+            ]
+        )
+    elif model in {"black76", "asian76"}:
+        columns.append(
+            {
+                "headerName": "Volatility",
+                "headerClass": "pricer-result-column-group",
+                "children": [
+                    _unified_result_numeric_column(
+                        "raw_volatility",
+                        "Contract vol",
+                        min_width=88,
+                        percentage=True,
+                        sign_coloring=False,
+                        tooltip=(
+                            "Contract volatility resolved from the published surface."
+                            if use_published_surface
+                            else (
+                                "Volatility entered through Quote input, or implied "
+                                "from Quote input when Quote basis is PREMIUM."
+                            )
+                        ),
+                    ),
+                    _unified_result_numeric_column(
+                        "volatility_used",
+                        "Pricing vol",
+                        min_width=82,
+                        percentage=True,
+                        sign_coloring=False,
+                        tooltip="Volatility used after the expiry adjustment.",
+                    ),
+                ],
+            }
+        )
+    greek_fields = GREEK_FIELDS[model]
+    if use_published_surface and model in {"black76", "asian76"}:
+        columns.extend(
+            [
+                {
+                    "headerName": "Premium",
+                    "headerClass": (
+                        "pricer-result-column-group "
+                        "pricer-result-column-group-premium"
+                    ),
+                    "children": [
+                        _unified_result_numeric_column(
+                            "unit_value",
+                            "Premium",
+                            decimal_places=4,
+                        ),
+                        _unified_result_numeric_column(
+                            "trade_value",
+                            "Value",
+                            min_width=88,
+                            decimal_places=0,
+                        ),
+                    ],
+                },
+                {
+                    "headerName": "Unit Greeks",
+                    "headerClass": (
+                        "pricer-result-column-group "
+                        "pricer-result-column-group-unit"
+                    ),
+                    "children": [
+                        _unified_result_numeric_column(
+                            f"unit_{field}",
+                            _compact_greek_label(field),
+                            min_width=greek_widths.get(field, 72),
+                            decimal_places=4,
+                            tooltip=_model_greek_tooltip(model, field),
+                        )
+                        for field in greek_fields
+                    ],
+                },
+                {
+                    "headerName": "Position Greeks",
+                    "headerClass": (
+                        "pricer-result-column-group "
+                        "pricer-result-column-group-position"
+                    ),
+                    "children": [
+                        _unified_result_numeric_column(
+                            f"trade_{field}",
+                            _compact_greek_label(field),
+                            min_width=max(greek_widths.get(field, 72), 82),
+                            decimal_places=0,
+                            tooltip=_model_greek_tooltip(model, field),
+                        )
+                        for field in greek_fields
+                    ],
+                },
+            ]
+        )
+    else:
+        columns.extend(
+            [
+            {
+                "headerName": "Unit analytics",
+                "headerClass": (
+                    "pricer-result-column-group "
+                    "pricer-result-column-group-unit"
+                    if use_published_surface
+                    else "pricer-result-column-group"
+                ),
+                "children": [
+                    _unified_result_numeric_column(
+                        "unit_value",
+                        "Premium",
+                        decimal_places=4,
+                    ),
+                    *[
+                        _unified_result_numeric_column(
+                            f"unit_{field}",
+                            _compact_greek_label(field),
+                            min_width=greek_widths.get(field, 72),
+                            decimal_places=4,
+                            tooltip=_model_greek_tooltip(model, field),
+                        )
+                        for field in greek_fields
+                    ],
+                ],
+            },
+            {
+                "headerName": "Position contribution",
+                "headerClass": (
+                    "pricer-result-column-group "
+                    "pricer-result-column-group-position"
+                ),
+                "children": [
+                    _unified_result_numeric_column(
+                        "trade_value",
+                        "Value",
+                        min_width=88,
+                        decimal_places=0,
+                    ),
+                    *[
+                        _unified_result_numeric_column(
+                            f"trade_{field}",
+                            _compact_greek_label(field),
+                            min_width=max(greek_widths.get(field, 72), 82),
+                            decimal_places=0,
+                            tooltip=_model_greek_tooltip(model, field),
+                        )
+                        for field in greek_fields
+                    ],
+                ],
+            },
+            ]
+        )
+    return columns
+
+
+_CURRENT_PRICER_COLUMN_WIDTHS = {
+    "name": (86, 86),
+    "ratio": (50, 64),
+    "call_put": (70, 82),
+    "strike": (60, 60),
+    "surface_input_vol": (70, 82),
+    "surface_atm_input_vol": (58, 72),
+    "surface_skew_input_vol": (58, 72),
+    "atm_vol_adjustment": (58, 72),
+    "skew_vol_adjustment": (58, 72),
+    "smile_vol_adjustment": (58, 72),
+    "surface_pricing_vol": (72, 82),
+    "unit_value": (68, 80),
+    "trade_value": (74, 96),
+    "volatility_asset_1": (104, 118),
+    "volatility_asset_2": (104, 118),
+}
+
+_CURRENT_PRICER_LONG_GREEK_WIDTHS = {
+    "gamma_s1s2": 96,
+    "corr_sensitivity": 88,
+    "vega_equiv": 92,
+}
+
+
+def _append_column_class(column, property_name, class_name):
+    existing = column.get(property_name)
+    if not existing:
+        column[property_name] = class_name
+    elif isinstance(existing, str) and class_name not in existing.split():
+        column[property_name] = f"{existing} {class_name}"
+
+
+def _current_pricer_column_width(column_id):
+    if column_id in _CURRENT_PRICER_COLUMN_WIDTHS:
+        return _CURRENT_PRICER_COLUMN_WIDTHS[column_id]
+    for prefix, standard_width in (("unit_", 60), ("trade_", 68)):
+        if column_id.startswith(prefix):
+            field = column_id.removeprefix(prefix)
+            minimum = _CURRENT_PRICER_LONG_GREEK_WIDTHS.get(
+                field,
+                standard_width,
+            )
+            return minimum, minimum + 16
+    return None
+
+
+def _apply_current_pricer_leg_geometry(column_defs):
+    """Apply `/pricer` density without changing the legacy Pricer grid."""
+    for column in column_defs:
+        children = column.get("children")
+        if isinstance(children, list):
+            _apply_current_pricer_leg_geometry(children)
+            if children:
+                _append_column_class(
+                    children[0],
+                    "headerClass",
+                    "pricer-column-group-start",
+                )
+                _append_column_class(
+                    children[0],
+                    "cellClass",
+                    "pricer-column-group-start",
+                )
+            continue
+
+        column_id = str(column.get("field") or column.get("colId") or "")
+        width_range = _current_pricer_column_width(column_id)
+        if width_range is None:
+            continue
+
+        minimum, maximum = width_range
+        column["width"] = minimum
+        column["minWidth"] = minimum
+        column["maxWidth"] = maximum
+        if column_id == "name":
+            column.pop("flex", None)
+        else:
+            column["flex"] = 1
+
+        if column_id == "name":
+            column["cellRenderer"] = "PricerLegSelector"
+            _append_column_class(
+                column,
+                "headerClass",
+                "pricer-table-text-header",
+            )
+        elif column_id == "call_put":
+            _append_column_class(
+                column,
+                "headerClass",
+                "pricer-table-category-header",
+            )
+            _append_column_class(
+                column,
+                "cellClass",
+                "pricer-table-category-cell",
+            )
+            _append_column_class(
+                column,
+                "cellClass",
+                "pricer-select-editable-cell",
+            )
+        else:
+            _append_column_class(
+                column,
+                "headerClass",
+                "pricer-table-number-header",
+            )
+
+        if "tooltipValueGetter" not in column:
+            column["tooltipValueGetter"] = {
+                "function": (
+                    "params.valueFormatted != null && params.valueFormatted !== '' "
+                    "? params.valueFormatted : (params.value == null ? '' : "
+                    "String(params.value))"
+                )
+            }
+    return column_defs
+
+
+def _rows_for_lot_mode(rows, *, signed_lots):
+    converted = []
+    if not isinstance(rows, list):
+        return converted
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        row = copy.deepcopy(raw_row)
+        side = str(row.get("side") or "").strip().upper()
+        ratio_value = row.get("ratio")
+        try:
+            ratio_number = (
+                None
+                if isinstance(ratio_value, bool)
+                else float(ratio_value)
+            )
+        except (TypeError, ValueError, OverflowError):
+            ratio_number = None
+        if ratio_number is not None and not math.isfinite(ratio_number):
+            ratio_number = None
+
+        if signed_lots:
+            if ratio_number is not None and side in {"BUY", "SELL"}:
+                row["ratio"] = abs(ratio_number) * (
+                    -1.0 if side == "SELL" else 1.0
+                )
+            row.pop("side", None)
+        elif not side and ratio_number is not None:
+            row["side"] = "SELL" if ratio_number < 0 else "BUY"
+            row["ratio"] = abs(ratio_number)
+        converted.append(row)
+    return converted
+
+
+def _default_leg_for_lot_mode(
+    model,
+    sequence,
+    *,
+    signed_lots,
+    use_published_surface=False,
+):
+    rows = _rows_for_lot_mode(
+        [default_leg(model, sequence)],
+        signed_lots=signed_lots,
+    )
+    if use_published_surface:
+        rows = _rows_with_volatility_adjustments(model, rows)
+    return rows[0]
+
+
+def _leg_column_defs(
+    model,
+    *,
+    signed_lots=False,
+    use_published_surface=False,
+):
     text_column = {
-        "editable": True,
+        "editable": {"function": "!params.node.rowPinned"},
         "cellClass": "pricer-editable-cell pricer-table-text-cell",
     }
     numeric_column = {
-        "editable": True,
+        "editable": {"function": "!params.node.rowPinned"},
         "type": "numericColumn",
         "cellClass": "pricer-editable-cell pricer-table-number-cell",
         "valueParser": {"function": "Number(params.newValue)"},
     }
     positive_rules = {
         "pricer-invalid-cell": (
-            "params.value == null || !isFinite(Number(params.value)) || "
-            "Number(params.value) <= 0"
+            "!params.node.rowPinned && (params.value == null || "
+            "!isFinite(Number(params.value)) || Number(params.value) <= 0)"
+        )
+    }
+    nonzero_rules = {
+        "pricer-invalid-cell": (
+            "!params.node.rowPinned && (params.value == null || "
+            "!isFinite(Number(params.value)) || Number(params.value) === 0)"
+        )
+    }
+    quote_rules = {
+        "pricer-invalid-cell": (
+            "!params.node.rowPinned && (params.value == null || "
+            "!isFinite(Number(params.value)) || "
+            "(params.data.quote_basis === 'PREMIUM' "
+            "? Number(params.value) <= 0 "
+            ": Number(params.value) < 0.005 || Number(params.value) > 200))"
         )
     }
     volatility_rules = {
         "pricer-invalid-cell": (
-            "params.value == null || !isFinite(Number(params.value)) || "
-            "Number(params.value) < 0.005 || Number(params.value) > 2"
+            "!params.node.rowPinned && (params.value == null || "
+            "!isFinite(Number(params.value)) || Number(params.value) < 0.005 "
+            "|| Number(params.value) > 200)"
         )
     }
     columns = [
@@ -555,80 +2232,253 @@ def _leg_column_defs(model):
             "headerName": "Leg",
             "field": "name",
             "pinned": "left",
-            "minWidth": 120,
+            "width": 104,
+            "minWidth": 88,
             **text_column,
         },
-        {
-            "headerName": "Side",
-            "field": "side",
-            "width": 92,
-            "editable": True,
-            "cellEditor": "agSelectCellEditor",
-            "cellEditorParams": {"values": ["BUY", "SELL"]},
-            "cellClass": "pricer-editable-cell pricer-table-text-cell",
-        },
-        {
-            "headerName": "Lots",
-            "field": "ratio",
-            "width": 92,
-            **numeric_column,
-            "cellClassRules": positive_rules,
-        },
-        {
-            "headerName": "Call / Put",
-            "field": "call_put",
-            "width": 102,
-            "editable": True,
-            "cellEditor": "agSelectCellEditor",
-            "cellEditorParams": {"values": ["C", "P"]},
-            "cellClass": "pricer-editable-cell pricer-table-text-cell",
-        },
-        {
-            "headerName": "Strike",
-            "field": "strike",
-            "minWidth": 105,
-            **numeric_column,
-            "cellClassRules": positive_rules if model != "kirk" else {},
-        },
     ]
-    if model in {"black76", "asian76"}:
+    if not signed_lots:
         columns.append(
             {
-                "headerName": "Input vol",
-                "field": "volatility",
-                "minWidth": 118,
-                **numeric_column,
-                "cellClassRules": volatility_rules,
-                "headerTooltip": "Leg-specific input contract volatility",
+                "headerName": "Side",
+                "field": "side",
+                "width": 72,
+                "editable": {"function": "!params.node.rowPinned"},
+                "cellEditor": "agSelectCellEditor",
+                "cellEditorParams": {"values": ["BUY", "SELL"]},
+                "cellClass": "pricer-editable-cell pricer-table-text-cell",
             }
         )
+    columns.extend(
+        [
+            {
+                "headerName": "Lots",
+                "field": "ratio",
+                "width": 64,
+                **numeric_column,
+                "cellClassRules": (
+                    nonzero_rules if signed_lots else positive_rules
+                ),
+                **(
+                    {"headerTooltip": "Positive = buy; negative = sell."}
+                    if signed_lots
+                    else {}
+                ),
+            },
+            {
+                "headerName": "Call / Put",
+                "field": "call_put",
+                "width": 82,
+                "editable": {"function": "!params.node.rowPinned"},
+                "cellEditor": "agSelectCellEditor",
+                "cellEditorParams": {"values": ["C", "P"]},
+                "cellClass": "pricer-editable-cell pricer-table-text-cell",
+            },
+            {
+                "headerName": "Strike",
+                "field": "strike",
+                "width": 84,
+                "minWidth": 72,
+                **numeric_column,
+                "cellClassRules": positive_rules if model != "kirk" else {},
+            },
+        ]
+    )
+    if model in {"black76", "asian76"}:
+        if not use_published_surface:
+            columns.extend(
+                [
+                    {
+                        "headerName": "Quote basis",
+                        "field": "quote_basis",
+                        "width": 94,
+                        "editable": {"function": "!params.node.rowPinned"},
+                        "cellEditor": "agSelectCellEditor",
+                        "cellEditorParams": {"values": ["VOL", "PREMIUM"]},
+                        "cellClass": "pricer-editable-cell pricer-table-text-cell",
+                        "headerTooltip": "Choose one input basis for this leg.",
+                    },
+                    {
+                        "headerName": "Quote input",
+                        "field": "quote_value",
+                        "width": 94,
+                        "minWidth": 82,
+                        **numeric_column,
+                        "cellClassRules": quote_rules,
+                        "headerTooltip": (
+                            "Vol accepts 0.432 or 43.20 for 43.20%; values up to "
+                            "2 are decimals and values above 2 are percentages. "
+                            "Premium is a positive unsigned unit price."
+                        ),
+                    },
+                ]
+            )
     else:
         columns.extend(
             [
                 {
                     "headerName": "Asset 1 input vol",
                     "field": "volatility_asset_1",
-                    "minWidth": 145,
+                    "width": 118,
+                    "minWidth": 104,
                     **numeric_column,
                     "cellClassRules": volatility_rules,
                 },
                 {
                     "headerName": "Asset 2 input vol",
                     "field": "volatility_asset_2",
-                    "minWidth": 145,
+                    "width": 118,
+                    "minWidth": 104,
                     **numeric_column,
                     "cellClassRules": volatility_rules,
                 },
             ]
         )
-    return columns
+    output = [
+        columns[0],
+        {
+            "headerName": "Leg inputs",
+            "headerClass": (
+                "pricer-result-column-group pricer-result-column-group-inputs"
+            ),
+            "children": columns[1:],
+        },
+    ]
+    result_columns = _unified_result_columns(
+        model,
+        use_published_surface=use_published_surface,
+    )
+    output.extend(result_columns[:1])
+    if model in {"black76", "asian76"} and not use_published_surface:
+        output.append(_published_surface_columns())
+    output.extend(result_columns[1:])
+    if use_published_surface:
+        return _apply_current_pricer_leg_geometry(output)
+    return output
 
 
-def _build_legs_grid():
+def _quote_ready_rows(model, rows, *, signed_lots=None):
+    migrated = []
+    if not isinstance(rows, list):
+        return migrated
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        row = dict(raw_row)
+        if model in {"black76", "asian76"}:
+            if "quote_basis" not in row:
+                row["quote_basis"] = "VOL"
+                row["quote_value"] = row.get("volatility")
+            else:
+                quote_basis = str(row.get("quote_basis") or "").strip().upper()
+                row["quote_basis"] = (
+                    "VOL" if quote_basis == "VOLATILITY" else quote_basis
+                )
+                if "quote_value" not in row:
+                    row["quote_value"] = (
+                        row.get("volatility")
+                        if row["quote_basis"] == "VOL"
+                        else None
+                    )
+            row.pop("volatility", None)
+        migrated.append(row)
+    if signed_lots is None:
+        return migrated
+    return _rows_for_lot_mode(migrated, signed_lots=signed_lots)
+
+
+def _rows_with_volatility_adjustments(model, rows, *, signed_lots=None):
+    normalized = _quote_ready_rows(model, rows, signed_lots=signed_lots)
+    if model not in {"black76", "asian76"}:
+        return normalized
+    for row in normalized:
+        for field in VOLATILITY_ADJUSTMENT_FIELDS:
+            row.setdefault(field, 0.0)
+    return normalized
+
+
+def _leg_grid_options(snapshot=None, surface_reference=None, *, compact=False):
+    pricing_rows = {}
+    pinned_rows = []
+    if isinstance(snapshot, dict) and snapshot.get("schema_version") == SCHEMA_VERSION:
+        result_rows, total = _combined_result_rows(snapshot)
+        pricing_rows = {str(row["leg_id"]): row for row in [*result_rows, total]}
+        pinned_rows = [total]
+    surface_rows = {}
+    if (
+        isinstance(surface_reference, dict)
+        and surface_reference.get("schema_version") == REFERENCE_SCHEMA_VERSION
+        and isinstance(surface_reference.get("rows"), dict)
+    ):
+        surface_rows = copy.deepcopy(surface_reference["rows"])
+    return {
+        "domLayout": "autoHeight",
+        "rowHeight": 28 if compact else 30,
+        "headerHeight": 30 if compact else 34,
+        "groupHeaderHeight": 24 if compact else 27,
+        "stopEditingWhenCellsLoseFocus": True,
+        "enableCellTextSelection": True,
+        "ensureDomOrder": True,
+        "animateRows": False,
+        "maintainColumnOrder": False,
+        "context": {
+            "pricingRows": pricing_rows,
+            "surfaceRows": surface_rows,
+        },
+        "pinnedBottomRowData": pinned_rows,
+        "enableBrowserTooltips": False,
+        "tooltipShowDelay": 0,
+        "tooltipHideDelay": 3000,
+        **({"tooltipShowMode": "whenTruncated"} if compact else {}),
+        "rowSelection": {
+            "mode": "singleRow",
+            "checkboxes": not compact,
+            "headerCheckbox": False,
+            "enableClickSelection": True,
+        },
+        **(
+            {
+                "selectionColumnDef": {
+                    "width": 34,
+                    "minWidth": 34,
+                    "maxWidth": 34,
+                    "resizable": False,
+                    "suppressHeaderMenuButton": True,
+                }
+            }
+            if not compact
+            else {}
+        ),
+    }
+
+
+def _build_legs_grid(
+    structure_id=DEFAULT_STRUCTURE_ID,
+    *,
+    model="black76",
+    rows=None,
+    calculation_snapshot=None,
+    signed_lots=False,
+    use_published_surface=False,
+):
+    row_builder = (
+        _rows_with_volatility_adjustments
+        if use_published_surface
+        else _quote_ready_rows
+    )
+    rows = row_builder(
+        model,
+        rows or [default_leg(model, 1)],
+        signed_lots=signed_lots,
+    )
     return dag.AgGrid(
-        id="pricer-legs-grid",
-        rowData=[default_leg("black76", 1)],
-        columnDefs=_leg_column_defs("black76"),
+        id=_instance_id("pricer-legs-grid", structure_id),
+        rowData=rows,
+        columnDefs=_leg_column_defs(
+            model,
+            signed_lots=signed_lots,
+            use_published_surface=use_published_surface,
+        ),
         defaultColDef={
             "sortable": False,
             "filter": False,
@@ -637,27 +2487,19 @@ def _build_legs_grid():
             "suppressHeaderFilterButton": True,
             "singleClickEdit": True,
         },
-        dashGridOptions={
-            "domLayout": "autoHeight",
-            "rowHeight": 34,
-            "headerHeight": 38,
-            "stopEditingWhenCellsLoseFocus": True,
-            "enableCellTextSelection": True,
-            "ensureDomOrder": True,
-            "animateRows": False,
-            "rowSelection": {
-                "mode": "singleRow",
-                "checkboxes": True,
-                "headerCheckbox": False,
-                "enableClickSelection": True,
-            },
-        },
+        dashGridOptions=_leg_grid_options(
+            calculation_snapshot,
+            compact=use_published_surface,
+        ),
         getRowId="params.data.leg_id",
-        persistence="pricer-structure-legs",
+        persistence=_instance_persistence(structure_id, "structure-legs"),
         persisted_props=["rowData"],
         persistence_type="session",
         selectedRows=[],
-        className="ag-theme-alpine mckinsey-ag-grid pricer-data-grid pricer-legs-grid",
+        className=(
+            "ag-theme-alpine mckinsey-ag-grid pricer-data-grid "
+            "pricer-legs-grid pricer-unified-grid"
+        ),
         style={"width": "100%"},
         dangerously_allow_code=True,
     )
@@ -732,6 +2574,8 @@ def _result_greek_column(field, label, *, prefix, decimal_places):
 
 def _combined_result_columns(snapshot):
     model = snapshot["model"]
+    price_unit_label = snapshot["context"].get("price_unit_label", "unit")
+    trade_currency = snapshot["context"].get("trade_currency", "currency")
     columns = [
         {
             "headerName": "Leg",
@@ -770,13 +2614,34 @@ def _combined_result_columns(snapshot):
         ),
     ]
     if model in {"black76", "asian76"}:
-        columns.append(
-            _result_numeric_column(
-                "raw_volatility",
-                "Input vol",
-                min_width=74,
-                sign_coloring=False,
-            )
+        columns.extend(
+            [
+                {
+                    "headerName": "Quote",
+                    "field": "quote_basis",
+                    "minWidth": 76,
+                    "cellClass": "pricer-table-text-cell",
+                    "headerClass": "pricer-table-text-header",
+                },
+                _result_numeric_column(
+                    "entered_premium",
+                    "Input premium",
+                    min_width=100,
+                    sign_coloring=False,
+                ),
+                _result_numeric_column(
+                    "raw_volatility",
+                    "Contract vol",
+                    min_width=92,
+                    sign_coloring=False,
+                ),
+                _result_numeric_column(
+                    "volatility_used",
+                    "Pricing vol",
+                    min_width=88,
+                    sign_coloring=False,
+                ),
+            ]
         )
     else:
         columns.extend(
@@ -798,7 +2663,7 @@ def _combined_result_columns(snapshot):
     columns.extend(
         [
             {
-                "headerName": "Position contribution",
+                "headerName": f"Position · {trade_currency}",
                 "headerClass": (
                     "pricer-result-column-group "
                     "pricer-result-column-group-position"
@@ -821,7 +2686,7 @@ def _combined_result_columns(snapshot):
                 ],
             },
             {
-                "headerName": "Unit analytics",
+                "headerName": f"Unit · {price_unit_label}",
                 "headerClass": "pricer-result-column-group",
                 "children": [
                     _result_numeric_column(
@@ -846,6 +2711,11 @@ def _combined_result_columns(snapshot):
 
 
 def _combined_result_rows(snapshot):
+    vega_tooltip = (
+        "Adjusted pricing vol, 1 point"
+        if snapshot["context"].get("vega_basis") == "adjusted_pricing_vol"
+        else "Contract vol, 1 point"
+    )
     rows = []
     for leg in snapshot["legs"]:
         row = {
@@ -865,11 +2735,21 @@ def _combined_result_rows(snapshot):
                 f"trade_{field}": leg["trade_contribution"]["greeks"].get(field)
                 for field in snapshot["greek_fields"]
             },
-            "_vega_tooltip": "Input vol, 1 point",
+            "_vega_tooltip": vega_tooltip,
             "_rho_tooltip": "1 rate point",
         }
         if snapshot["model"] in {"black76", "asian76"}:
+            row["quote_basis"] = leg["quote_basis"].title()
+            row["entered_premium"] = leg["entered_premium"]
             row["raw_volatility"] = leg["raw_volatility"]
+            is_premium_input = str(leg["quote_basis"]).lower() == "premium"
+            row["input_volatility"] = (
+                None if is_premium_input else leg["raw_volatility"]
+            )
+            row["implied_volatility"] = (
+                leg["raw_volatility"] if is_premium_input else None
+            )
+            row["volatility_used"] = leg["volatility_used"]
         else:
             row["raw_volatility_asset_1"] = leg["raw_volatility_asset_1"]
             row["raw_volatility_asset_2"] = leg["raw_volatility_asset_2"]
@@ -881,6 +2761,12 @@ def _combined_result_rows(snapshot):
         "ratio": None,
         "call_put": "",
         "strike": None,
+        "quote_basis": "",
+        "entered_premium": None,
+        "raw_volatility": None,
+        "input_volatility": None,
+        "implied_volatility": None,
+        "volatility_used": None,
         "trade_value": snapshot["totals"]["trade_value"],
         "unit_value": snapshot["totals"]["unit_structure_value"],
         **{
@@ -891,13 +2777,13 @@ def _combined_result_rows(snapshot):
             f"unit_{field}": snapshot["totals"]["unit_structure_greeks"].get(field)
             for field in snapshot["greek_fields"]
         },
-        "_vega_tooltip": "Input vol, 1 point",
+        "_vega_tooltip": vega_tooltip,
         "_rho_tooltip": "1 rate point",
     }
     return rows, total
 
 
-def _build_combined_result_grid(snapshot):
+def _build_combined_result_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
     rows, total = _combined_result_rows(snapshot)
     options = {
         "domLayout": "autoHeight",
@@ -914,7 +2800,7 @@ def _build_combined_result_grid(snapshot):
         "tooltipHideDelay": 3000,
     }
     return dag.AgGrid(
-        id="pricer-combined-results-grid",
+        id=_instance_id("pricer-combined-results-grid", structure_id),
         rowData=rows,
         columnDefs=_combined_result_columns(snapshot),
         defaultColDef={
@@ -939,243 +2825,907 @@ def _build_combined_result_grid(snapshot):
     )
 
 
-def _build_pricing_model_field():
+def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
+    context = snapshot["context"]
+    is_jkm = context.get("asset") == "JKM"
+    is_asian = snapshot.get("model") == "asian76"
+    rows = []
+    for leg in snapshot["legs"]:
+        for component in leg.get("components") or []:
+            rows.append(
+                {
+                    "row_id": f"{leg['leg_id']}:{component['contract_month']}",
+                    "leg": leg["name"],
+                    "contract_month": component["contract_month_label"],
+                    "delivery_quantity": component.get(
+                        "contract_size", component.get("delivery_hours")
+                    ),
+                    "product_code": component.get("exchange_product_code", "TFO"),
+                    "strip_weight_pct": component["weight"] * 100.0,
+                    "forward": component["forward"],
+                    "averaging_start_date": component.get("averaging_start_date"),
+                    "option_expiration_date": component["option_expiration_date"],
+                    "expiry_status": (
+                        component["expiry_status"]
+                        if str(component["expiry_status"]).startswith("TFO ")
+                        else component["expiry_status"].title()
+                    ),
+                    "input_vol_pct": component["input_volatility"] * 100.0,
+                    "unit_value": component["unit_value"],
+                    "weighted_unit_value": component["weighted_unit_value"],
+                    "delta": component["greeks"]["delta"],
+                    "vega": component["greeks"]["vega"],
+                }
+            )
+    columns = [
+        {
+            "headerName": "Leg",
+            "field": "leg",
+            "pinned": "left",
+            "minWidth": 90,
+            "cellClass": "pricer-table-text-cell",
+        },
+        {
+            "headerName": "Month",
+            "field": "contract_month",
+            "minWidth": 76,
+            "cellClass": "pricer-table-text-cell",
+        },
+    ]
+    if is_jkm:
+        columns.append(
+            {
+                "headerName": "Product",
+                "field": "product_code",
+                "minWidth": 68,
+                "cellClass": "pricer-table-text-cell",
+            }
+        )
+    columns.extend(
+        [
+            _result_numeric_column(
+                "delivery_quantity",
+                "MMBtu" if is_jkm else "Hours",
+                min_width=72 if is_jkm else 62,
+                sign_coloring=False,
+                decimal_places=0,
+            ),
+        _result_numeric_column(
+            "strip_weight_pct",
+            "Weight %",
+            min_width=74,
+            sign_coloring=False,
+            decimal_places=3,
+        ),
+        _result_numeric_column(
+            "forward", "Forward", min_width=72, sign_coloring=False, decimal_places=4
+        ),
+        ]
+    )
+    if is_jkm and is_asian:
+        columns.append(
+            {
+                "headerName": "Averaging start",
+                "field": "averaging_start_date",
+                "minWidth": 112,
+                "cellClass": "pricer-table-text-cell",
+            }
+        )
+    columns.extend(
+        [
+            {
+                "headerName": (
+                    "APO expiry"
+                    if is_jkm and is_asian
+                    else "JKZ / TFO expiry"
+                    if is_jkm
+                    else "TFO expiry"
+                ),
+                "field": "option_expiration_date",
+                "minWidth": 112 if is_jkm else 104,
+                "cellClass": "pricer-table-text-cell",
+            },
+        {
+            "headerName": "Status",
+            "field": "expiry_status",
+            "minWidth": 72,
+            "cellClass": "pricer-table-text-cell",
+        },
+        _result_numeric_column(
+            "input_vol_pct",
+            "Input vol %",
+            min_width=82,
+            sign_coloring=False,
+            decimal_places=3,
+        ),
+        _result_numeric_column(
+            "unit_value", "Premium", min_width=76, sign_coloring=False, decimal_places=4
+        ),
+        _result_numeric_column(
+            "weighted_unit_value",
+            "Weighted premium",
+            min_width=108,
+            sign_coloring=False,
+            decimal_places=4,
+        ),
+        _result_numeric_column(
+            "delta", "Delta", min_width=68, sign_coloring=False, decimal_places=4
+        ),
+        _result_numeric_column(
+            "vega", "Vega", min_width=68, sign_coloring=False, decimal_places=4
+        ),
+        ]
+    )
+    return dag.AgGrid(
+        id=_instance_id("pricer-strip-components-grid", structure_id),
+        rowData=rows,
+        columnDefs=columns,
+        defaultColDef={
+            "sortable": False,
+            "filter": False,
+            "resizable": True,
+            "suppressHeaderMenuButton": True,
+            "suppressHeaderFilterButton": True,
+            "wrapHeaderText": True,
+            "autoHeaderHeight": True,
+        },
+        dashGridOptions={
+            "domLayout": "autoHeight",
+            "rowHeight": 31,
+            "headerHeight": 44,
+            "enableCellTextSelection": True,
+            "ensureDomOrder": True,
+            "animateRows": False,
+            "suppressColumnVirtualisation": True,
+        },
+        columnSize="autoSize",
+        columnSizeOptions={"skipHeader": False},
+        getRowId="params.data.row_id",
+        className=(
+            "ag-theme-alpine mckinsey-ag-grid pricer-data-grid "
+            "pricer-results-grid pricer-strip-components-grid"
+        ),
+        style={"width": "100%"},
+        dangerously_allow_code=True,
+    )
+
+
+def _build_pricing_model_field(
+    structure_id=DEFAULT_STRUCTURE_ID,
+    value="black76",
+):
     return _build_pricer_field(
-        "Pricing model",
+        html.Span(
+            [
+                html.Span("Model", className="pricer-field-label-otc"),
+                html.Span(
+                    "Product",
+                    className="pricer-field-label-exchange",
+                ),
+            ]
+        ),
         dcc.Dropdown(
-            id="option-type",
+            id=_instance_id("pricer-option-type", structure_id),
             options=option_types,
-            value="black76",
+            value=value,
             clearable=False,
-            persistence="pricer-model",
+            persistence=_instance_persistence(structure_id, "model"),
             persistence_type="session",
             className="pricer-filter-dropdown pricer-option-type-dropdown",
         ),
         class_name="pricer-model-field",
+        field_id=_instance_id("pricer-model-field", structure_id),
+        hint=(
+            "Kirk is undiscounted, so rate and Rho are not applicable. It "
+            "requires two input vols; PREMIUM quoting is unavailable because "
+            "one premium cannot determine both vols."
+            if value == "kirk"
+            else None
+        ),
     )
 
 
-def _build_asset_field():
+def _build_asset_field(
+    structure_id=DEFAULT_STRUCTURE_ID,
+    value=DEFAULT_ASSET,
+):
     return _build_pricer_field(
         "Asset",
         dcc.Dropdown(
-            id="pricer-asset",
+            id=_instance_id("pricer-asset", structure_id),
             options=asset_options,
-            value=DEFAULT_ASSET,
+            value=value,
             clearable=False,
-            persistence="pricer-asset",
+            persistence=_instance_persistence(structure_id, "asset"),
             persistence_type="session",
             className="pricer-filter-dropdown pricer-asset-dropdown",
         ),
         class_name="pricer-asset-field",
-    )
-
-
-def _build_structure_type_field():
-    return _build_pricer_field(
-        "Type",
-        dcc.Dropdown(
-            id="pricer-structure-type",
-            options=structure_type_options,
-            value=DEFAULT_STRUCTURE_TYPE,
-            clearable=False,
-            persistence="pricer-structure-type",
-            persistence_type="session",
-            className="pricer-filter-dropdown pricer-type-dropdown",
+        hint=(
+            "Selects the governed variance calendar. Kirk applies this one "
+            "calendar to both volatility inputs."
         ),
-        class_name="pricer-type-field",
     )
 
+
+def _build_price_unit_field(
+    structure_id=DEFAULT_STRUCTURE_ID,
+    asset=DEFAULT_ASSET,
+):
+    try:
+        spec = asset_price_spec(asset)
+        value = spec["price_unit_label"]
+        description = spec["description"]
+    except StructureValidationError:
+        value = "—"
+        description = "Price currency and unit are unavailable."
+    return html.Div(
+        [
+            html.Span("Price unit", className="pricer-field-label"),
+            html.Div(
+                value,
+                id=_instance_id("pricer-price-unit", structure_id),
+                className="pricer-price-unit-value",
+                title=description,
+                **{"aria-live": "polite"},
+            ),
+        ],
+        className="pricer-field pricer-price-unit-field",
+        title="Selected asset price currency and unit.",
+    )
+
+
+def _build_premium_convention_field(
+    model="black76",
+    structure_id=DEFAULT_STRUCTURE_ID,
+    value=None,
+    asset=DEFAULT_ASSET,
+):
+    if value in (None, "", "product_default"):
+        value = default_premium_convention(asset, model)
+    options = premium_convention_options
+    if model == "kirk":
+        options = [option for option in options if option["value"] != "upfront"]
+        if value == "upfront":
+            value = "futures_style"
+    return _build_pricer_field(
+        "Premium",
+        dcc.Dropdown(
+            id=_context_id(model, "premium_convention", structure_id=structure_id),
+            options=options,
+            value=value,
+            clearable=False,
+            persistence=_instance_persistence(
+                structure_id, f"{model}-premium-convention-v2"
+            ),
+            persistence_type="session",
+            className="pricer-filter-dropdown pricer-premium-convention-dropdown",
+        ),
+        class_name="pricer-premium-convention-field",
+        hint=(
+            "Asset selection sets the exchange default. Futures-style is "
+            "undiscounted; Upfront uses the risk-free rate."
+        ),
+    )
+
+
+def _build_structure_header_context(
+    model,
+    structure_id=DEFAULT_STRUCTURE_ID,
+    values=None,
+    asset=DEFAULT_ASSET,
+):
+    defaults = default_context(model, date.today())
+    defaults["premium_convention"] = default_premium_convention(asset, model)
+    if isinstance(values, dict):
+        defaults.update(values)
+    if defaults.get("premium_convention") in (None, "", "product_default"):
+        defaults["premium_convention"] = default_premium_convention(asset, model)
+    fields = [
+        _build_premium_convention_field(
+            model,
+            structure_id,
+            defaults["premium_convention"],
+            asset,
+        ),
+        _build_delivery_shape_field(
+            model,
+            structure_id,
+            defaults["delivery_shape"],
+            asset,
+        ),
+    ]
+    fields.append(
+        _build_delivery_month_field(
+            model,
+            structure_id,
+            defaults.get("delivery_month"),
+            asset=asset,
+            delivery_shape=defaults["delivery_shape"],
+        )
+    )
+    return fields
+
+
+def _resolved_contract_size_default(
+    asset,
+    model,
+    context_values=None,
+    valuation_date_value=None,
+):
+    valuation_date = parse_date(valuation_date_value, date.today())
+    resolved_context = default_context(model, valuation_date)
+    if isinstance(context_values, dict):
+        resolved_context.update(context_values)
+    resolved_context["asset"] = asset
+    return default_contract_size(
+        asset,
+        resolved_context,
+        as_of=valuation_date,
+    )
+
+
+def _contract_size_hint():
+    return (
+        "Editable quantity in the denominator unit shown under Price unit. "
+        "TTF defaults to one ICE lot (1 MW across the exact delivery hours); "
+        "JKM to 10,000 MMBtu/month; Brent to 1,000 bbl; Henry Hub to 2,500 "
+        "MMBtu; and NBP to 1,000 therm/day across the delivery month. Enter "
+        "another positive number to override it."
+    )
+
+
+def _build_structure_panel(
+    structure,
+    *,
+    can_remove=True,
+    calculation_snapshot=None,
+    calculate_all_baseline=0,
+    signed_lots=False,
+    use_published_surface=False,
+    valuation_date_override=None,
+    workflow="legacy",
+    heading_level=2,
+):
+    structure_id = structure["structure_id"]
+    template = structure.get("template") or {}
+    model = template.get("model")
+    if model not in MODEL_LABELS:
+        model = "black76"
+    asset = template.get("asset", DEFAULT_ASSET)
+    valuation_date = (
+        parse_date(valuation_date_override, date.today()).isoformat()
+        if valuation_date_override is not None
+        else template.get("valuation_date", date.today().isoformat())
+    )
+    context_values = template.get("context")
+    exchange_contract_size = _resolved_contract_size_default(
+        asset,
+        model,
+        context_values,
+        valuation_date,
+    )
+    contract_multiplier = _coerce_pricer_float(
+        template.get("contract_multiplier"),
+        exchange_contract_size,
+    )
+    if contract_multiplier <= 0:
+        contract_multiplier = exchange_contract_size
+    row_builder = (
+        _rows_with_volatility_adjustments
+        if use_published_surface
+        else _quote_ready_rows
+    )
+    rows = row_builder(
+        model,
+        template.get("legs"),
+        signed_lots=signed_lots,
+    )
+    if not rows:
+        rows = [
+            _default_leg_for_lot_mode(
+                model,
+                1,
+                signed_lots=signed_lots,
+                use_published_surface=use_published_surface,
+            )
+        ]
+    next_leg_sequence = template.get("next_leg_sequence")
+    try:
+        next_leg_sequence = max(int(next_leg_sequence), len(rows) + 1)
+    except (TypeError, ValueError, OverflowError):
+        next_leg_sequence = len(rows) + 1
+    draft = {
+        "schema_version": 1,
+        "model": model,
+        "context": (
+            copy.deepcopy(context_values)
+            if isinstance(context_values, dict)
+            else None
+        ),
+        "legs": copy.deepcopy(rows),
+        "next_leg_sequence": next_leg_sequence,
+    }
+    supplied_calculation_snapshot = calculation_snapshot
+    if not _is_valid_calculation_snapshot(calculation_snapshot) or not (
+        _snapshot_matches_template(
+            calculation_snapshot,
+            {
+                "asset": asset,
+                "model": model,
+                "contract_multiplier": contract_multiplier,
+                "valuation_date": valuation_date,
+                "context": context_values,
+                "legs": rows,
+            },
+        )
+    ):
+        calculation_snapshot = None
+    restored_status = ""
+    if (
+        isinstance(calculation_snapshot, dict)
+        and calculation_snapshot.get("schema_version") == SCHEMA_VERSION
+    ):
+        restored_leg_count = len(calculation_snapshot.get("legs") or [])
+        restored_leg_label = "leg" if restored_leg_count == 1 else "legs"
+        restored_status = _build_pricer_message(
+            f"Calculated · {restored_leg_count} {restored_leg_label} · "
+            f"{calculation_snapshot.get('model_label', model)}",
+            tone="success",
+        )
+    elif supplied_calculation_snapshot is not None:
+        restored_status = _build_pricer_message(
+            "Modified · outputs cleared · calculate again",
+            tone="warning",
+        )
+    market_strip = html.Div(
+        [
+            _build_pricer_field(
+                "Valuation",
+                _build_pricer_date_picker(
+                    _instance_id("pricer-valuation-date", structure_id),
+                    valuation_date,
+                    allow_past=True,
+                    persistence_key=(
+                        False
+                        if valuation_date_override is not None
+                        else _instance_persistence(
+                            structure_id, "valuation-date-v1"
+                        )
+                    ),
+                ),
+                class_name="pricer-date-field pricer-valuation-date-field",
+            ),
+            _build_pricer_field(
+                "Contract size",
+                _build_pricer_number_input(
+                    _instance_id("pricer-contract-multiplier", structure_id),
+                    contract_multiplier,
+                    minimum=0.01,
+                    step=0.01,
+                    persistence_key=_instance_persistence(
+                        structure_id,
+                        "contract-size-v1",
+                    ),
+                ),
+                class_name="pricer-number-field pricer-contract-size-field",
+                hint=_contract_size_hint(),
+            ),
+            html.Div(
+                _build_context_form(
+                    model,
+                    structure_id,
+                    context_values,
+                    include_delivery_shape=False,
+                    asset=asset,
+                ).children,
+                id=_instance_id("pricer-shared-context", structure_id),
+                className="pricer-shared-context",
+            ),
+        ],
+        className="pricer-context-with-valuation pricer-market-strip",
+    )
+    return html.Section(
+        [
+            dcc.Store(
+                id=_instance_id("pricer-structure-workflow", structure_id),
+                data=workflow,
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id("pricer-contract-size-default", structure_id),
+                data={"asset": asset, "value": exchange_contract_size},
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id("pricer-draft-store", structure_id),
+                data=draft,
+                storage_type="session",
+            ),
+            dcc.Store(
+                id=_instance_id("pricer-calculation-store", structure_id),
+                data=copy.deepcopy(calculation_snapshot),
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id(
+                    "pricer-grid-pricing-options",
+                    structure_id,
+                ),
+                data=_leg_grid_options(
+                    calculation_snapshot,
+                    compact=use_published_surface,
+                ),
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id(
+                    "pricer-published-surface-reference",
+                    structure_id,
+                ),
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id("pricer-calculate-all-baseline", structure_id),
+                data=_nonnegative_click_count(calculate_all_baseline),
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id("pricer-calculate-all-ack", structure_id),
+                data=_nonnegative_click_count(calculate_all_baseline),
+                storage_type="memory",
+            ),
+            _build_pricer_section_header(
+                structure["label"],
+                actions=[
+                    html.Div(
+                        [
+                            _build_asset_field(structure_id, asset),
+                            _build_price_unit_field(structure_id, asset),
+                            _build_pricing_model_field(structure_id, model),
+                            html.Div(
+                                _build_structure_header_context(
+                                    model,
+                                    structure_id,
+                                    context_values,
+                                    asset,
+                                ),
+                                id=_instance_id(
+                                    "pricer-header-context",
+                                    structure_id,
+                                ),
+                                className="pricer-header-context",
+                            ),
+                            market_strip,
+                        ],
+                        className="pricer-structure-header-controls",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                restored_status,
+                                id=_instance_id(
+                                    "pricer-calculation-status",
+                                    structure_id,
+                                ),
+                                className=(
+                                    "pricer-calculation-status "
+                                    "pricer-structure-status"
+                                ),
+                                role="status",
+                            ),
+                            html.Button(
+                                "Calc",
+                                id=_instance_id(
+                                    "pricer-calculate-button",
+                                    structure_id,
+                                ),
+                                className=(
+                                    "custom-export-btn pricer-calculate-button"
+                                ),
+                                **{
+                                    "aria-label": (
+                                        f"Calculate {structure['label']}"
+                                    ),
+                                    "title": "Calculate structure",
+                                },
+                            ),
+                            html.Button(
+                                "Copy",
+                                id=_instance_id(
+                                    "pricer-duplicate-structure",
+                                    structure_id,
+                                ),
+                                className=(
+                                    "custom-export-btn pricer-secondary-button"
+                                ),
+                                **{
+                                    "aria-label": (
+                                        f"Duplicate {structure['label']}"
+                                    ),
+                                    "title": "Duplicate structure",
+                                },
+                            ),
+                            html.Button(
+                                "×",
+                                id=_instance_id(
+                                    "pricer-remove-structure",
+                                    structure_id,
+                                ),
+                                className="pricer-remove-button",
+                                disabled=not can_remove,
+                                **{
+                                    "aria-label": (
+                                        f"Remove {structure['label']}"
+                                    ),
+                                    "title": "Remove structure",
+                                },
+                            ),
+                        ],
+                        className="pricer-structure-header-actions",
+                    ),
+                ],
+                heading_level=heading_level,
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.H3(
+                                        "Option legs",
+                                        className="pricer-subsection-title",
+                                    ),
+                                    html.Div(
+                                        [
+                                            html.Button(
+                                                "Add leg",
+                                                id=_instance_id(
+                                                    "pricer-add-leg", structure_id
+                                                ),
+                                                className=(
+                                                    "custom-export-btn "
+                                                    "pricer-secondary-button"
+                                                ),
+                                                **{
+                                                    "aria-label": (
+                                                        "Add leg to "
+                                                        f"{structure['label']}"
+                                                    )
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Duplicate",
+                                                id=_instance_id(
+                                                    "pricer-duplicate-leg", structure_id
+                                                ),
+                                                className=(
+                                                    "custom-export-btn "
+                                                    "pricer-secondary-button"
+                                                ),
+                                                title="Duplicate the selected leg",
+                                                disabled=True,
+                                                **{
+                                                    "aria-label": (
+                                                        "Duplicate selected leg in "
+                                                        f"{structure['label']}"
+                                                    )
+                                                },
+                                            ),
+                                            html.Button(
+                                                "Remove",
+                                                id=_instance_id(
+                                                    "pricer-remove-leg", structure_id
+                                                ),
+                                                className="pricer-remove-button",
+                                                title="Remove the selected leg",
+                                                disabled=True,
+                                                **{
+                                                    "aria-label": (
+                                                        "Remove selected leg from "
+                                                        f"{structure['label']}"
+                                                    )
+                                                },
+                                            ),
+                                        ],
+                                        className="pricer-leg-edit-actions",
+                                    ),
+                                ],
+                                className="pricer-leg-heading",
+                            ),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        id=_instance_id(
+                                            "pricer-results-container",
+                                            structure_id,
+                                        ),
+                                        className="pricer-calculation-meta",
+                                    ),
+                                    html.Div(
+                                        id=_instance_id(
+                                            "pricer-warning-container",
+                                            structure_id,
+                                        ),
+                                        className="pricer-warning-container",
+                                    ),
+                                    html.Div(
+                                        id=_instance_id(
+                                            "pricer-leg-action-status",
+                                            structure_id,
+                                        ),
+                                        className="pricer-action-status",
+                                        role="status",
+                                    ),
+                                ],
+                                className="pricer-leg-toolbar-status",
+                            ),
+                        ],
+                        className="pricer-leg-toolbar",
+                    ),
+                    _build_legs_grid(
+                        structure_id,
+                        model=model,
+                        rows=rows,
+                        calculation_snapshot=calculation_snapshot,
+                        signed_lots=signed_lots,
+                        use_published_surface=use_published_surface,
+                    ),
+                    html.Div(
+                        id=_instance_id(
+                            "pricer-unit-results-container",
+                            structure_id,
+                        ),
+                        className="pricer-unit-results-container",
+                    ),
+                    html.Div(
+                        [
+                            html.Div(
+                                id=_instance_id(
+                                    "pricer-model-inputs-used-container",
+                                    structure_id,
+                                )
+                            ),
+                            html.Div(
+                                id=_instance_id(
+                                    "pricer-time-info",
+                                    structure_id,
+                                )
+                            ),
+                            html.Div(
+                                id=_instance_id(
+                                    "pricer-greeks-container",
+                                    structure_id,
+                                )
+                            ),
+                        ],
+                        className="pricer-compatibility-output",
+                    ),
+                ],
+                className=(
+                    "pricer-section-body pricer-config-body pricer-structure-body"
+                ),
+            ),
+        ],
+        className=(
+            "pricer-section pricer-config-section pricer-structure-panel "
+            f"pricer-workflow-{workflow}"
+        ),
+        **{"data-structure-id": structure_id},
+    )
+
+
+_INITIAL_WORKSPACE = _default_workspace()
 
 layout = html.Main(
     [
+        dcc.Store(id="pricer-exchange-workspace-store", data=None),
+        html.Button(
+            id="pricer-exchange-calculate-all",
+            style={"display": "none"},
+            disabled=True,
+            tabIndex=-1,
+            **{"aria-hidden": "true"},
+        ),
         dcc.Store(
-            id="pricer-draft-store",
-            data=default_draft("black76"),
+            id="pricer-workspace-store",
+            data=_INITIAL_WORKSPACE,
             storage_type="session",
         ),
-        dcc.Store(id="pricer-calculation-store", storage_type="session"),
+        dcc.Interval(
+            id="pricer-workspace-hydration",
+            interval=100,
+            max_intervals=1,
+            n_intervals=0,
+        ),
+        dcc.Store(id="pricer-workspace-ready-store", data=False),
+        dcc.Store(
+            id="pricer-calculations-session-store",
+            storage_type="session",
+        ),
+        dcc.Store(id="pricer-draft-autosave-trigger", data=0),
+        dcc.Store(
+            id="pricer-analysis-selection-store",
+            storage_type="session",
+        ),
+        dcc.Store(id="pricer-calculation-store", storage_type="memory"),
+        html.Header(
+            [
+                html.H1("Pricer Old", className="pricer-workspace-title"),
+                html.Div(
+                    [
+                        html.Div(
+                            id="pricer-workspace-status",
+                            className="pricer-workspace-status",
+                            role="status",
+                        ),
+                        html.Button(
+                            "Calculate all",
+                            id="pricer-calculate-all",
+                            className="custom-export-btn pricer-calculate-button",
+                        ),
+                        html.Button(
+                            "Add structure",
+                            id="pricer-add-structure",
+                            className="custom-export-btn pricer-secondary-button",
+                        ),
+                    ],
+                    className="pricer-workspace-actions",
+                ),
+            ],
+            className="pricer-workspace-toolbar",
+        ),
+        html.Div(
+            [
+                _build_structure_panel(
+                    _INITIAL_WORKSPACE["structures"][0], can_remove=False
+                )
+            ],
+            id="pricer-structures-container",
+            className="pricer-structure-list",
+        ),
         html.Section(
             [
                 _build_pricer_section_header(
-                    "Structure configuration",
-                    heading_level=1,
+                    "Contract vols vs volatility surface"
                 ),
                 html.Div(
-                    [
-                        html.Div(
-                            [
-                                html.Div(
-                                    [
-                                        html.Div(
-                                            [
-                                                _build_structure_type_field(),
-                                                _build_asset_field(),
-                                                _build_pricing_model_field(),
-                                                _build_pricer_field(
-                                                    "Valuation date",
-                                                    _build_pricer_date_picker(
-                                                        "pricer-valuation-date",
-                                                        date.today().isoformat(),
-                                                        allow_past=True,
-                                                        persistence_key=(
-                                                            "pricer-valuation-date-v1"
-                                                        ),
-                                                    ),
-                                                ),
-                                                html.Div(
-                                                    id="pricer-shared-context",
-                                                ),
-                                            ],
-                                            className=(
-                                                "pricer-context-with-valuation"
-                                            ),
-                                        ),
-                                    ],
-                                    className="pricer-setup-panel pricer-market-panel",
-                                ),
-                                html.Div(
-                                    [
-                                        html.Div(
-                                            [
-                                                _build_pricer_field(
-                                                    "Contract multiplier",
-                                                    _build_pricer_number_input(
-                                                        "pricer-contract-multiplier",
-                                                        1,
-                                                        minimum=0,
-                                                        step=0.01,
-                                                        persistence_key=(
-                                                            "pricer-contract-"
-                                                            "multiplier-aligned-v2"
-                                                        ),
-                                                    ),
-                                                ),
-                                            ],
-                                            className="pricer-sizing-grid",
-                                        ),
-                                    ],
-                                    className="pricer-setup-panel pricer-sizing-panel",
-                                ),
-                            ],
-                            className="pricer-market-sizing-layout",
-                        ),
-                        html.Div(
-                            [
-                                html.Div(
-                                    [
-                                        html.H3(
-                                            "Option legs",
-                                            className="pricer-subsection-title",
-                                        ),
-                                        html.Div(
-                                            [
-                                                html.Button(
-                                                    "Add leg",
-                                                    id="pricer-add-leg",
-                                                    className=(
-                                                        "custom-export-btn "
-                                                        "pricer-secondary-button"
-                                                    ),
-                                                ),
-                                                html.Button(
-                                                    "Duplicate selected",
-                                                    id="pricer-duplicate-leg",
-                                                    className=(
-                                                        "custom-export-btn "
-                                                        "pricer-secondary-button"
-                                                    ),
-                                                ),
-                                                html.Button(
-                                                    "Remove selected",
-                                                    id="pricer-remove-leg",
-                                                    className="pricer-remove-button",
-                                                ),
-                                            ],
-                                            className="pricer-leg-edit-actions",
-                                        ),
-                                        html.Div(
-                                            id="pricer-leg-action-status",
-                                            className="pricer-action-status",
-                                            role="status",
-                                        ),
-                                    ],
-                                    className="pricer-leg-heading",
-                                ),
-                                html.Div(
-                                    [
-                                        html.Div(
-                                            id="pricer-calculation-status",
-                                            className="pricer-calculation-status",
-                                        ),
-                                        html.Button(
-                                            "Calculate structure",
-                                            id="calculate-button",
-                                            className=(
-                                                "custom-export-btn "
-                                                "pricer-calculate-button"
-                                            ),
-                                        ),
-                                    ],
-                                    className="pricer-leg-actions",
-                                ),
-                            ],
-                            className="pricer-leg-toolbar",
-                        ),
-                        _build_legs_grid(),
-                    ],
-                    className="pricer-section-body pricer-config-body",
+                    _build_pricer_message(
+                        "Calculate a structure to compare its contract vols with the surface."
+                    ),
+                    id="pricer-surface-comparison-grid",
+                    className="pricer-surface-comparison-grid",
                 ),
             ],
-            className="pricer-section pricer-config-section",
+            className="pricer-section pricer-surface-comparison-section",
         ),
         html.Section(
             [
-                _build_pricer_section_header("Pricing output"),
-                html.Div(
-                    [
-                        html.Div(
-                            id="pricer-warning-container",
-                            className="pricer-warning-container",
-                        ),
-                        html.Div(
-                            [
-                                html.Div(
-                                    id="model-inputs-used-container",
-                                    className="pricer-model-inputs-used-container",
+                _build_pricer_section_header(
+                    "Detailed analysis",
+                    actions=[
+                        _build_pricer_field(
+                            "Structure",
+                            dcc.Dropdown(
+                                id="pricer-analysis-structure-select",
+                                options=[
+                                    {
+                                        "label": "S1",
+                                        "value": DEFAULT_STRUCTURE_ID,
+                                    }
+                                ],
+                                value=DEFAULT_STRUCTURE_ID,
+                                clearable=False,
+                                className=(
+                                    "pricer-filter-dropdown "
+                                    "pricer-analysis-selector"
                                 ),
-                                html.Div(
-                                    id="results-container",
-                                    className="pricer-summary-grid",
-                                ),
-                                html.Div(
-                                    id="time-info",
-                                    className="pricer-time-info",
-                                ),
-                            ],
-                            className="pricer-output-overview",
-                        ),
-                        html.Section(
-                            [
-                                html.Div(
-                                    id="pricer-unit-results-container",
-                                ),
-                            ],
-                            className="pricer-output-panel",
-                        ),
-                        html.Div(
-                            id="greeks-container",
-                            className="pricer-compatibility-output",
-                        ),
+                            ),
+                            class_name="pricer-analysis-selector-field",
+                        )
                     ],
-                    className="pricer-section-body pricer-output-body-structure",
                 ),
-            ],
-            className="pricer-section pricer-output-section",
-        ),
-        html.Section(
-            [
-                _build_pricer_section_header("Payoff analysis"),
                 html.Div(
                     [
                         html.Div(
@@ -1218,29 +3768,18 @@ layout = html.Main(
                         _build_pricer_chart_card(
                             "payoff-chart",
                             "Total structure payoff and value",
-                            "Calculate the structure to see its payoff.",
+                            "Calculate the selected structure to see its payoff.",
                             class_name="pricer-wide-chart",
                         ),
-                    ],
-                    className="pricer-section-body pricer-payoff-body",
-                ),
-            ],
-            className="pricer-section pricer-payoff-section",
-        ),
-        html.Section(
-            [
-                _build_pricer_section_header("Structure sensitivities"),
-                html.Div(
-                    [
                         _build_pricer_chart_card(
                             "volatility-chart",
                             "Parallel volatility shift",
-                            "Calculate the structure to see volatility sensitivity.",
+                            "Calculate the selected structure to see volatility sensitivity.",
                         ),
                         _build_pricer_chart_card(
                             "rate-chart",
                             "Risk-free rate sensitivity",
-                            "Calculate the structure to see rate sensitivity.",
+                            "Calculate the selected structure to see rate sensitivity.",
                         ),
                         _build_pricer_chart_card(
                             "correlation-chart",
@@ -1250,50 +3789,740 @@ layout = html.Main(
                         _build_pricer_chart_card(
                             "extension-chart",
                             "Expiration extension",
-                            "Calculate the structure to see expiration sensitivity.",
+                            "Calculate the selected structure to see expiration sensitivity.",
                         ),
                         _build_pricer_chart_card(
                             "time-chart",
                             "Time decay",
-                            "Calculate the structure to see time decay.",
+                            "Calculate the selected structure to see time decay.",
                             class_name="pricer-wide-chart",
                         ),
                     ],
-                    className="pricer-section-body pricer-chart-grid",
+                    className=(
+                        "pricer-section-body pricer-chart-grid "
+                        "pricer-detailed-analysis-body"
+                    ),
                 ),
             ],
-            className="pricer-section pricer-sensitivity-section",
+            className="pricer-section pricer-detailed-analysis-section",
         ),
     ],
     className="options-dashboard-container pricer-page",
 )
 
 
-def update_parameters(option_type):
-    """Compatibility helper retained for direct tests and older callers."""
-    return _build_context_form(option_type if option_type in MODEL_LABELS else "black76")
+def _state_for_structure(values, ids, structure_id, default=None):
+    for value, component_id in zip(values or [], ids or []):
+        if (
+            isinstance(component_id, dict)
+            and component_id.get("structure_id") == structure_id
+        ):
+            return value
+    return default
+
+
+def _capture_structure_template(
+    structure_id,
+    asset_values,
+    asset_ids,
+    model_values,
+    model_ids,
+    multiplier_values,
+    multiplier_ids,
+    valuation_values,
+    valuation_ids,
+    row_values,
+    row_ids,
+    draft_values,
+    draft_ids,
+    param_values,
+    param_ids,
+    date_values,
+    date_ids,
+):
+    model = _state_for_structure(
+        model_values, model_ids, structure_id, "black76"
+    )
+    context = _context_from_states(
+        model,
+        [
+            value
+            for value, component_id in zip(param_values or [], param_ids or [])
+            if isinstance(component_id, dict)
+            and component_id.get("structure_id") == structure_id
+        ],
+        [
+            component_id
+            for component_id in param_ids or []
+            if isinstance(component_id, dict)
+            and component_id.get("structure_id") == structure_id
+        ],
+        [
+            value
+            for value, component_id in zip(date_values or [], date_ids or [])
+            if isinstance(component_id, dict)
+            and component_id.get("structure_id") == structure_id
+        ],
+        [
+            component_id
+            for component_id in date_ids or []
+            if isinstance(component_id, dict)
+            and component_id.get("structure_id") == structure_id
+        ],
+    )
+    draft = _state_for_structure(draft_values, draft_ids, structure_id, {}) or {}
+    rows = _state_for_structure(row_values, row_ids, structure_id, []) or []
+    return {
+        "asset": _state_for_structure(
+            asset_values, asset_ids, structure_id, DEFAULT_ASSET
+        ),
+        "model": model,
+        "contract_multiplier": _state_for_structure(
+            multiplier_values, multiplier_ids, structure_id, 1
+        ),
+        "valuation_date": _state_for_structure(
+            valuation_values,
+            valuation_ids,
+            structure_id,
+            date.today().isoformat(),
+        ),
+        "context": context,
+        "legs": copy.deepcopy(rows),
+        "next_leg_sequence": draft.get("next_leg_sequence", len(rows) + 1),
+    }
 
 
 @callback(
     [
-        Output("pricer-shared-context", "children"),
-        Output("pricer-legs-grid", "columnDefs"),
-        Output("pricer-legs-grid", "rowData"),
-        Output("pricer-legs-grid", "selectedRows"),
-        Output("pricer-draft-store", "data"),
-        Output("pricer-leg-action-status", "children"),
+        Output("pricer-workspace-store", "data"),
+        Output("pricer-structures-container", "children"),
+        Output("pricer-workspace-ready-store", "data"),
     ],
     [
-        Input("option-type", "value"),
-        Input("pricer-add-leg", "n_clicks"),
-        Input("pricer-duplicate-leg", "n_clicks"),
-        Input("pricer-remove-leg", "n_clicks"),
-        Input("pricer-legs-grid", "cellValueChanged"),
+        Input("pricer-workspace-hydration", "n_intervals"),
+        Input("pricer-add-structure", "n_clicks"),
+        Input(
+            {"type": "pricer-duplicate-structure", "structure_id": ALL},
+            "n_clicks",
+        ),
+        Input(
+            {"type": "pricer-remove-structure", "structure_id": ALL},
+            "n_clicks",
+        ),
+        Input("pricer-draft-autosave-trigger", "data"),
     ],
     [
-        State("pricer-legs-grid", "rowData"),
-        State("pricer-legs-grid", "selectedRows"),
-        State("pricer-draft-store", "data"),
+        State("pricer-workspace-store", "data"),
+        State({"type": "pricer-asset", "structure_id": ALL}, "value"),
+        State({"type": "pricer-asset", "structure_id": ALL}, "id"),
+        State({"type": "pricer-option-type", "structure_id": ALL}, "value"),
+        State({"type": "pricer-option-type", "structure_id": ALL}, "id"),
+        State(
+            {"type": "pricer-contract-multiplier", "structure_id": ALL},
+            "value",
+        ),
+        State(
+            {"type": "pricer-contract-multiplier", "structure_id": ALL}, "id"
+        ),
+        State(
+            {"type": "pricer-valuation-date", "structure_id": ALL}, "date"
+        ),
+        State({"type": "pricer-valuation-date", "structure_id": ALL}, "id"),
+        State({"type": "pricer-legs-grid", "structure_id": ALL}, "rowData"),
+        State({"type": "pricer-legs-grid", "structure_id": ALL}, "id"),
+        State({"type": "pricer-draft-store", "structure_id": ALL}, "data"),
+        State({"type": "pricer-draft-store", "structure_id": ALL}, "id"),
+        State(
+            {
+                "type": "pricer-context-param",
+                "structure_id": ALL,
+                "model": ALL,
+                "param": ALL,
+            },
+            "value",
+        ),
+        State(
+            {
+                "type": "pricer-context-param",
+                "structure_id": ALL,
+                "model": ALL,
+                "param": ALL,
+            },
+            "id",
+        ),
+        State(
+            {
+                "type": "pricer-context-date",
+                "structure_id": ALL,
+                "model": ALL,
+                "param": ALL,
+            },
+            "date",
+        ),
+        State(
+            {
+                "type": "pricer-context-date",
+                "structure_id": ALL,
+                "model": ALL,
+                "param": ALL,
+            },
+            "id",
+        ),
+        State("pricer-calculations-session-store", "data"),
+        State("pricer-workspace-ready-store", "data"),
+        State("pricer-calculate-all", "n_clicks"),
+        State("url", "pathname"),
+        State("pricer-global-valuation-date", "date"),
+    ],
+)
+def manage_pricer_workspace(
+    _hydration,
+    _add_clicks,
+    _duplicate_clicks,
+    _remove_clicks,
+    _autosave_tick,
+    workspace,
+    asset_values,
+    asset_ids,
+    model_values,
+    model_ids,
+    multiplier_values,
+    multiplier_ids,
+    valuation_values,
+    valuation_ids,
+    row_values,
+    row_ids,
+    draft_values,
+    draft_ids,
+    param_values,
+    param_ids,
+    date_values,
+    date_ids,
+    persisted_calculations,
+    workspace_ready,
+    calculate_all_clicks=None,
+    pathname=None,
+    global_valuation_date=None,
+):
+    workspace = _normalize_workspace(workspace)
+    signed_lots = pathname == "/pricer"
+    use_published_surface = pathname == "/pricer"
+    workflow = "otc" if pathname == "/pricer" else "legacy"
+    valuation_date_override = (
+        parse_date(global_valuation_date, date.today()).isoformat()
+        if pathname == "/pricer"
+        else None
+    )
+    persisted_calculations = (
+        persisted_calculations if isinstance(persisted_calculations, dict) else {}
+    )
+    triggered = _get_pricer_triggered_id()
+    if not isinstance(triggered, dict):
+        if triggered == "pricer-draft-autosave-trigger":
+            if not workspace_ready:
+                return no_update, no_update, no_update
+            updated = copy.deepcopy(workspace)
+            drafts = copy.deepcopy(workspace["drafts"])
+            for structure in workspace["structures"]:
+                structure_id = structure["structure_id"]
+                if _state_for_structure(
+                    model_values, model_ids, structure_id, None
+                ) is None:
+                    continue
+                drafts[structure_id] = _capture_structure_template(
+                    structure_id,
+                    asset_values,
+                    asset_ids,
+                    model_values,
+                    model_ids,
+                    multiplier_values,
+                    multiplier_ids,
+                    valuation_values,
+                    valuation_ids,
+                    row_values,
+                    row_ids,
+                    draft_values,
+                    draft_ids,
+                    param_values,
+                    param_ids,
+                    date_values,
+                    date_ids,
+                )
+            if drafts == workspace["drafts"]:
+                return no_update, no_update, no_update
+            updated["drafts"] = drafts
+            return updated, no_update, no_update
+        if triggered == "pricer-add-structure":
+            updated = _reduce_workspace(workspace, "add")
+            patch = Patch()
+            patch.append(
+                _build_structure_panel(
+                    updated["structures"][-1],
+                    calculate_all_baseline=calculate_all_clicks,
+                    signed_lots=signed_lots,
+                    use_published_surface=use_published_surface,
+                    valuation_date_override=valuation_date_override,
+                    workflow=workflow,
+                    heading_level=3 if pathname == "/pricer" else 2,
+                )
+            )
+            return updated, patch, no_update
+        panels = [
+            _build_structure_panel(
+                {
+                    **structure,
+                    "template": workspace["drafts"].get(
+                        structure["structure_id"], structure.get("template")
+                    ),
+                },
+                can_remove=len(workspace["structures"]) > 1,
+                calculation_snapshot=persisted_calculations.get(
+                    structure["structure_id"]
+                ),
+                calculate_all_baseline=calculate_all_clicks,
+                signed_lots=signed_lots,
+                use_published_surface=use_published_surface,
+                valuation_date_override=valuation_date_override,
+                workflow=workflow,
+                heading_level=3 if pathname == "/pricer" else 2,
+            )
+            for structure in workspace["structures"]
+        ]
+        return workspace, panels, True
+    action_type = triggered.get("type")
+    structure_id = triggered.get("structure_id")
+    if str(structure_id or "").startswith("exchange-") and action_type in {
+        "pricer-duplicate-structure",
+        "pricer-remove-structure",
+    }:
+        return no_update, no_update, no_update
+    try:
+        triggered_clicks = ctx.triggered[0].get("value")
+    except Exception:
+        triggered_clicks = None
+    if action_type in {
+        "pricer-duplicate-structure",
+        "pricer-remove-structure",
+    } and not triggered_clicks:
+        return no_update, no_update, no_update
+    if action_type == "pricer-duplicate-structure":
+        template = _capture_structure_template(
+            structure_id,
+            asset_values,
+            asset_ids,
+            model_values,
+            model_ids,
+            multiplier_values,
+            multiplier_ids,
+            valuation_values,
+            valuation_ids,
+            row_values,
+            row_ids,
+            draft_values,
+            draft_ids,
+            param_values,
+            param_ids,
+            date_values,
+            date_ids,
+        )
+        updated = _reduce_workspace(workspace, "duplicate", structure_id, template)
+        patch = Patch()
+        patch.append(
+            _build_structure_panel(
+                updated["structures"][-1],
+                calculate_all_baseline=calculate_all_clicks,
+                signed_lots=signed_lots,
+                use_published_surface=use_published_surface,
+                valuation_date_override=valuation_date_override,
+                workflow=workflow,
+                heading_level=3 if pathname == "/pricer" else 2,
+            )
+        )
+        return updated, patch, no_update
+    if action_type == "pricer-remove-structure" and len(workspace["structures"]) > 1:
+        remove_index = next(
+            (
+                index
+                for index, structure in enumerate(workspace["structures"])
+                if structure["structure_id"] == structure_id
+            ),
+            None,
+        )
+        if remove_index is None:
+            return no_update, no_update, no_update
+        updated = _reduce_workspace(workspace, "remove", structure_id)
+        patch = Patch()
+        del patch[remove_index]
+        return updated, patch, no_update
+    return no_update, no_update, no_update
+
+
+@callback(
+    Output(
+        {"type": "pricer-valuation-date", "structure_id": ALL},
+        "date",
+    ),
+    [
+        Input("pricer-global-valuation-date", "date"),
+        Input("url", "pathname"),
+    ],
+    State(
+        {"type": "pricer-valuation-date", "structure_id": ALL},
+        "id",
+    ),
+    prevent_initial_call=True,
+)
+def sync_pricer_global_valuation_date(
+    global_valuation_date,
+    pathname,
+    valuation_ids,
+):
+    if pathname != "/pricer":
+        return [no_update for _component_id in (valuation_ids or [])]
+    resolved_date = parse_date(
+        global_valuation_date,
+        date.today(),
+    ).isoformat()
+    return [resolved_date for _component_id in (valuation_ids or [])]
+
+
+@callback(
+    Output("pricer-draft-autosave-trigger", "data"),
+    [
+        Input({"type": "pricer-asset", "structure_id": ALL}, "value"),
+        Input({"type": "pricer-option-type", "structure_id": ALL}, "value"),
+        Input(
+            {"type": "pricer-contract-multiplier", "structure_id": ALL},
+            "value",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": ALL}, "date"
+        ),
+        Input({"type": "pricer-legs-grid", "structure_id": ALL}, "rowData"),
+        Input({"type": "pricer-draft-store", "structure_id": ALL}, "data"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": ALL,
+                "model": ALL,
+                "param": ALL,
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-date",
+                "structure_id": ALL,
+                "model": ALL,
+                "param": ALL,
+            },
+            "date",
+        ),
+    ],
+    State("pricer-draft-autosave-trigger", "data"),
+    prevent_initial_call=True,
+)
+def signal_pricer_draft_autosave(*values_and_current_tick):
+    current_tick = values_and_current_tick[-1] if values_and_current_tick else 0
+    return int(current_tick or 0) + 1
+
+
+@callback(
+    Output(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": ALL,
+            "param": "premium_convention",
+        },
+        "value",
+    ),
+    Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+    State({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+    prevent_initial_call=True,
+)
+def select_asset_default_premium_convention(asset, model):
+    try:
+        selected = default_premium_convention(asset, model)
+    except StructureValidationError:
+        return no_update
+    return [selected]
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-price-unit", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-price-unit", "structure_id": MATCH},
+            "title",
+        ),
+    ],
+    Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+)
+def display_asset_price_unit(asset):
+    try:
+        spec = asset_price_spec(asset)
+        return spec["price_unit_label"], spec["description"]
+    except StructureValidationError:
+        return "—", "Price currency and unit are unavailable."
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-contract-multiplier", "structure_id": MATCH},
+            "value",
+        ),
+        Output(
+            {"type": "pricer-contract-size-default", "structure_id": MATCH},
+            "data",
+        ),
+    ],
+    [
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "date",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
+            "date",
+        ),
+    ],
+    [
+        State(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "id",
+        ),
+        State(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "id",
+        ),
+        State(
+            {"type": "pricer-contract-multiplier", "structure_id": MATCH},
+            "value",
+        ),
+        State(
+            {"type": "pricer-contract-size-default", "structure_id": MATCH},
+            "data",
+        ),
+    ],
+    prevent_initial_call=True,
+)
+def sync_exchange_contract_size(
+    asset,
+    model,
+    param_values,
+    date_values,
+    valuation_date_value,
+    param_ids,
+    date_ids,
+    current_contract_size,
+    previous_default_state,
+):
+    if model not in MODEL_LABELS:
+        return no_update, no_update
+    context = _context_from_states(
+        model,
+        param_values,
+        param_ids,
+        date_values,
+        date_ids,
+    )
+    try:
+        exchange_default = _resolved_contract_size_default(
+            asset,
+            model,
+            context,
+            valuation_date_value,
+        )
+    except StructureValidationError:
+        return no_update, no_update
+
+    previous_default_state = (
+        previous_default_state if isinstance(previous_default_state, dict) else {}
+    )
+    previous_default = _coerce_pricer_float(
+        previous_default_state.get("value")
+    )
+    current_size = _coerce_pricer_float(current_contract_size)
+    triggered = _get_pricer_triggered_id()
+    asset_triggered = (
+        isinstance(triggered, dict)
+        and triggered.get("type") == "pricer-asset"
+    )
+    uses_previous_default = (
+        current_size is not None
+        and previous_default is not None
+        and math.isclose(
+            current_size,
+            previous_default,
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+    )
+    should_apply_default = (
+        asset_triggered
+        or previous_default_state.get("asset") != asset
+        or current_size is None
+        or previous_default is None
+        or uses_previous_default
+    )
+    value_update = (
+        exchange_default
+        if should_apply_default
+        and not (
+            current_size is not None
+            and math.isclose(
+                current_size,
+                exchange_default,
+                rel_tol=1e-12,
+                abs_tol=1e-9,
+            )
+        )
+        else no_update
+    )
+    return value_update, {"asset": asset, "value": exchange_default}
+
+
+@callback(
+    [
+        Output(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": MATCH,
+                "param": "rate",
+            },
+            "value",
+        ),
+        Output(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": MATCH,
+                "param": "rate",
+            },
+            "disabled",
+        ),
+    ],
+    Input(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": MATCH,
+            "param": "premium_convention",
+        },
+        "value",
+    ),
+)
+def sync_risk_free_rate_control(premium_convention):
+    """Keep the visible rate consistent with the selected premium convention."""
+    if premium_convention == "futures_style":
+        return 0.0, True
+    if premium_convention == "upfront":
+        return no_update, False
+    return no_update, no_update
+
+
+@callback(
+    Output(
+        {"type": "pricer-option-type", "structure_id": MATCH},
+        "value",
+    ),
+    Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+    prevent_initial_call=True,
+)
+def select_asset_default_model(asset):
+    """JKM opens on its primary exchange APO; Black-76 remains an explicit choice."""
+    if asset != "JKM":
+        return no_update
+    try:
+        return default_model_for_asset(asset)
+    except StructureValidationError:
+        return no_update
+
+
+def update_parameters(option_type, structure_id=DEFAULT_STRUCTURE_ID):
+    """Compatibility helper retained for direct tests and older callers."""
+    return _build_context_form(
+        option_type if option_type in MODEL_LABELS else "black76",
+        structure_id,
+    )
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-shared-context", "structure_id": MATCH},
+            "children",
+        ),
+        Output({"type": "pricer-legs-grid", "structure_id": MATCH}, "columnDefs"),
+        Output({"type": "pricer-legs-grid", "structure_id": MATCH}, "rowData"),
+        Output({"type": "pricer-legs-grid", "structure_id": MATCH}, "selectedRows"),
+        Output({"type": "pricer-draft-store", "structure_id": MATCH}, "data"),
+        Output(
+            {"type": "pricer-leg-action-status", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-header-context", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-legs-grid", "structure_id": MATCH},
+            "resetColumnState",
+        ),
+    ],
+    [
+        Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-add-leg", "structure_id": MATCH}, "n_clicks"),
+        Input(
+            {"type": "pricer-duplicate-leg", "structure_id": MATCH}, "n_clicks"
+        ),
+        Input({"type": "pricer-remove-leg", "structure_id": MATCH}, "n_clicks"),
+        Input(
+            {"type": "pricer-legs-grid", "structure_id": MATCH},
+            "cellValueChanged",
+        ),
+    ],
+    [
+        State({"type": "pricer-legs-grid", "structure_id": MATCH}, "rowData"),
+        State(
+            {"type": "pricer-legs-grid", "structure_id": MATCH}, "selectedRows"
+        ),
+        State({"type": "pricer-draft-store", "structure_id": MATCH}, "data"),
+        State({"type": "pricer-option-type", "structure_id": MATCH}, "id"),
+        State({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        State("url", "pathname"),
     ],
 )
 def manage_structure_legs(
@@ -1305,42 +4534,147 @@ def manage_structure_legs(
     rows,
     selected_rows,
     draft,
+    model_component_id=None,
+    asset=DEFAULT_ASSET,
+    pathname=None,
 ):
     triggered = _get_pricer_triggered_id()
-    rows = [dict(row) for row in (rows or [])]
-    draft = dict(draft or {})
-    if triggered in (None, "option-type"):
+    triggered_is_pattern = isinstance(triggered, dict)
+    triggered_type = triggered.get("type") if isinstance(triggered, dict) else triggered
+    triggered_type = {
+        "option-type": "pricer-option-type",
+        "pricer-legs-grid": "pricer-legs-grid",
+    }.get(triggered_type, triggered_type)
+    structure_id = (
+        model_component_id.get("structure_id")
+        if isinstance(model_component_id, dict)
+        else DEFAULT_STRUCTURE_ID
+    )
+    signed_lots = pathname == "/pricer"
+    use_published_surface = pathname == "/pricer"
+    rows_were_invalid = rows is not None and not isinstance(rows, list)
+    legacy_rows = _quote_ready_rows(model, rows)
+    row_builder = (
+        _rows_with_volatility_adjustments
+        if use_published_surface
+        else _quote_ready_rows
+    )
+    rows = row_builder(model, rows, signed_lots=signed_lots)
+    lot_mode_changed = rows != legacy_rows
+    draft = dict(draft) if isinstance(draft, dict) else {}
+    if (
+        (
+            triggered_type is None
+            or (triggered_is_pattern and triggered_type == "pricer-option-type")
+        )
+        and draft.get("model") == model
+        and isinstance(draft.get("legs"), list)
+        and draft.get("legs")
+        and not rows_were_invalid
+        and not lot_mode_changed
+    ):
+        return (no_update,) * 8
+    if triggered_type in (None, "pricer-option-type"):
         if draft.get("model") == model and draft.get("legs"):
-            rows = [dict(row) for row in draft["legs"]]
-            next_sequence = int(draft.get("next_leg_sequence") or len(rows) + 1)
+            saved_rows = row_builder(
+                model,
+                draft["legs"],
+                signed_lots=signed_lots,
+            )
+            if saved_rows:
+                rows = saved_rows
+                try:
+                    next_sequence = max(
+                        int(draft.get("next_leg_sequence") or len(rows) + 1),
+                        len(rows) + 1,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    next_sequence = len(rows) + 1
+            else:
+                rows = [
+                    _default_leg_for_lot_mode(
+                        model,
+                        1,
+                        signed_lots=signed_lots,
+                        use_published_surface=use_published_surface,
+                    )
+                ]
+                next_sequence = 2
         else:
-            rows = [default_leg(model, 1)]
+            rows = [
+                _default_leg_for_lot_mode(
+                    model,
+                    1,
+                    signed_lots=signed_lots,
+                    use_published_surface=use_published_surface,
+                )
+            ]
             next_sequence = 2
         new_draft = {
             "schema_version": 1,
             "model": model,
+            "context": (
+                copy.deepcopy(draft.get("context"))
+                if draft.get("model") == model
+                and isinstance(draft.get("context"), dict)
+                else None
+            ),
             "legs": rows,
             "next_leg_sequence": next_sequence,
         }
         return (
-            _build_context_form(model).children,
-            _leg_column_defs(model),
+            _build_context_form(
+                model,
+                structure_id,
+                new_draft.get("context"),
+                include_delivery_shape=False,
+                asset=asset,
+            ).children,
+            _leg_column_defs(
+                model,
+                signed_lots=signed_lots,
+                use_published_surface=use_published_surface,
+            ),
             rows,
             [],
             new_draft,
-            "",
+            (
+                "Invalid saved leg state was reset."
+                if rows_were_invalid
+                else ""
+            ),
+            _build_structure_header_context(
+                model,
+                structure_id,
+                new_draft.get("context"),
+                asset,
+            ),
+            True,
         )
 
-    next_sequence = int(draft.get("next_leg_sequence") or len(rows) + 1)
+    try:
+        next_sequence = max(
+            int(draft.get("next_leg_sequence") or len(rows) + 1),
+            len(rows) + 1,
+        )
+    except (TypeError, ValueError, OverflowError):
+        next_sequence = len(rows) + 1
     status = ""
-    if triggered == "pricer-add-leg":
+    if triggered_type == "pricer-add-leg":
         if len(rows) >= MAX_LEGS:
             status = f"A structure can contain at most {MAX_LEGS} legs."
         else:
-            rows.append(default_leg(model, next_sequence))
+            rows.append(
+                _default_leg_for_lot_mode(
+                    model,
+                    next_sequence,
+                    signed_lots=signed_lots,
+                    use_published_surface=use_published_surface,
+                )
+            )
             next_sequence += 1
             status = f"Added Leg {next_sequence - 1}."
-    elif triggered == "pricer-duplicate-leg":
+    elif triggered_type == "pricer-duplicate-leg":
         selected = (selected_rows or [None])[0]
         if selected is None:
             status = "Select one leg to duplicate."
@@ -1353,7 +4687,7 @@ def manage_structure_legs(
             rows.append(duplicate)
             next_sequence += 1
             status = f"Duplicated as Leg {next_sequence - 1}."
-    elif triggered == "pricer-remove-leg":
+    elif triggered_type == "pricer-remove-leg":
         selected = (selected_rows or [None])[0]
         if selected is None:
             status = "Select one leg to remove."
@@ -1363,17 +4697,245 @@ def manage_structure_legs(
             selected_id = selected.get("leg_id")
             rows = [row for row in rows if row.get("leg_id") != selected_id]
             status = f"Removed {selected.get('name') or selected_id}."
-    elif isinstance(triggered, dict) or triggered == "pricer-legs-grid":
+    elif triggered_type == "pricer-legs-grid":
         status = ""
+
+    basis_changed = False
+    if triggered_type == "pricer-legs-grid":
+        latest_event = (
+            _cell_event[-1]
+            if isinstance(_cell_event, list) and _cell_event
+            else _cell_event
+        )
+    else:
+        latest_event = None
+    if isinstance(latest_event, dict):
+        column = latest_event.get("column")
+        column_id = latest_event.get("colId") or (
+            column.get("colId") if isinstance(column, dict) else None
+        )
+        basis_changed = (
+            column_id == "quote_basis"
+            and latest_event.get("oldValue") != latest_event.get("newValue")
+        )
+        if basis_changed:
+            changed_id = (latest_event.get("data") or {}).get("leg_id")
+            for row in rows:
+                if row.get("leg_id") == changed_id:
+                    row["quote_value"] = None
+                    break
 
     new_draft = {
         "schema_version": 1,
         "model": model,
+        "context": (
+            copy.deepcopy(draft.get("context"))
+            if isinstance(draft.get("context"), dict)
+            else None
+        ),
         "legs": rows,
         "next_leg_sequence": next_sequence,
     }
-    row_output = no_update if triggered == "pricer-legs-grid" else rows
-    return no_update, no_update, row_output, [], new_draft, status
+    row_output = (
+        no_update if triggered_type == "pricer-legs-grid" and not basis_changed else rows
+    )
+    return (
+        no_update,
+        no_update,
+        row_output,
+        [],
+        new_draft,
+        status,
+        no_update,
+        no_update,
+    )
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-duplicate-leg", "structure_id": MATCH},
+            "disabled",
+        ),
+        Output(
+            {"type": "pricer-remove-leg", "structure_id": MATCH},
+            "disabled",
+        ),
+    ],
+    [
+        Input(
+            {"type": "pricer-legs-grid", "structure_id": MATCH},
+            "selectedRows",
+        ),
+        Input(
+            {"type": "pricer-legs-grid", "structure_id": MATCH},
+            "rowData",
+        ),
+    ],
+)
+def toggle_leg_action_buttons(selected_rows, rows):
+    rows = rows if isinstance(rows, list) else []
+    selected = (
+        selected_rows[0]
+        if isinstance(selected_rows, list) and selected_rows
+        else None
+    )
+    selected_id = selected.get("leg_id") if isinstance(selected, dict) else None
+    has_selection = bool(
+        selected_id
+        and any(
+            isinstance(row, dict) and row.get("leg_id") == selected_id
+            for row in rows
+        )
+    )
+    return not has_selection, not (has_selection and len(rows) > 1)
+
+
+@callback(
+    Output(
+        {"type": "pricer-delivery-year-field", "structure_id": MATCH},
+        "style",
+    ),
+    Input(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": ALL,
+            "param": "delivery_shape",
+        },
+        "value",
+    ),
+)
+def toggle_delivery_year_field(delivery_shape):
+    if isinstance(delivery_shape, list):
+        delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
+    return _delivery_year_field_style(delivery_shape)
+
+
+@callback(
+    Output(
+        {
+            "type": "pricer-month-only-field",
+            "structure_id": MATCH,
+            "field": ALL,
+        },
+        "style",
+    ),
+    Input(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": ALL,
+            "param": "delivery_shape",
+        },
+        "value",
+    ),
+    State(
+        {
+            "type": "pricer-month-only-field",
+            "structure_id": MATCH,
+            "field": ALL,
+        },
+        "id",
+    ),
+)
+def toggle_month_only_fields(delivery_shape, field_ids):
+    if isinstance(delivery_shape, list):
+        delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
+    style = _month_only_field_style(delivery_shape)
+    return [style.copy() for _ in (field_ids or [])]
+
+
+@callback(
+    [
+        Output(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_month",
+            },
+            "options",
+        ),
+        Output(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_month",
+            },
+            "value",
+        ),
+        Output(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_month",
+            },
+            "disabled",
+        ),
+        Output(
+            {
+                "type": "pricer-delivery-month-field",
+                "structure_id": MATCH,
+            },
+            "style",
+        ),
+    ],
+    [
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_shape",
+            },
+            "value",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
+            "date",
+        ),
+    ],
+    State(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": ALL,
+            "param": "delivery_month",
+        },
+        "value",
+    ),
+)
+def sync_delivery_month_control(
+    asset,
+    model,
+    delivery_shape,
+    valuation_date_value,
+    current_delivery_month,
+):
+    if isinstance(delivery_shape, list):
+        delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
+    if isinstance(current_delivery_month, list):
+        current_delivery_month = (
+            current_delivery_month[0] if current_delivery_month else None
+        )
+    options = _delivery_month_options(
+        asset,
+        model,
+        parse_date(valuation_date_value, date.today())
+    )
+    selected = _resolved_delivery_month(current_delivery_month, options)
+    is_month = str(delivery_shape or "MONTH").strip().upper() == "MONTH"
+    return (
+        [options],
+        [selected],
+        [not is_month or not options],
+        {} if is_month else {"display": "none"},
+    )
 
 
 def _sync_contract_date(expiration_value, contract_value):
@@ -1387,11 +4949,106 @@ def _sync_contract_date(expiration_value, contract_value):
     return no_update, minimum
 
 
+def _governed_delivery_component(
+    asset,
+    model,
+    delivery_shape,
+    delivery_month,
+    valuation_date_value,
+):
+    if isinstance(delivery_shape, list):
+        delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
+    if (
+        str(delivery_shape or "MONTH").strip().upper() != "MONTH"
+        or not delivery_month
+    ):
+        return None
+    return build_delivery_month_component(
+        asset,
+        model,
+        delivery_month,
+        parse_date(valuation_date_value, date.today()),
+    )
+
+
+def _exchange_expiration_should_reset():
+    triggered = _get_pricer_triggered_id()
+    if triggered is None:
+        return True
+    if not isinstance(triggered, dict):
+        return False
+    return triggered.get("type") in {
+        "pricer-asset",
+        "pricer-valuation-date",
+    } or triggered.get("param") == "delivery_month"
+
+
+def _sync_governed_month_contract_dates(
+    model,
+    expiration_value,
+    contract_value,
+    asset,
+    delivery_shape,
+    delivery_month,
+    valuation_date_value,
+):
+    try:
+        component = _governed_delivery_component(
+            asset,
+            model,
+            delivery_shape,
+            delivery_month,
+            valuation_date_value,
+        )
+    except StructureValidationError:
+        return (no_update,) * 4 + (True,)
+    if component:
+        exchange_expiration = component["contract_expiration_date"]
+        exchange_date = parse_date(exchange_expiration)
+        expiration = parse_date(expiration_value, exchange_date)
+        expiration_update = (
+            exchange_expiration
+            if _exchange_expiration_should_reset() or expiration > exchange_date
+            else no_update
+        )
+        return (
+            expiration_update,
+            exchange_expiration,
+            exchange_expiration,
+            exchange_expiration,
+            True,
+        )
+    contract_update, contract_minimum = _sync_contract_date(
+        expiration_value,
+        contract_value,
+    )
+    return no_update, None, contract_update, contract_minimum, False
+
+
 @callback(
     [
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "black76",
+                "param": "expiration_date",
+            },
+            "date",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "black76",
+                "param": "expiration_date",
+            },
+            "max_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "black76",
                 "param": "contract_expiration_date",
             },
@@ -1400,16 +5057,27 @@ def _sync_contract_date(expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "black76",
                 "param": "contract_expiration_date",
             },
             "min_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "black76",
+                "param": "contract_expiration_date",
+            },
+            "disabled",
         ),
     ],
     [
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "black76",
                 "param": "expiration_date",
             },
@@ -1418,16 +5086,55 @@ def _sync_contract_date(expiration_value, contract_value):
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "black76",
                 "param": "contract_expiration_date",
             },
+            "date",
+        ),
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_shape",
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": "black76",
+                "param": "delivery_month",
+            },
+            "value",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
             "date",
         ),
     ],
     prevent_initial_call=True,
 )
-def sync_black76_contract_expiration_date(expiration_value, contract_value):
-    return _sync_contract_date(expiration_value, contract_value)
+def sync_black76_contract_expiration_date(
+    expiration_value,
+    contract_value,
+    asset,
+    delivery_shape,
+    delivery_month,
+    valuation_date_value,
+):
+    return _sync_governed_month_contract_dates(
+        "black76",
+        expiration_value,
+        contract_value,
+        asset,
+        delivery_shape,
+        delivery_month,
+        valuation_date_value,
+    )
 
 
 @callback(
@@ -1435,6 +5142,16 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "asian76",
+                "param": "averaging_start_date",
+            },
+            "date",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "expiration_date",
             },
@@ -1443,6 +5160,7 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "expiration_date",
             },
@@ -1451,6 +5169,16 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "asian76",
+                "param": "expiration_date",
+            },
+            "max_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "averaging_start_date",
             },
@@ -1459,6 +5187,7 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "contract_expiration_date",
             },
@@ -1467,16 +5196,45 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "contract_expiration_date",
             },
             "min_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "asian76",
+                "param": "averaging_start_date",
+            },
+            "disabled",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "asian76",
+                "param": "expiration_date",
+            },
+            "disabled",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "asian76",
+                "param": "contract_expiration_date",
+            },
+            "disabled",
         ),
     ],
     [
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "averaging_start_date",
             },
@@ -1485,6 +5243,7 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "expiration_date",
             },
@@ -1493,17 +5252,116 @@ def sync_black76_contract_expiration_date(expiration_value, contract_value):
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "asian76",
                 "param": "contract_expiration_date",
             },
             "date",
         ),
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_shape",
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": "asian76",
+                "param": "delivery_month",
+            },
+            "value",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
+            "date",
+        ),
     ],
     prevent_initial_call=True,
 )
-def sync_asian76_dates(averaging_start_value, expiration_value, contract_value):
+def sync_asian76_dates(
+    averaging_start_value,
+    expiration_value,
+    contract_value,
+    asset,
+    delivery_shape,
+    delivery_month,
+    valuation_date_value,
+):
+    if isinstance(delivery_shape, list):
+        delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
+    try:
+        component = _governed_delivery_component(
+            asset,
+            "asian76",
+            delivery_shape,
+            delivery_month,
+            valuation_date_value,
+        )
+    except StructureValidationError:
+        return (no_update,) * 7 + (False, False, True)
+    if component and asset == "JKM":
+        averaging_start = component["averaging_start_date"]
+        averaging_end = component["averaging_end_date"]
+        contract_expiration = component["contract_expiration_date"]
+        return (
+            averaging_start,
+            averaging_end,
+            averaging_start,
+            averaging_end,
+            averaging_end,
+            contract_expiration,
+            averaging_end,
+            True,
+            True,
+            True,
+        )
+    if component:
+        exchange_expiration = component["contract_expiration_date"]
+        exchange_date = parse_date(exchange_expiration)
+        averaging_start = parse_date(averaging_start_value, exchange_date)
+        averaging_start_update = (
+            exchange_expiration if averaging_start > exchange_date else no_update
+        )
+        effective_start = min(averaging_start, exchange_date)
+        expiration = parse_date(expiration_value, exchange_date)
+        corrected_expiration = min(
+            exchange_date,
+            max(effective_start, expiration),
+        )
+        expiration_update = (
+            exchange_expiration
+            if _exchange_expiration_should_reset()
+            else (
+                corrected_expiration.isoformat()
+                if corrected_expiration != expiration
+                else no_update
+            )
+        )
+        expiration_for_limits = (
+            exchange_date
+            if expiration_update == exchange_expiration
+            else corrected_expiration
+        )
+        return (
+            averaging_start_update,
+            expiration_update,
+            effective_start.isoformat(),
+            exchange_expiration,
+            expiration_for_limits.isoformat(),
+            exchange_expiration,
+            expiration_for_limits.isoformat(),
+            False,
+            False,
+            True,
+        )
     if not averaging_start_value or not expiration_value:
-        return no_update, no_update, no_update, no_update, no_update
+        return (no_update,) * 7 + (False, False, False)
     averaging_start = parse_date(averaging_start_value)
     expiration = parse_date(expiration_value, averaging_start)
     corrected_expiration = max(averaging_start, expiration)
@@ -1519,11 +5377,16 @@ def sync_asian76_dates(averaging_start_value, expiration_value, contract_value):
         else no_update
     )
     return (
+        no_update,
         expiration_update,
         averaging_start.isoformat(),
+        None,
         corrected_expiration.isoformat(),
         contract_update,
         corrected_expiration.isoformat(),
+        False,
+        False,
+        False,
     )
 
 
@@ -1532,6 +5395,25 @@ def sync_asian76_dates(averaging_start_value, expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "kirk",
+                "param": "expiration_date",
+            },
+            "date",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "kirk",
+                "param": "expiration_date",
+            },
+            "max_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "kirk",
                 "param": "contract_expiration_date",
             },
@@ -1540,16 +5422,27 @@ def sync_asian76_dates(averaging_start_value, expiration_value, contract_value):
         Output(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "kirk",
                 "param": "contract_expiration_date",
             },
             "min_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "kirk",
+                "param": "contract_expiration_date",
+            },
+            "disabled",
         ),
     ],
     [
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "kirk",
                 "param": "expiration_date",
             },
@@ -1558,16 +5451,55 @@ def sync_asian76_dates(averaging_start_value, expiration_value, contract_value):
         Input(
             {
                 "type": "pricer-context-date",
+                "structure_id": MATCH,
                 "model": "kirk",
                 "param": "contract_expiration_date",
             },
             "date",
         ),
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_shape",
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": "kirk",
+                "param": "delivery_month",
+            },
+            "value",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
+            "date",
+        ),
     ],
     prevent_initial_call=True,
 )
-def sync_kirk_contract_expiration_date(expiration_value, contract_value):
-    return _sync_contract_date(expiration_value, contract_value)
+def sync_kirk_contract_expiration_date(
+    expiration_value,
+    contract_value,
+    asset,
+    delivery_shape,
+    delivery_month,
+    valuation_date_value,
+):
+    return _sync_governed_month_contract_dates(
+        "kirk",
+        expiration_value,
+        contract_value,
+        asset,
+        delivery_shape,
+        delivery_month,
+        valuation_date_value,
+    )
 
 
 def _context_from_states(model, param_values, param_ids, date_values, date_ids):
@@ -1587,44 +5519,386 @@ def _context_from_states(model, param_values, param_ids, date_values, date_ids):
     return context
 
 
+def _surface_reference_input_signature(
+    asset,
+    model,
+    rows,
+    context,
+    valuation_date_value,
+):
+    """Identify the exact inputs used to resolve each published-surface vol."""
+    return {
+        "asset": str(asset or ""),
+        "model": model,
+        "valuation_date": parse_date(
+            valuation_date_value,
+            date.today(),
+        ).isoformat(),
+        "context": _normalized_signature_context(context),
+        "legs": [
+            {
+                "leg_id": str(row.get("leg_id") or ""),
+                "call_put": copy.deepcopy(row.get("call_put")),
+                "strike": copy.deepcopy(row.get("strike")),
+            }
+            for row in rows or []
+            if isinstance(row, dict)
+        ],
+    }
+
+
 @callback(
+    Output(
+        {
+            "type": "pricer-published-surface-reference",
+            "structure_id": MATCH,
+        },
+        "data",
+    ),
     [
-        Output("pricer-calculation-store", "data"),
-        Output("pricer-calculation-status", "children"),
-    ],
-    [
-        Input("calculate-button", "n_clicks"),
-        Input("pricer-structure-type", "value"),
-        Input("pricer-asset", "value"),
-        Input("option-type", "value"),
-        Input("pricer-contract-multiplier", "value"),
-        Input("pricer-legs-grid", "rowData"),
+        Input("refresh-options-data", "n_clicks"),
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-legs-grid", "structure_id": MATCH}, "rowData"),
         Input(
-            {"type": "pricer-context-param", "model": ALL, "param": ALL},
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
             "value",
         ),
         Input(
-            {"type": "pricer-context-date", "model": ALL, "param": ALL},
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
             "date",
         ),
-        Input("pricer-valuation-date", "date"),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
+            "date",
+        ),
     ],
     [
         State(
-            {"type": "pricer-context-param", "model": ALL, "param": ALL},
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
             "id",
         ),
         State(
-            {"type": "pricer-context-date", "model": ALL, "param": ALL},
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
             "id",
         ),
     ],
-    prevent_initial_call=True,
-    running=[(Output("calculate-button", "disabled"), True, False)],
 )
-def calculate_structure_callback(
-    n_clicks,
-    structure_type,
+def update_published_surface_reference(
+    _refresh_clicks,
+    asset,
+    model,
+    rows,
+    param_values,
+    date_values,
+    valuation_date_value,
+    param_ids,
+    date_ids,
+):
+    context = _context_from_states(
+        model,
+        param_values,
+        param_ids,
+        date_values,
+        date_ids,
+    )
+    normalized_rows = _quote_ready_rows(model, rows)
+    payload = build_published_surface_reference(
+        asset,
+        model,
+        context,
+        normalized_rows,
+        parse_date(valuation_date_value, date.today()),
+        force_refresh=_get_pricer_triggered_id() == "refresh-options-data",
+    )
+    payload["_ui_reference_signature"] = _surface_reference_input_signature(
+        asset,
+        model,
+        normalized_rows,
+        context,
+        valuation_date_value,
+    )
+    return payload
+
+
+@callback(
+    Output(
+        {"type": "pricer-legs-grid", "structure_id": MATCH},
+        "dashGridOptions",
+    ),
+    [
+        Input(
+            {"type": "pricer-grid-pricing-options", "structure_id": MATCH},
+            "data",
+        ),
+        Input(
+            {
+                "type": "pricer-published-surface-reference",
+                "structure_id": MATCH,
+            },
+            "data",
+        ),
+    ],
+)
+def render_leg_grid_options(pricing_options, surface_reference):
+    if not isinstance(pricing_options, dict):
+        pricing_options = _leg_grid_options()
+    rendered = copy.deepcopy(pricing_options)
+    context = rendered.setdefault("context", {})
+    context.setdefault("pricingRows", {})
+    surface_rows = {}
+    if (
+        isinstance(surface_reference, dict)
+        and surface_reference.get("schema_version") == REFERENCE_SCHEMA_VERSION
+        and isinstance(surface_reference.get("rows"), dict)
+    ):
+        surface_rows = copy.deepcopy(surface_reference["rows"])
+    context["surfaceRows"] = surface_rows
+    return rendered
+
+
+def _normalized_signature_context(context):
+    normalized = {}
+    for key, value in (context or {}).items():
+        if key in {"structure_type", "asset"}:
+            continue
+        if key and key.endswith("_date") and value:
+            normalized[key] = parse_date(value).isoformat()
+        else:
+            normalized[key] = value
+    delivery_shape = str(
+        normalized.get("delivery_shape") or "MONTH"
+    ).strip().upper()
+    if delivery_shape == "MONTH":
+        normalized.pop("delivery_year", None)
+    else:
+        normalized.pop("averaging_start_date", None)
+        normalized.pop("expiration_date", None)
+        normalized.pop("contract_expiration_date", None)
+        normalized.pop("delivery_month", None)
+    return normalized
+
+
+def _published_surface_calculation_rows(
+    asset,
+    model,
+    rows,
+    surface_reference,
+    expected_reference_signature,
+):
+    """Replace legacy quote fields with governed per-leg contract vols."""
+    normalized_rows = _rows_with_volatility_adjustments(model, rows or [])
+    if model not in {"black76", "asian76"}:
+        return normalized_rows, None
+    if (
+        not isinstance(surface_reference, dict)
+        or surface_reference.get("schema_version") != REFERENCE_SCHEMA_VERSION
+    ):
+        raise StructureValidationError(
+            "Published surface volatility is not available yet. "
+            "Wait for the surface to load and calculate again."
+        )
+    if surface_reference.get("asset") != str(asset or ""):
+        raise StructureValidationError(
+            "Published surface volatility does not match the selected asset."
+        )
+    if surface_reference.get("model") != model:
+        raise StructureValidationError(
+            "Published surface volatility does not match the selected model."
+        )
+    if surface_reference.get("_ui_reference_signature") != expected_reference_signature:
+        raise StructureValidationError(
+            "Published surface volatility is still refreshing for the current inputs. "
+            "Wait for it to load and calculate again."
+        )
+    publication_fields = ("publication_id", "publication_cob", "published_at")
+    if any(surface_reference.get(field) in (None, "") for field in publication_fields):
+        raise StructureValidationError(
+            "No published surface revision is available for the selected inputs."
+        )
+    surface_rows = surface_reference.get("rows")
+    if not isinstance(surface_rows, dict):
+        raise StructureValidationError(
+            "Published surface volatility is unavailable for the option legs."
+        )
+
+    resolved_rows = []
+    surface_signature_rows = []
+    for position, row in enumerate(normalized_rows, start=1):
+        leg_id = str(row.get("leg_id") or "")
+        surface_row = surface_rows.get(leg_id)
+        if not isinstance(surface_row, dict):
+            raise StructureValidationError(
+                f"Leg {position}: published surface volatility is unavailable."
+            )
+        input_volatility = surface_row.get("surface_input_vol")
+        atm_input_volatility = surface_row.get("surface_atm_input_vol")
+        skew_input_volatility = surface_row.get("surface_skew_input_vol")
+        pricing_volatility = surface_row.get("surface_pricing_vol")
+        try:
+            input_volatility = float(input_volatility)
+            atm_input_volatility = float(atm_input_volatility)
+            skew_input_volatility = float(skew_input_volatility)
+            pricing_volatility = float(pricing_volatility)
+        except (TypeError, ValueError, OverflowError):
+            detail = surface_row.get("surface_input_tooltip")
+            raise StructureValidationError(
+                f"Leg {position}: {detail or 'published surface volatility is unavailable.'}"
+            ) from None
+        if not all(
+            math.isfinite(value) and 0.005 <= value <= 2.0
+            for value in (
+                input_volatility,
+                atm_input_volatility,
+                pricing_volatility,
+            )
+        ) or not math.isfinite(skew_input_volatility):
+            detail = surface_row.get("surface_input_tooltip")
+            raise StructureValidationError(
+                f"Leg {position}: {detail or 'published surface volatility is outside the supported range.'}"
+            )
+        if not math.isclose(
+            input_volatility,
+            atm_input_volatility + skew_input_volatility,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise StructureValidationError(
+                f"Leg {position}: published Input vol does not reconcile to ATM plus Skew."
+            )
+        adjustment_values = {}
+        for field, label in zip(
+            VOLATILITY_ADJUSTMENT_FIELDS,
+            ("ATM", "Skew", "Smile"),
+        ):
+            raw_adjustment = row.get(field)
+            if isinstance(raw_adjustment, bool):
+                raw_adjustment = None
+            try:
+                adjustment = float(raw_adjustment)
+            except (TypeError, ValueError, OverflowError):
+                raise StructureValidationError(
+                    f"Leg {position}: {label} volatility adjustment must be finite."
+                ) from None
+            if not math.isfinite(adjustment):
+                raise StructureValidationError(
+                    f"Leg {position}: {label} volatility adjustment must be finite."
+                )
+            if abs(adjustment) > MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT:
+                raise StructureValidationError(
+                    f"Leg {position}: {label} volatility adjustment is limited to "
+                    f"{MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT:.0f} vol points."
+                )
+            adjustment_values[field] = adjustment
+        total_adjustment = VOLATILITY_ADJUSTMENT_SCALE * sum(
+            adjustment_values.values()
+        )
+        effective_input_volatility = input_volatility + total_adjustment
+        effective_pricing_volatility = pricing_volatility * (
+            effective_input_volatility / input_volatility
+        )
+        if not (
+            math.isfinite(effective_input_volatility)
+            and 0.005 <= effective_input_volatility <= 2.0
+            and math.isfinite(effective_pricing_volatility)
+            and 0.005 <= effective_pricing_volatility <= 2.0
+        ):
+            raise StructureValidationError(
+                f"Leg {position}: the volatility adjustments produce an Input vol "
+                "outside the supported 0.005–2.0 range."
+            )
+        resolved = copy.deepcopy(row)
+        resolved["quote_basis"] = "VOL"
+        resolved["quote_value"] = effective_input_volatility
+        resolved.pop("volatility", None)
+        resolved_rows.append(resolved)
+        surface_signature_rows.append(
+            {
+                "leg_id": leg_id,
+                "surface_input_vol": input_volatility,
+                "surface_atm_input_vol": atm_input_volatility,
+                "surface_skew_input_vol": skew_input_volatility,
+                "surface_pricing_vol": pricing_volatility,
+                **adjustment_values,
+                "effective_input_vol": effective_input_volatility,
+                "effective_pricing_vol": effective_pricing_volatility,
+            }
+        )
+    return resolved_rows, {
+        field: str(surface_reference[field]) for field in publication_fields
+    } | {"rows": surface_signature_rows}
+
+
+def _signature_leg_rows(model, rows):
+    common_fields = (
+        "leg_id",
+        "name",
+        "side",
+        "ratio",
+        "call_put",
+        "strike",
+    )
+    model_fields = (
+        ("quote_basis", "quote_value")
+        if model in {"black76", "asian76"}
+        else ("volatility_asset_1", "volatility_asset_2")
+    )
+    fields = (*common_fields, *model_fields)
+    return [
+        {field: copy.deepcopy(row.get(field)) for field in fields}
+        for row in _quote_ready_rows(model, rows or [])
+    ]
+
+
+def _input_signature_from_context(
+    asset,
+    model,
+    contract_multiplier,
+    rows,
+    context,
+    valuation_date_value,
+):
+    normalized_context = _normalized_signature_context(context)
+    premium_convention = normalized_context.get(
+        "premium_convention", default_premium_convention(asset, model)
+    )
+    is_futures_style = premium_convention == "futures_style"
+    if is_futures_style and model in {"black76", "asian76"}:
+        normalized_context["rate"] = 0.0
+    return {
+        "asset": asset,
+        "model": model,
+        "contract_multiplier": _coerce_pricer_float(contract_multiplier),
+        "valuation_date": parse_date(
+            valuation_date_value,
+            date.today(),
+        ).isoformat(),
+        "context": normalized_context,
+        "legs": _signature_leg_rows(model, rows),
+    }
+
+
+def _calculation_input_signature(
     asset,
     model,
     contract_multiplier,
@@ -1634,31 +5908,124 @@ def calculate_structure_callback(
     valuation_date_value,
     param_ids,
     date_ids,
+    surface_reference=None,
+    use_published_surface=False,
 ):
-    triggered = _get_pricer_triggered_id()
-    if triggered == "pricer-structure-type":
-        if not n_clicks:
-            return None, ""
-        return None, _build_pricer_message(
-            "Type changed. Calculate the structure again."
+    context = _context_from_states(
+        model,
+        param_values,
+        param_ids,
+        date_values,
+        date_ids,
+    )
+    calculation_rows = rows
+    surface_signature = None
+    if use_published_surface:
+        expected_reference_signature = _surface_reference_input_signature(
+            asset,
+            model,
+            rows,
+            context,
+            valuation_date_value,
         )
+        calculation_rows, surface_signature = _published_surface_calculation_rows(
+            asset,
+            model,
+            rows,
+            surface_reference,
+            expected_reference_signature,
+        )
+    input_signature = _input_signature_from_context(
+        asset,
+        model,
+        contract_multiplier,
+        calculation_rows,
+        context,
+        valuation_date_value,
+    )
+    if surface_signature is not None:
+        input_signature["published_surface"] = surface_signature
+    return input_signature
+
+
+def _template_input_signature(template):
+    if not isinstance(template, dict):
+        return None
+    model = template.get("model")
+    if model not in MODEL_LABELS:
+        return None
+    resolved_context = default_context(model, date.today())
+    if isinstance(template.get("context"), dict):
+        resolved_context.update(template["context"])
+    return _input_signature_from_context(
+        template.get("asset", DEFAULT_ASSET),
+        model,
+        template.get("contract_multiplier", 1),
+        template.get("legs") or [default_leg(model, 1)],
+        resolved_context,
+        template.get("valuation_date", date.today().isoformat()),
+    )
+
+
+def _snapshot_matches_template(snapshot, template):
+    return (
+        isinstance(snapshot, dict)
+        and snapshot.get("schema_version") == SCHEMA_VERSION
+        and snapshot.get("_ui_input_signature")
+        == _template_input_signature(template)
+    )
+
+
+def calculate_structure_callback(
+    n_clicks,
+    asset,
+    model,
+    contract_multiplier,
+    rows,
+    param_values,
+    date_values,
+    valuation_date_value,
+    param_ids,
+    date_ids,
+    triggered_override=None,
+    has_snapshot=None,
+    surface_reference=None,
+    use_published_surface=False,
+):
+    triggered = (
+        triggered_override
+        if triggered_override is not None
+        else _get_pricer_triggered_id()
+    )
+    if isinstance(triggered, dict):
+        triggered = triggered.get("type")
+    triggered = {
+        "pricer-option-type": "option-type",
+        "pricer-calculate-button": "calculate-button",
+        "pricer-calculate-all": "calculate-button",
+        "pricer-exchange-calculate-all": "calculate-button",
+    }.get(triggered, triggered)
+    had_calculation = bool(n_clicks) if has_snapshot is None else bool(has_snapshot)
     if triggered == "pricer-asset":
-        if not n_clicks:
+        if not had_calculation:
             return None, ""
         return None, _build_pricer_message(
-            "Asset changed. Calculate the structure again."
+            "Modified · outputs cleared · calculate again",
+            tone="warning",
         )
     if triggered == "option-type":
-        if not n_clicks:
+        if not had_calculation:
             return None, ""
         return None, _build_pricer_message(
-            "Model changed. Configure the new structure and calculate again."
+            "Model changed · outputs cleared · configure and calculate again",
+            tone="warning",
         )
     if triggered != "calculate-button":
-        if not n_clicks:
+        if not had_calculation:
             return None, ""
         return None, _build_pricer_message(
-            "Inputs changed. Calculate the structure again."
+            "Modified · outputs cleared · calculate again",
+            tone="warning",
         )
     if not n_clicks:
         return None, _build_pricer_message("No calculation performed.")
@@ -1669,7 +6036,39 @@ def calculate_structure_callback(
         date_values,
         date_ids,
     )
-    context["structure_type"] = structure_type
+    calculation_rows = rows or []
+    surface_signature = None
+    try:
+        if use_published_surface:
+            expected_reference_signature = _surface_reference_input_signature(
+                asset,
+                model,
+                calculation_rows,
+                context,
+                valuation_date_value,
+            )
+            calculation_rows, surface_signature = (
+                _published_surface_calculation_rows(
+                    asset,
+                    model,
+                    calculation_rows,
+                    surface_reference,
+                    expected_reference_signature,
+                )
+            )
+        input_signature = _input_signature_from_context(
+            asset,
+            model,
+            contract_multiplier,
+            calculation_rows,
+            context,
+            valuation_date_value,
+        )
+    except StructureValidationError as exc:
+        return None, _build_pricer_message(str(exc), tone="danger")
+    if surface_signature is not None:
+        input_signature["published_surface"] = surface_signature
+    context = copy.deepcopy(input_signature["context"])
     context["asset"] = asset
     sizing = {
         "structure_quantity": 1,
@@ -1681,7 +6080,7 @@ def calculate_structure_callback(
             model,
             context,
             sizing,
-            rows or [],
+            calculation_rows,
             as_of=valuation_date,
         )
     except StructureValidationError as exc:
@@ -1691,23 +6090,376 @@ def calculate_structure_callback(
             f"Structure calculation failed ({type(exc).__name__}).",
             tone="danger",
         )
+    if surface_signature is not None:
+        effective_pricing_vols = {
+            row["leg_id"]: row["effective_pricing_vol"]
+            for row in surface_signature["rows"]
+        }
+        inconsistent_leg = next(
+            (
+                index
+                for index, leg in enumerate(snapshot["legs"], start=1)
+                if not math.isclose(
+                    leg["volatility_used"],
+                    effective_pricing_vols.get(leg["leg_id"], math.nan),
+                    rel_tol=1e-10,
+                    abs_tol=1e-12,
+                )
+            ),
+            None,
+        )
+        if inconsistent_leg is not None:
+            return None, _build_pricer_message(
+                f"Leg {inconsistent_leg}: the published surface pricing volatility "
+                "and volatility adjustments are inconsistent with the "
+                "contract-date adjustment.",
+                tone="danger",
+            )
+    snapshot["_ui_input_signature"] = input_signature
     leg_count = len(snapshot["legs"])
     leg_label = "leg" if leg_count == 1 else "legs"
+    strip_detail = ""
+    if snapshot["context"].get("delivery_components"):
+        strip_detail = f" · {snapshot['context']['delivery_component_count']} months"
     return snapshot, _build_pricer_message(
-        f"Calculated {leg_count} {leg_label} as one "
-        f"{snapshot['model_label']} structure.",
+        f"Calculated · {leg_count} {leg_label} · "
+        f"{snapshot['model_label']}{strip_detail}",
         tone="success",
     )
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-calculation-store", "structure_id": MATCH},
+            "data",
+        ),
+        Output(
+            {"type": "pricer-calculation-status", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-grid-pricing-options", "structure_id": MATCH},
+            "data",
+        ),
+        Output(
+            {"type": "pricer-calculate-all-ack", "structure_id": MATCH},
+            "data",
+        ),
+    ],
+    [
+        Input(
+            {"type": "pricer-calculate-button", "structure_id": MATCH},
+            "n_clicks",
+        ),
+        Input("pricer-calculate-all", "n_clicks"),
+        Input("pricer-exchange-calculate-all", "n_clicks"),
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        Input(
+            {"type": "pricer-contract-multiplier", "structure_id": MATCH},
+            "value",
+        ),
+        Input({"type": "pricer-legs-grid", "structure_id": MATCH}, "rowData"),
+        Input(
+            {"type": "pricer-legs-grid", "structure_id": MATCH},
+            "cellValueChanged",
+        ),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "date",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH}, "date"
+        ),
+        Input(
+            {
+                "type": "pricer-published-surface-reference",
+                "structure_id": MATCH,
+            },
+            "data",
+        ),
+    ],
+    [
+        State(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "id",
+        ),
+        State(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": ALL,
+            },
+            "id",
+        ),
+        State(
+            {"type": "pricer-calculation-store", "structure_id": MATCH},
+            "data",
+        ),
+        State(
+            {"type": "pricer-calculate-all-baseline", "structure_id": MATCH},
+            "data",
+        ),
+        State(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
+        State("url", "pathname"),
+    ],
+)
+def _calculate_structure_instance_dash_callback(
+    local_clicks,
+    calculate_all_clicks,
+    exchange_calculate_all_clicks,
+    asset,
+    model,
+    contract_multiplier,
+    rows,
+    cell_value_changed,
+    param_values,
+    date_values,
+    valuation_date_value,
+    surface_reference,
+    param_ids,
+    date_ids,
+    current_snapshot,
+    calculate_all_baseline=0,
+    workflow="legacy",
+    pathname=None,
+):
+    triggered = _get_pricer_triggered_id()
+    triggered_type = triggered.get("type") if isinstance(triggered, dict) else triggered
+    use_published_surface = pathname == "/pricer"
+    is_exchange_workflow = workflow == "exchange"
+    active_calculate_all_clicks = (
+        exchange_calculate_all_clicks
+        if is_exchange_workflow
+        else calculate_all_clicks
+    )
+    calculate_all_trigger = (
+        "pricer-exchange-calculate-all"
+        if is_exchange_workflow
+        else "pricer-calculate-all"
+    )
+    current_all_count = _nonnegative_click_count(active_calculate_all_clicks)
+    baseline_count = _nonnegative_click_count(calculate_all_baseline)
+    has_unconsumed_calculate_all = current_all_count > baseline_count
+    is_calculate_all = (
+        triggered_type in (None, calculate_all_trigger)
+        and has_unconsumed_calculate_all
+    )
+    is_local_calculate = triggered_type == "pricer-calculate-button"
+    if triggered_type is None and not is_calculate_all:
+        return no_update, no_update, no_update, no_update
+    if triggered_type in {
+        "pricer-calculate-all",
+        "pricer-exchange-calculate-all",
+    } and not is_calculate_all:
+        return no_update, no_update, no_update, no_update
+    if not is_calculate_all and not is_local_calculate and current_snapshot is None:
+        return no_update, no_update, no_update, no_update
+    latest_cell_event = (
+        cell_value_changed[-1]
+        if isinstance(cell_value_changed, list) and cell_value_changed
+        else cell_value_changed
+    )
+    committed_grid_edit = (
+        triggered_type == "pricer-legs-grid"
+        and isinstance(latest_cell_event, dict)
+        and latest_cell_event.get("oldValue") != latest_cell_event.get("newValue")
+    )
+    if committed_grid_edit and isinstance(current_snapshot, dict):
+        return (
+            None,
+            _build_pricer_message(
+                "Modified · outputs cleared · calculate again",
+                tone="warning",
+            ),
+            _leg_grid_options(compact=use_published_surface),
+            no_update,
+        )
+    if not is_calculate_all and not is_local_calculate and isinstance(
+        current_snapshot, dict
+    ):
+        try:
+            current_signature = _calculation_input_signature(
+                asset,
+                model,
+                contract_multiplier,
+                rows,
+                param_values,
+                date_values,
+                valuation_date_value,
+                param_ids,
+                date_ids,
+                surface_reference=surface_reference,
+                use_published_surface=use_published_surface,
+            )
+        except StructureValidationError as exc:
+            return (
+                None,
+                _build_pricer_message(str(exc), tone="danger"),
+                _leg_grid_options(compact=use_published_surface),
+                no_update,
+            )
+        if current_signature == current_snapshot.get("_ui_input_signature"):
+            return no_update, no_update, no_update, no_update
+    effective_clicks = (
+        active_calculate_all_clicks if is_calculate_all else local_clicks
+    )
+    snapshot, status = calculate_structure_callback(
+        effective_clicks,
+        asset,
+        model,
+        contract_multiplier,
+        rows,
+        param_values,
+        date_values,
+        valuation_date_value,
+        param_ids,
+        date_ids,
+        triggered_override="calculate-button" if is_calculate_all else triggered,
+        has_snapshot=current_snapshot is not None,
+        surface_reference=surface_reference,
+        use_published_surface=use_published_surface,
+    )
+    return (
+        snapshot,
+        status,
+        _leg_grid_options(snapshot, compact=use_published_surface),
+        current_all_count if is_calculate_all else no_update,
+    )
+
+
+def calculate_structure_instance_callback(
+    local_clicks,
+    calculate_all_clicks,
+    asset,
+    model,
+    contract_multiplier,
+    rows,
+    cell_value_changed,
+    param_values,
+    date_values,
+    valuation_date_value,
+    param_ids,
+    date_ids,
+    current_snapshot,
+    calculate_all_baseline=0,
+    surface_reference=None,
+    pathname=None,
+    exchange_calculate_all_clicks=0,
+    workflow="legacy",
+):
+    """Compatibility entry point for direct tests and non-Dash callers."""
+    return _calculate_structure_instance_dash_callback(
+        local_clicks,
+        calculate_all_clicks,
+        exchange_calculate_all_clicks,
+        asset,
+        model,
+        contract_multiplier,
+        rows,
+        cell_value_changed,
+        param_values,
+        date_values,
+        valuation_date_value,
+        surface_reference,
+        param_ids,
+        date_ids,
+        current_snapshot,
+        calculate_all_baseline,
+        workflow,
+        pathname,
+    )
+
+
+clientside_callback(
+    """
+    function (acknowledged, currentBaseline) {
+        const acknowledgedCount = Math.max(Number(acknowledged) || 0, 0);
+        const baselineCount = Math.max(Number(currentBaseline) || 0, 0);
+        if (acknowledgedCount <= baselineCount) {
+            return window.dash_clientside.no_update;
+        }
+        return acknowledgedCount;
+    }
+    """,
+    Output(
+        {"type": "pricer-calculate-all-baseline", "structure_id": MATCH},
+        "data",
+    ),
+    Input(
+        {"type": "pricer-calculate-all-ack", "structure_id": MATCH},
+        "data",
+    ),
+    State(
+        {"type": "pricer-calculate-all-baseline", "structure_id": MATCH},
+        "data",
+    ),
+    prevent_initial_call=True,
+)
+
+
+def calculate_structure_instance(
+    local_clicks,
+    calculate_all_clicks,
+    asset,
+    model,
+    contract_multiplier,
+    rows,
+    param_values,
+    date_values,
+    valuation_date_value,
+    param_ids,
+    date_ids,
+    current_snapshot,
+    calculate_all_baseline=0,
+):
+    """Compatibility helper for direct tests and non-Dash callers."""
+    snapshot, status, _grid_options, _baseline = calculate_structure_instance_callback(
+        local_clicks,
+        calculate_all_clicks,
+        asset,
+        model,
+        contract_multiplier,
+        rows,
+        None,
+        param_values,
+        date_values,
+        valuation_date_value,
+        param_ids,
+        date_ids,
+        current_snapshot,
+        calculate_all_baseline,
+    )
+    return snapshot, status
 
 
 def _model_inputs_summary(snapshot):
     context = snapshot["context"]
     cards = [
-        _build_pricer_result_card(
-            "Type",
-            context["structure_type"],
-            tone="context",
-        ),
         _build_pricer_result_card(
             "Asset",
             context["asset"],
@@ -1719,12 +6471,62 @@ def _model_inputs_summary(snapshot):
             tone="basis",
         ),
         _build_pricer_result_card(
+            "Premium convention",
+            context["resolved_premium_convention_label"],
+            tone="basis",
+        ),
+        _build_pricer_result_card(
             "Valuation date",
             snapshot["calculation_date"],
             tone="context",
         ),
     ]
-    if snapshot["model"] in {"black76", "asian76"}:
+    is_delivery_strip = bool(context.get("delivery_components"))
+    if is_delivery_strip:
+        is_jkm = context.get("asset") == "JKM"
+        component_quantity = (
+            f"{context['delivery_total_quantity']:,} MMBtu"
+            if is_jkm
+            else f"{context['delivery_total_hours']:,} delivery hours"
+        )
+        expiry_label = (
+            "APO expiry range"
+            if is_jkm and snapshot["model"] == "asian76"
+            else "JKZ / TFO expiry range"
+            if is_jkm
+            else "TFO expiry range"
+        )
+        cards.extend(
+            [
+                _build_pricer_result_card(
+                    "Delivery strip",
+                    context["delivery_period_label"],
+                    DELIVERY_SHAPE_LABELS[context["delivery_shape"]],
+                    tone="market",
+                ),
+                _build_pricer_result_card(
+                    "Flat monthly forward",
+                    _format_number(context["forward"]),
+                    tone="market",
+                ),
+                _build_pricer_result_card(
+                    "Monthly components",
+                    str(context["delivery_component_count"]),
+                    component_quantity,
+                    tone="context",
+                ),
+                _build_pricer_result_card(
+                    expiry_label,
+                    (
+                        f"{context['first_expiration_date']} → "
+                        f"{context['last_expiration_date']}"
+                    ),
+                    "Exact monthly option expiries",
+                    tone="context",
+                ),
+            ]
+        )
+    elif snapshot["model"] in {"black76", "asian76"}:
         cards.extend(
             [
                 _build_pricer_result_card(
@@ -1742,17 +6544,20 @@ def _model_inputs_summary(snapshot):
                     tone="context",
                 ),
                 _build_pricer_result_card(
-                    "Contract expiration",
+                    "Exchange option expiration",
                     context["contract_expiration_date"],
-                    tone="context",
-                ),
-                _build_pricer_result_card(
-                    "Risk-free rate",
-                    f"{context['rate']:.4%}",
                     tone="context",
                 ),
             ]
         )
+        if context.get("margin_style") != "futures_style":
+            cards.append(
+                _build_pricer_result_card(
+                    "Risk-free rate",
+                    f"{context['rate']:.4%}",
+                    tone="context",
+                )
+            )
     else:
         cards.extend(
             [
@@ -1771,7 +6576,7 @@ def _model_inputs_summary(snapshot):
                     tone="context",
                 ),
                 _build_pricer_result_card(
-                    "Contract expiration",
+                    "Exchange option expiration",
                     context["contract_expiration_date"],
                     tone="context",
                 ),
@@ -1787,19 +6592,47 @@ def _model_inputs_summary(snapshot):
 
 @callback(
     [
-        Output("results-container", "children"),
-        Output("pricer-unit-results-container", "children"),
-        Output("greeks-container", "children"),
-        Output("time-info", "children"),
-        Output("model-inputs-used-container", "children"),
-        Output("pricer-warning-container", "children"),
+        Output(
+            {"type": "pricer-results-container", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-unit-results-container", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-greeks-container", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-time-info", "structure_id": MATCH}, "children"
+        ),
+        Output(
+            {
+                "type": "pricer-model-inputs-used-container",
+                "structure_id": MATCH,
+            },
+            "children",
+        ),
+        Output(
+            {"type": "pricer-warning-container", "structure_id": MATCH},
+            "children",
+        ),
     ],
-    Input("pricer-calculation-store", "data"),
+    Input(
+        {"type": "pricer-calculation-store", "structure_id": MATCH}, "data"
+    ),
+    State({"type": "pricer-calculation-store", "structure_id": MATCH}, "id"),
 )
-def render_structure_results(snapshot):
+def render_structure_results(snapshot, calculation_store_id=None):
+    structure_id = (
+        calculation_store_id.get("structure_id")
+        if isinstance(calculation_store_id, dict)
+        else DEFAULT_STRUCTURE_ID
+    )
     if not snapshot:
         return "", "", "", "", "", ""
-    if snapshot.get("schema_version") != SCHEMA_VERSION:
+    if not _is_valid_calculation_snapshot(snapshot):
         return (
             "",
             _build_pricer_message(
@@ -1811,60 +6644,388 @@ def render_structure_results(snapshot):
             "",
             _build_pricer_message("Stale calculation snapshot.", tone="warning"),
         )
-    calculated_cards = [
-        _build_pricer_result_card(
-            "Unit structure value",
-            _format_number(snapshot["totals"]["unit_structure_value"]),
-            tone="unit",
-        ),
-        _build_pricer_result_card(
-            "Total trade value",
-            _format_number(snapshot["totals"]["trade_value"]),
-            tone="trade",
-        ),
-    ]
+    is_delivery_strip = bool(snapshot["context"].get("delivery_components"))
     time_to_expiry_value = f"{snapshot['context']['time_to_expiry']:.6f}y"
     time_detail = None
-    if snapshot["model"] == "asian76":
+    if is_delivery_strip:
+        expiry_name = (
+            "JKM APO"
+            if snapshot["context"].get("asset") == "JKM"
+            and snapshot["model"] == "asian76"
+            else "JKZ / TFO"
+            if snapshot["context"].get("asset") == "JKM"
+            else "TFO"
+        )
+        time_detail = (
+            f"Component-weighted time; first/last {expiry_name} expiry "
+            f"{snapshot['context']['first_expiration_date']} / "
+            f"{snapshot['context']['last_expiration_date']}"
+        )
+    elif snapshot["model"] == "asian76":
         time_detail = (
             f"Averaging starts {snapshot['context']['averaging_start_date']} "
             f"("
             f"{round(snapshot['context']['time_to_averaging_start'] * 365)} days"
             f")"
         )
-    volatility_adjustment_detail = (
-        f"√({snapshot['context']['option_business_days']} days / "
-        f"{snapshot['context']['contract_business_days']} contract days)"
-    )
+    if is_delivery_strip:
+        weighting_label = (
+            "equal monthly 10,000 MMBtu lots"
+            if snapshot["context"].get("asset") == "JKM"
+            else "delivery-hour weighted"
+        )
+        volatility_adjustment_detail = (
+            "No scalar date adjustment; each month uses its governed expiry; "
+            f"{snapshot['context']['variance_calendar_code']}; "
+            f"{snapshot['context']['day_count_basis']}; {weighting_label}"
+        )
+    else:
+        volatility_adjustment_detail = (
+            f"√({snapshot['context']['option_business_days']} days / "
+            f"{snapshot['context']['contract_business_days']} contract days); "
+            f"{snapshot['context']['variance_calendar_code']}; "
+            f"{snapshot['context']['day_count_basis']}"
+        )
     warning_children = [
         _build_pricer_message(warning, tone="warning")
         for warning in snapshot.get("warnings") or []
+        if warning != FUTURES_STYLE_RATE_NOTE
     ]
     output_cards = [
-        *_model_inputs_summary(snapshot),
-        *calculated_cards,
-        _build_pricer_result_card(
-            "Time to expiry",
-            time_to_expiry_value,
-            time_detail,
-            tone="time",
+        html.Span(
+            [
+                html.Span("T", className="pricer-calculation-meta-label"),
+                time_to_expiry_value,
+            ],
+            className="pricer-calculation-meta-item",
+            title=time_detail or "Time to expiry",
         ),
-        _build_pricer_result_card(
-            "Volatility adjustment",
-            f"{snapshot['context']['vol_adjustment_factor']:.6f}×",
-            volatility_adjustment_detail,
-            tone="adjustment",
-            detail_on_hover=True,
+        html.Span(
+            [
+                html.Span(
+                    "Vol adj",
+                    className="pricer-calculation-meta-label",
+                ),
+                f"{snapshot['context']['vol_adjustment_factor']:.6f}×",
+            ],
+            className="pricer-calculation-meta-item",
+            title=volatility_adjustment_detail,
         ),
     ]
+    if snapshot["context"].get("exchange_product_code"):
+        output_cards.insert(
+            0,
+            html.Span(
+                [
+                    html.Span(
+                        "Product",
+                        className="pricer-calculation-meta-label",
+                    ),
+                    snapshot["context"]["exchange_product_code"],
+                ],
+                className="pricer-calculation-meta-item",
+                title=snapshot["context"].get("exchange_product_name"),
+            ),
+        )
+    unit_results = ""
+    if is_delivery_strip:
+        component_note = (
+            "Premium contributions use equal 10,000 MMBtu monthly lots; "
+            "monthly Delta and Vega are shown before strip weighting."
+            if snapshot["context"].get("asset") == "JKM"
+            else "Premium contributions are weighted by TTF delivery hours; "
+            "monthly Delta and Vega are shown before strip weighting."
+        )
+        unit_results = html.Details(
+            [
+                html.Summary(
+                    "Monthly strip components",
+                    className=(
+                        "pricer-result-subsection-title "
+                        "pricer-strip-details-summary"
+                    ),
+                ),
+                html.Div(
+                    [
+                        html.P(
+                            component_note,
+                            className="pricer-result-subsection-note",
+                        ),
+                        _build_strip_component_grid(snapshot, structure_id),
+                    ],
+                    className="pricer-strip-details-content",
+                ),
+            ],
+            className="pricer-strip-details",
+        )
     return (
         output_cards,
-        _build_combined_result_grid(snapshot),
+        unit_results,
         "",
         "",
         "",
         warning_children,
     )
+
+
+@callback(
+    Output("pricer-calculations-session-store", "data"),
+    [
+        Input("pricer-workspace-store", "data"),
+        Input(
+            {"type": "pricer-calculation-store", "structure_id": ALL}, "data"
+        ),
+    ],
+    [
+        State({"type": "pricer-calculation-store", "structure_id": ALL}, "id"),
+        State(
+            {"type": "pricer-calculation-status", "structure_id": ALL},
+            "children",
+        ),
+        State(
+            {"type": "pricer-calculation-status", "structure_id": ALL},
+            "id",
+        ),
+        State("pricer-calculations-session-store", "data"),
+    ],
+)
+def persist_pricer_calculations(
+    workspace,
+    snapshots,
+    snapshot_ids,
+    calculation_statuses,
+    calculation_status_ids,
+    persisted_calculations,
+):
+    workspace = _normalize_workspace(workspace)
+    valid_ids = {
+        structure["structure_id"] for structure in workspace["structures"]
+    }
+    existing = (
+        copy.deepcopy(persisted_calculations)
+        if isinstance(persisted_calculations, dict)
+        else {}
+    )
+    updated = {
+        structure_id: snapshot
+        for structure_id, snapshot in existing.items()
+        if structure_id in valid_ids
+        and _is_valid_calculation_snapshot(snapshot)
+    }
+    if not any(isinstance(snapshot, dict) for snapshot in (snapshots or [])) and not any(
+        calculation_statuses or []
+    ):
+        return no_update if updated == existing else updated
+    for snapshot, component_id in zip(
+        snapshots or [],
+        snapshot_ids or [],
+    ):
+        if not isinstance(component_id, dict):
+            continue
+        structure_id = component_id.get("structure_id")
+        if structure_id not in valid_ids:
+            continue
+        status = _state_for_structure(
+            calculation_statuses,
+            calculation_status_ids,
+            structure_id,
+            None,
+        )
+        if _is_valid_calculation_snapshot(snapshot):
+            updated[structure_id] = snapshot
+        elif status or snapshot is not None:
+            updated.pop(structure_id, None)
+    return no_update if updated == existing else updated
+
+
+@callback(
+    Output("pricer-surface-comparison-grid", "children"),
+    [
+        Input("pricer-workspace-store", "data"),
+        Input("pricer-calculations-session-store", "data"),
+        Input("refresh-options-data", "n_clicks"),
+    ],
+    [State("url", "pathname")],
+)
+def render_surface_comparison_cards(
+    workspace,
+    persisted_calculations,
+    _refresh_clicks=None,
+    pathname=None,
+):
+    if pathname == "/pricer":
+        return no_update
+    structures = _calculated_surface_structures(
+        workspace,
+        persisted_calculations,
+    )
+    if not structures:
+        return _build_pricer_message(
+            "Calculate a structure to compare its contract vols with the surface."
+        )
+    views = build_surface_comparison_views(
+        structures,
+        force_refresh=_get_pricer_triggered_id() == "refresh-options-data",
+    )
+    if not views:
+        return _build_pricer_message(
+            "No valid calculated pricing contexts are available.",
+            tone="warning",
+        )
+    return [_surface_comparison_card(view) for view in views]
+
+
+@callback(
+    [
+        Output("pricer-analysis-structure-select", "options"),
+        Output("pricer-analysis-structure-select", "value"),
+    ],
+    [
+        Input("pricer-workspace-store", "data"),
+        Input("pricer-workspace-ready-store", "data"),
+    ],
+    [
+        State("pricer-analysis-structure-select", "value"),
+        State("pricer-analysis-selection-store", "data"),
+    ],
+)
+def sync_analysis_structure_selector(
+    workspace,
+    workspace_ready=True,
+    selected_structure_id=None,
+    persisted_selection=None,
+):
+    if not workspace_ready:
+        return no_update, no_update
+    workspace = _normalize_workspace(workspace)
+    options = [
+        {
+            "label": structure["label"],
+            "value": structure["structure_id"],
+        }
+        for structure in workspace["structures"]
+    ]
+    valid_ids = {option["value"] for option in options}
+    selected = (
+        persisted_selection
+        if persisted_selection in valid_ids
+        else selected_structure_id
+        if selected_structure_id in valid_ids
+        else options[0]["value"]
+    )
+    return options, selected
+
+
+@callback(
+    Output("pricer-analysis-selection-store", "data"),
+    Input("pricer-analysis-structure-select", "value"),
+    prevent_initial_call=True,
+)
+def persist_analysis_structure_selection(selected_structure_id):
+    return selected_structure_id or no_update
+
+
+@callback(
+    Output(
+        {"type": "pricer-remove-structure", "structure_id": ALL}, "disabled"
+    ),
+    [
+        Input("pricer-workspace-store", "data"),
+        Input("pricer-exchange-workspace-store", "data"),
+    ],
+    State({"type": "pricer-remove-structure", "structure_id": ALL}, "id"),
+)
+def sync_remove_structure_buttons(
+    workspace,
+    exchange_workspace,
+    remove_button_ids,
+):
+    workspace = _normalize_workspace(workspace)
+    exchange_structures = (
+        exchange_workspace.get("structures", [])
+        if isinstance(exchange_workspace, dict)
+        else []
+    )
+    otc_disabled = len(workspace["structures"]) <= 1
+    exchange_disabled = len(exchange_structures) <= 1
+    return [
+        exchange_disabled
+        if str((_component_id or {}).get("structure_id", "")).startswith(
+            "exchange-"
+        )
+        else otc_disabled
+        for _component_id in (remove_button_ids or [])
+    ]
+
+
+@callback(
+    Output("pricer-calculation-store", "data"),
+    [
+        Input("pricer-analysis-structure-select", "value"),
+        Input(
+            {"type": "pricer-calculation-store", "structure_id": ALL}, "data"
+        ),
+    ],
+    [
+        State({"type": "pricer-calculation-store", "structure_id": ALL}, "id"),
+        State("pricer-calculation-store", "data"),
+    ],
+)
+def route_selected_structure_calculation(
+    selected_structure_id,
+    calculation_snapshots,
+    calculation_store_ids,
+    current_routed_snapshot=None,
+):
+    selected_snapshot = _state_for_structure(
+        calculation_snapshots,
+        calculation_store_ids,
+        selected_structure_id,
+        None,
+    )
+    return (
+        no_update
+        if selected_snapshot == current_routed_snapshot
+        else selected_snapshot
+    )
+
+
+@callback(
+    Output("pricer-workspace-status", "children"),
+    [
+        Input("pricer-workspace-store", "data"),
+        Input("pricer-calculations-session-store", "data"),
+    ],
+)
+def render_pricer_workspace_status(
+    workspace,
+    persisted_calculations,
+    snapshot_ids=None,
+):
+    workspace = _normalize_workspace(workspace)
+    structure_ids = {
+        structure["structure_id"] for structure in workspace["structures"]
+    }
+    if snapshot_ids is not None:
+        persisted_calculations = {
+            component_id.get("structure_id"): snapshot
+            for snapshot, component_id in zip(
+                persisted_calculations or [], snapshot_ids or []
+            )
+            if isinstance(component_id, dict)
+        }
+    elif not isinstance(persisted_calculations, dict):
+        persisted_calculations = {}
+    calculated = sum(
+        1
+        for structure_id, snapshot in persisted_calculations.items()
+        if structure_id in structure_ids
+        and isinstance(snapshot, dict)
+        and snapshot.get("schema_version") == SCHEMA_VERSION
+    )
+    total = len(structure_ids)
+    structure_label = "structure" if total == 1 else "structures"
+    return f"{total} {structure_label} · {calculated} calculated"
 
 
 @callback(
@@ -1880,7 +7041,10 @@ def sync_payoff_valuation_limit(snapshot, valuation_date):
     if not snapshot or snapshot.get("schema_version") != SCHEMA_VERSION:
         return date.today(), None, no_update
     minimum = snapshot["calculation_date"]
-    maximum = snapshot["context"]["expiration_date"]
+    maximum = (
+        snapshot["context"].get("first_expiration_date")
+        or snapshot["context"]["expiration_date"]
+    )
     if snapshot["model"] == "asian76":
         maximum = snapshot["context"]["averaging_start_date"]
     if valuation_date:
@@ -1947,7 +7111,7 @@ def update_payoff_chart(calculation_store, valuation_date, price_range, option_t
                 x=series["x"],
                 y=series["payoff"],
                 mode="lines",
-                name="Total expiration payoff",
+                name=series["payoff_label"],
                 line={"color": "#dc2626", "width": 1.8, "dash": "dash"},
             )
         )
@@ -2047,6 +7211,12 @@ def render_structure_sensitivity_charts(snapshot):
             "Risk-free rate",
             "Trade value",
         )
+    elif snapshot["context"].get("margin_style") == "futures_style":
+        rate_fig = _empty_pricer_figure(
+            "Not applicable: the futures-style premium convention is undiscounted.",
+            "Risk-free rate",
+            "Trade value",
+        )
     else:
         try:
             rate = rate_sensitivity_series(snapshot)
@@ -2087,20 +7257,27 @@ def render_structure_sensitivity_charts(snapshot):
             f"Time decay unavailable ({type(exc).__name__})."
         )
 
-    try:
-        extension = expiration_extension_series(snapshot)
-        base_index = extension["dates"].index(extension["base_expiration"])
-        extension_fig = _line_figure(
-            extension["dates"],
-            extension["values"],
-            "Expiration date",
-            marker_x=extension["base_expiration"],
-            marker_y=extension["values"][base_index],
-        )
-    except Exception as exc:
+    if snapshot["context"].get("delivery_components"):
         extension_fig = _empty_pricer_figure(
-            f"Expiration sensitivity unavailable ({type(exc).__name__})."
+            "Not applicable: every strip month has a governed TFO expiry.",
+            "Expiration date",
+            "Trade value",
         )
+    else:
+        try:
+            extension = expiration_extension_series(snapshot)
+            base_index = extension["dates"].index(extension["base_expiration"])
+            extension_fig = _line_figure(
+                extension["dates"],
+                extension["values"],
+                "Expiration date",
+                marker_x=extension["base_expiration"],
+                marker_y=extension["values"][base_index],
+            )
+        except Exception as exc:
+            extension_fig = _empty_pricer_figure(
+                f"Expiration sensitivity unavailable ({type(exc).__name__})."
+            )
 
     if snapshot["model"] != "kirk":
         correlation_fig = _empty_pricer_figure(
@@ -2212,6 +7389,7 @@ def _parse_asian76_model_inputs(
         expiration,
     )
     context = {
+        "premium_convention": "upfront",
         "forward": forward,
         "rate": rate,
         "averaging_start_date": averaging_start.isoformat(),
@@ -2383,6 +7561,7 @@ def calculate_option(
         all_date_ids,
     )
     context = {
+        "premium_convention": "upfront",
         "forward": inputs["F"],
         "rate": inputs["r"],
         "averaging_start_date": inputs["averaging_start_date"].isoformat(),

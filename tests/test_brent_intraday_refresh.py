@@ -18,6 +18,27 @@ from vol_calibration.auth import (
 )
 
 
+def _worker_readiness(product="BRENT", *, ready=True, reason="ready"):
+    return gateway.WorkerReadiness(
+        product=product,
+        ready=ready,
+        reason=reason,
+        worker_id="worker-1" if ready else None,
+        lifecycle_status="idle" if ready else None,
+        bloomberg_session_status="not_started" if ready else None,
+        heartbeat_at="2026-08-24T12:00:00+00:00" if ready else None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _default_ready_worker(monkeypatch):
+    monkeypatch.setattr(
+        history,
+        "get_worker_readiness",
+        lambda product: _worker_readiness(product),
+    )
+
+
 def test_intraday_refresh_flag_defaults_off_and_accepts_explicit_env(monkeypatch):
     monkeypatch.delenv("BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED", raising=False)
     monkeypatch.setattr(gateway, "config_bool", lambda *args, **kwargs: False)
@@ -73,6 +94,9 @@ class _Engine:
     def begin(self):
         return _ConnectionContext(self.connection)
 
+    def connect(self):
+        return _ConnectionContext(self.connection)
+
 
 def _job_row(request_kind):
     return {
@@ -91,6 +115,79 @@ def _job_row(request_kind):
         "created_at": None,
         "updated_at": None,
     }
+
+
+def test_worker_readiness_is_product_scoped_and_uses_database_time():
+    heartbeat = pd.Timestamp("2026-08-24T12:00:00Z").to_pydatetime()
+    engine = _Engine(
+        [
+            {
+                "worker_id": "worker-1",
+                "lifecycle_status": "idle",
+                "bloomberg_session_status": "not_started",
+                "heartbeat_at": heartbeat,
+                "lifecycle_is_available": True,
+                "heartbeat_is_fresh": True,
+            }
+        ]
+    )
+
+    readiness = gateway.get_worker_readiness("TFO", engine=engine)
+
+    assert readiness.ready is True
+    assert readiness.product == "TFO"
+    assert readiness.worker_id == "worker-1"
+    sql, parameters = engine.connection.calls[0]
+    assert ":product = ANY(enabled_products)" in sql
+    assert "CURRENT_TIMESTAMP" in sql
+    assert "('starting', 'idle', 'running')" in sql
+    assert parameters == {"product": "TFO", "freshness_seconds": 30}
+
+
+def test_worker_readiness_fails_closed_when_registry_is_missing():
+    readiness = gateway.get_worker_readiness("BRENT", engine=object())
+
+    assert readiness.ready is False
+    assert readiness.reason == "registry_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        (None, "no_eligible_worker"),
+        (
+            {
+                "worker_id": "worker-1",
+                "lifecycle_status": "idle",
+                "bloomberg_session_status": "not_started",
+                "heartbeat_at": pd.Timestamp(
+                    "2026-08-24T11:00:00Z"
+                ).to_pydatetime(),
+                "lifecycle_is_available": True,
+                "heartbeat_is_fresh": False,
+            },
+            "stale_heartbeat",
+        ),
+        (
+            {
+                "worker_id": "worker-1",
+                "lifecycle_status": "stopped",
+                "bloomberg_session_status": "stopped",
+                "heartbeat_at": pd.Timestamp(
+                    "2026-08-24T12:00:00Z"
+                ).to_pydatetime(),
+                "lifecycle_is_available": False,
+                "heartbeat_is_fresh": True,
+            },
+            "worker_not_running",
+        ),
+    ],
+)
+def test_worker_readiness_requires_eligible_fresh_running_worker(row, reason):
+    readiness = gateway.get_worker_readiness("BRENT", engine=_Engine([row]))
+
+    assert readiness.ready is False
+    assert readiness.reason == reason
 
 
 @pytest.mark.parametrize(
@@ -237,6 +334,7 @@ def test_refresh_poll_reports_fresh_reuse_and_selects_reused_snapshot(monkeypatc
         1,
         0,
         1,
+        0,
         "BRENT",
         {"job_id": "job-id"},
         {"result_snapshot_id": "previous-snapshot"},
@@ -273,12 +371,12 @@ def test_capacity_failure_preserves_displayed_snapshot_and_recovers_polling(monk
         1,
         0,
         2,
+        0,
         "BRENT",
         {"job_id": "job-id"},
         completion,
     )
-    assert result[1]["BRENT"] is not completion
-    assert result[1]["BRENT"] == completion
+    assert result[1] is history.no_update
     assert result[2:5] == (True, False, True)
     assert result[5] == (
         "Bloomberg daily request capacity has been reached. The displayed snapshot "
@@ -316,7 +414,7 @@ def test_settlement_click_uses_shared_job_store_and_disables_both_buttons(monkey
         return job, True
 
     monkeypatch.setattr(history, "submit_refresh_job", _submit)
-    result = history.manage_bloomberg_refresh(0, 1, 0, "BRENT", None, None)
+    result = history.manage_bloomberg_refresh(0, 1, 0, 0, "BRENT", None, None)
 
     assert submitted == [("cal", "BRENT", gateway.SETTLEMENT_REQUEST_KIND)]
     assert result[0]["BRENT"]["job_id"] == "settlement-job"
@@ -359,6 +457,7 @@ def test_settlement_completion_selects_result_and_reports_pending_oi(monkeypatch
         0,
         1,
         3,
+        0,
         "BRENT",
         {"job_id": "settlement-job", "request_kind": "settlement_refresh"},
         {"result_snapshot_id": "previous-snapshot"},
@@ -370,6 +469,242 @@ def test_settlement_completion_selects_result_and_reports_pending_oi(monkeypatch
     assert result[5] == (
         "Settlements refreshed through 14 Aug · OI pending for 14 Aug."
     )
+
+
+def test_offline_worker_disables_refresh_and_does_not_submit(monkeypatch):
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(
+        history,
+        "_authorize_refresh",
+        lambda: SimpleNamespace(subject="cal"),
+    )
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-button"),
+    )
+    monkeypatch.setattr(
+        history,
+        "get_worker_readiness",
+        lambda product: _worker_readiness(
+            product, ready=False, reason="registry_unavailable"
+        ),
+    )
+    monkeypatch.setattr(
+        history,
+        "submit_refresh_job",
+        lambda *_args, **_kwargs: pytest.fail("offline worker must not queue a job"),
+    )
+
+    result = history.manage_bloomberg_refresh(1, 0, 0, 0, "BRENT", None, None)
+
+    assert result[0] == {}
+    assert result[2:5] == (True, True, True)
+    assert result[5] == (
+        "Bloomberg worker status is unavailable. Apply migration 010 and start "
+        "the worker."
+    )
+
+
+def test_worker_health_poll_reenables_refresh_when_heartbeat_returns(monkeypatch):
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-worker-poll"),
+    )
+
+    result = history.manage_bloomberg_refresh(0, 0, 0, 4, "TFO", None, None)
+
+    assert result[0] is history.no_update
+    assert result[1] is history.no_update
+    assert result[2:5] == (True, False, False)
+    assert result[5] == "Bloomberg TFO worker ready."
+
+
+def test_active_poll_does_not_reemit_unchanged_job_or_completion(monkeypatch):
+    job_payload = {
+        "job_id": "queued-job",
+        "status": "queued",
+        "request_kind": gateway.INTRADAY_REQUEST_KIND,
+        "created_at": "2026-08-24T12:00:00Z",
+    }
+    completion = {
+        "result_snapshot_id": "displayed-snapshot",
+        "request_kind": gateway.INTRADAY_REQUEST_KIND,
+    }
+    job = SimpleNamespace(
+        job_id="queued-job",
+        status="queued",
+        stage="queued",
+        request_kind=gateway.INTRADAY_REQUEST_KIND,
+        created_at="2026-08-24T12:00:00Z",
+        as_dict=lambda: dict(job_payload),
+    )
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(
+        history, "get_refresh_job", lambda _job_id, *, product: job
+    )
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        0,
+        1,
+        0,
+        "BRENT",
+        {"BRENT": job_payload},
+        {"BRENT": completion},
+    )
+
+    assert result[0] is history.no_update
+    assert result[1] is history.no_update
+    assert result[2] is False
+
+
+def test_queued_job_over_30_seconds_reports_ready_worker_as_busy(monkeypatch):
+    job = SimpleNamespace(
+        job_id="queued-job",
+        status="queued",
+        stage="queued",
+        request_kind=gateway.INTRADAY_REQUEST_KIND,
+        created_at="2000-01-01T00:00:00Z",
+        as_dict=lambda: {
+            "job_id": "queued-job",
+            "status": "queued",
+            "request_kind": gateway.INTRADAY_REQUEST_KIND,
+            "created_at": "2000-01-01T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(
+        history, "get_refresh_job", lambda _job_id, *, product: job
+    )
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        0,
+        31,
+        3,
+        "BRENT",
+        {"job_id": "queued-job"},
+        None,
+    )
+
+    assert result[0]["BRENT"]["job_id"] == "queued-job"
+    assert result[2:5] == (False, True, True)
+    assert result[5] == (
+        "Bloomberg Brent worker is online—this request is queued behind another "
+        "refresh. The page will keep monitoring it."
+    )
+    assert result[6].endswith("brent-vol-history-refresh-status-active")
+
+
+def test_fresh_queued_job_briefly_reports_waiting_for_ready_worker(monkeypatch):
+    created_at = pd.Timestamp.now(tz="UTC").isoformat()
+    job = SimpleNamespace(
+        job_id="queued-job",
+        status="queued",
+        stage="queued",
+        request_kind=gateway.INTRADAY_REQUEST_KIND,
+        created_at=created_at,
+        as_dict=lambda: {
+            "job_id": "queued-job",
+            "status": "queued",
+            "request_kind": gateway.INTRADAY_REQUEST_KIND,
+            "created_at": created_at,
+        },
+    )
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: False)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(
+        history, "get_refresh_job", lambda _job_id, *, product: job
+    )
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        0,
+        1,
+        0,
+        "BRENT",
+        {"job_id": "queued-job"},
+        None,
+    )
+
+    assert result[2:5] == (False, True, True)
+    assert result[5] == "Waiting for Bloomberg worker…"
+
+
+def test_offline_queued_job_remains_under_active_polling(monkeypatch):
+    created_at = pd.Timestamp.now(tz="UTC").isoformat()
+    job = SimpleNamespace(
+        job_id="queued-job",
+        status="queued",
+        stage="queued",
+        request_kind=gateway.INTRADAY_REQUEST_KIND,
+        created_at=created_at,
+        as_dict=lambda: {
+            "job_id": "queued-job",
+            "status": "queued",
+            "request_kind": gateway.INTRADAY_REQUEST_KIND,
+            "created_at": created_at,
+        },
+    )
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(
+        history, "get_refresh_job", lambda _job_id, *, product: job
+    )
+    monkeypatch.setattr(
+        history,
+        "get_worker_readiness",
+        lambda product: _worker_readiness(
+            product, ready=False, reason="stale_heartbeat"
+        ),
+    )
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        0,
+        1,
+        0,
+        "BRENT",
+        {"job_id": "queued-job"},
+        None,
+    )
+
+    assert result[0]["BRENT"]["job_id"] == "queued-job"
+    assert result[2:5] == (False, True, True)
+    assert "worker is offline" in result[5]
+    assert "no heartbeat in 30 seconds" in result[5]
 
 
 def test_settlement_current_and_progress_messages_are_concise():
@@ -618,7 +953,7 @@ def test_trade_window_filters_only_exact_trade_overlays_and_rows():
     assert rows[0]["trade_size"] == 20.0
 
 
-def test_delta_axis_uses_indicative_last_price_when_executable_iv_is_unavailable():
+def test_delta_axis_does_not_use_untimed_last_price_as_an_iv_reference():
     chain = _intraday_chain()
     chain["executable_iv_status"] = "unavailable"
     chain[["executable_iv_bid", "executable_iv_mid", "executable_iv_ask"]] = np.nan
@@ -629,9 +964,9 @@ def test_delta_axis_uses_indicative_last_price_when_executable_iv_is_unavailable
         pd.Timestamp("2026-12-01"),
         x_axis="delta",
     )
-    assert any(trace.type == "bar" for trace in figure.data)
-    assert any(trace.name == "Indicative last-price IV" for trace in figure.data)
-    assert not any(
+    assert not any(trace.type == "bar" for trace in figure.data)
+    assert not any(trace.name == "Indicative last-price IV" for trace in figure.data)
+    assert any(
         "activity strikes unavailable on Delta" in annotation.text
         for annotation in figure.layout.annotations
     )

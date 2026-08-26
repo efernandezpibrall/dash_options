@@ -1227,6 +1227,7 @@ button:hover {
 
 .nav-group-pricer {
     display: flex;
+    gap: 4px;
     flex: 0 0 auto;
     padding-left: 10px;
     border-left: 1px solid rgba(148, 163, 184, 0.22);
@@ -3361,6 +3362,278 @@ button:hover {
     box-sizing: border-box;
 }
 
+.pricer-workspace-toolbar {
+    position: sticky;
+    top: var(--dashboard-top-bar-height, 54px);
+    z-index: 1100;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    min-height: 46px;
+    margin: -10px -16px 12px;
+    padding: 8px 16px;
+    box-sizing: border-box;
+    border-bottom: 1px solid #cbd5e1;
+    background: linear-gradient(180deg, #fbfdff 0%, #eef3f8 100%);
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+}
+
+.options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
+    top: 111px;
+}
+
+.options-dashboard-container.pricer-page-current .pricer-valuation-date-field {
+    display: none;
+}
+
+.pricer-field-label-exchange {
+    display: none;
+}
+
+.pricer-visually-hidden-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    border: 0;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.pricer-workflow-section {
+    --pricer-workflow-accent: #2f6f9f;
+    --pricer-workflow-border: #b8ccdc;
+    --pricer-workflow-header-start: #fbfdff;
+    --pricer-workflow-header-end: #eaf3fa;
+    --pricer-workflow-body: #edf4f9;
+    display: grid;
+    gap: 0;
+    min-width: 0;
+    margin: 0 0 18px;
+    box-sizing: border-box;
+    border: 1px solid var(--pricer-workflow-border);
+    border-top: 3px solid var(--pricer-workflow-accent);
+    border-radius: 11px;
+    background: var(--pricer-workflow-body);
+    box-shadow:
+        0 1px 2px rgba(15, 23, 42, 0.035),
+        0 8px 22px rgba(15, 23, 42, 0.055);
+}
+
+.pricer-otc-section {
+    --pricer-workflow-accent: #68558a;
+    --pricer-workflow-border: #cabed6;
+    --pricer-workflow-header-start: #fdfcff;
+    --pricer-workflow-header-end: #f0ebf5;
+    --pricer-workflow-body: #f3eff6;
+}
+
+.pricer-workflow-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px 20px;
+    min-width: 0;
+    padding: 11px 14px 10px;
+    box-sizing: border-box;
+    border: 0;
+    border-bottom: 1px solid var(--pricer-workflow-border);
+    border-radius: 8px 8px 0 0;
+    background: linear-gradient(
+        180deg,
+        var(--pricer-workflow-header-start) 0%,
+        var(--pricer-workflow-header-end) 100%
+    );
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.pricer-workflow-section-copy,
+.pricer-workflow-section-actions {
+    min-width: 0;
+}
+
+.pricer-workflow-section-actions:empty {
+    display: none;
+}
+
+.pricer-workflow-section-title {
+    margin: 0;
+    color: #122033;
+    font-size: 17px;
+    font-weight: 780;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+}
+
+.pricer-workflow-section-body {
+    display: grid;
+    gap: 8px;
+    min-width: 0;
+    padding: 9px;
+    box-sizing: border-box;
+    border-radius: 0 0 10px 10px;
+    background: var(--pricer-workflow-body);
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-section-body
+    > .pricer-structure-panel,
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-section-body
+    .pricer-structure-list
+    > .pricer-structure-panel {
+    width: 100%;
+    margin: 0;
+    border-color: color-mix(
+        in srgb,
+        var(--pricer-workflow-accent) 24%,
+        #d9e2ec
+    );
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.88),
+        0 3px 10px rgba(15, 23, 42, 0.045);
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-section-body
+    .pricer-detailed-analysis-section {
+    width: 100%;
+    margin: 6px 0 0;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-model-field,
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-premium-convention-field,
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-contract-size-field,
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-shared-context
+    .pricer-date-field,
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-rate-field {
+    display: none;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-model-field
+    .pricer-field-label-otc {
+    display: none;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-model-field
+    .pricer-field-label-exchange {
+    display: inline;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-workflow-exchange
+    .pricer-model-field {
+    flex-basis: 184px;
+    min-width: 184px;
+}
+
+@media (max-width: 760px) {
+    .pricer-workflow-section-header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .pricer-workflow-section-actions,
+    .pricer-workflow-section-actions .pricer-workspace-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .pricer-workflow-section-body {
+        padding: 7px;
+    }
+}
+
+.pricer-workspace-title {
+    margin: 0;
+    color: #0f172a;
+    font-size: 19px;
+    font-weight: 780;
+    line-height: 1.15;
+}
+
+.pricer-workspace-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+}
+
+.pricer-workspace-status {
+    color: #475569;
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.pricer-structure-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.pricer-structure-list > .pricer-structure-panel {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+
+.pricer-structure-panel .pricer-section-actions {
+    flex: 1 1 auto;
+}
+
+.pricer-structure-status {
+    flex: 1 1 240px;
+    min-width: 0;
+}
+
+.pricer-structure-status .pricer-empty-state {
+    margin: 0;
+    padding: 4px 8px;
+    border-style: solid;
+    font-size: 10.5px;
+    line-height: 1.2;
+}
+
+.pricer-detailed-analysis-section {
+    margin-top: 16px;
+}
+
+.pricer-analysis-selector-field {
+    width: 190px;
+    min-width: 160px;
+}
+
+.pricer-analysis-selector {
+    width: 100%;
+    min-width: 0;
+}
+
+.pricer-detailed-analysis-body > .pricer-payoff-controls {
+    grid-column: 1 / -1;
+}
+
 .professional-section-header.pricer-sticky-filter-bar {
     position: sticky;
     top: var(--dashboard-top-bar-height, 54px);
@@ -4065,6 +4338,178 @@ button:hover {
     fill: #0f172a !important;
 }
 
+.pricer-surface-comparison-section {
+    margin-top: 16px;
+    padding-bottom: 12px;
+}
+
+.pricer-surface-comparison-section > .pricer-section-header {
+    margin-bottom: 10px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+.pricer-surface-comparison-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    min-width: 0;
+}
+
+.pricer-surface-comparison-grid > .pricer-empty-state {
+    grid-column: 1 / -1;
+    margin: 0;
+}
+
+.pricer-surface-card {
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid #d8e2ee;
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow:
+        0 1px 2px rgba(15, 23, 42, 0.045),
+        0 6px 14px rgba(15, 23, 42, 0.025);
+}
+
+.pricer-surface-card-header {
+    min-width: 0;
+    padding: 8px 10px 6px;
+    border-bottom: 1px solid #edf2f7;
+    background: linear-gradient(180deg, #fbfdff 0%, #f3f7fb 100%);
+}
+
+.pricer-surface-card-title {
+    margin: 0;
+    overflow: hidden;
+    color: #0f172a;
+    font-size: 12.5px;
+    font-weight: 800;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pricer-surface-card-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 3px 10px;
+    min-width: 0;
+    padding: 5px 10px 3px;
+    color: #64748b;
+    font-size: 9.5px;
+    font-weight: 650;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+}
+
+.pricer-surface-source {
+    color: #334155;
+    font-weight: 800;
+}
+
+.pricer-surface-card-warnings {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 8px;
+    margin: 3px 10px 0;
+    padding: 4px 6px;
+    border: 1px solid #fde68a;
+    border-radius: 5px;
+    background: #fffbeb;
+    color: #92400e;
+    font-size: 9.5px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.pricer-surface-card-graph {
+    width: 100%;
+    min-height: 270px;
+}
+
+.pricer-surface-card .js-plotly-plot,
+.pricer-surface-card .plot-container,
+.pricer-surface-card .svg-container {
+    width: 100% !important;
+}
+
+.pricer-surface-card .modebar {
+    top: 2px !important;
+    right: 3px !important;
+}
+
+.pricer-surface-card .modebar-btn {
+    width: 24px !important;
+    height: 24px !important;
+}
+
+.pricer-surface-quote-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 6px;
+    min-height: 28px;
+    padding: 6px 8px 8px;
+    border-top: 1px solid #edf2f7;
+    background: #fbfdff;
+}
+
+.pricer-surface-quote-key-item {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    padding: 3px 6px;
+    border: 1px solid #fed7aa;
+    border-radius: 999px;
+    background: #fff7ed;
+    color: #7c2d12;
+    font-size: 9.5px;
+    font-weight: 750;
+    line-height: 1.15;
+    font-variant-numeric: tabular-nums;
+    white-space: normal;
+}
+
+.pricer-surface-quote-below {
+    border-color: #bfdbfe;
+    background: #eff6ff;
+    color: #1e3a8a;
+}
+
+.pricer-surface-quote-flat {
+    border-color: #cbd5e1;
+    background: #f8fafc;
+    color: #475569;
+}
+
+.pricer-surface-card-error,
+.pricer-surface-card-unsupported {
+    min-height: 102px;
+}
+
+.pricer-surface-card > .pricer-empty-state {
+    margin: 8px;
+    padding: 10px;
+    font-size: 10.5px;
+}
+
+@media (max-width: 1349px) {
+    .pricer-surface-comparison-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 819px) {
+    .pricer-surface-comparison-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-surface-card-title {
+        white-space: normal;
+    }
+}
+
 .pricer-empty-state {
     margin: 8px;
     padding: 14px;
@@ -4225,27 +4670,84 @@ button:hover {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
     gap: 8px;
-    align-items: end;
+    align-items: start;
 }
 
 .pricer-context-with-valuation {
-    display: grid;
-    grid-template-columns:
-        minmax(100px, 0.75fr)
-        minmax(70px, 0.5fr)
-        minmax(164px, 1.25fr)
-        repeat(auto-fit, minmax(94px, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: 8px;
-    align-items: end;
+    align-items: flex-start;
 }
 
-.pricer-context-with-valuation > #pricer-shared-context {
+.pricer-context-with-valuation > .pricer-shared-context {
     display: contents;
+}
+
+.pricer-context-with-valuation .pricer-field {
+    flex: 0 0 144px;
+    max-width: 144px;
+}
+
+.pricer-context-with-valuation .pricer-field-label {
+    display: flex;
+    align-items: flex-end;
+    min-height: 22px;
+}
+
+.pricer-context-with-valuation .pricer-field-hint {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pricer-context-with-valuation .pricer-asset-field {
+    flex-basis: 72px;
+    max-width: 72px;
+}
+
+.pricer-context-with-valuation .pricer-model-field {
+    flex-basis: 252px;
+    max-width: 252px;
+}
+
+.pricer-context-with-valuation .pricer-date-field {
+    flex-basis: 120px;
+    max-width: 120px;
+}
+
+.pricer-context-with-valuation .pricer-shape-field {
+    flex-basis: 160px;
+    max-width: 160px;
+}
+
+.pricer-context-with-valuation .pricer-number-field {
+    flex-basis: 144px;
+    max-width: 144px;
 }
 
 .pricer-context-with-valuation .pricer-filter-dropdown {
     width: 100%;
     min-width: 0;
+}
+
+.pricer-context-with-valuation .dash-dropdown-wrapper,
+.pricer-context-with-valuation .dash-dropdown,
+.pricer-context-with-valuation .dash-datepicker,
+.pricer-context-with-valuation .pricer-number-input {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.pricer-context-with-valuation .dash-datepicker {
+    min-height: 34px;
+}
+
+.pricer-context-with-valuation .pricer-number-input {
+    height: 34px;
+    min-height: 34px;
 }
 
 .pricer-market-sizing-layout {
@@ -4295,11 +4797,14 @@ button:hover {
 }
 
 .pricer-inline-method-note {
+    flex: 0 0 100%;
     align-self: stretch;
     display: flex;
     align-items: center;
+    max-width: 100%;
     min-height: 32px;
     padding: 8px 10px;
+    box-sizing: border-box;
     border: 1px solid #fde68a;
     border-radius: 7px;
     background: #fffbeb;
@@ -4366,6 +4871,14 @@ button:hover {
     background: #fef2f2;
 }
 
+.pricer-remove-button:disabled {
+    cursor: not-allowed;
+    border-color: #e2e8f0;
+    background: #f8fafc;
+    color: #94a3b8;
+    opacity: 0.72;
+}
+
 .pricer-leg-actions .pricer-calculation-status {
     min-width: 0;
 }
@@ -4402,6 +4915,52 @@ button:hover {
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+.pricer-inline-output {
+    margin-top: 2px;
+    padding-top: 10px;
+    border-top: 1px solid #dbe5ef;
+}
+
+.pricer-inline-output-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 4px 10px;
+}
+
+.pricer-inline-output-title {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.pricer-inline-output-heading .pricer-warning-container {
+    flex: 1 1 320px;
+    min-width: 0;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow: hidden;
+}
+
+.pricer-inline-output-heading .pricer-empty-state {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+    padding: 3px 7px;
+    box-sizing: border-box;
+    border-style: solid;
+    font-size: 10px;
+    line-height: 1.2;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pricer-inline-output:not(:has(.pricer-result-card)):not(:has(.pricer-empty-state)) {
+    display: none;
 }
 
 .pricer-summary-grid {
@@ -4462,12 +5021,67 @@ button:hover {
     background: transparent;
 }
 
-.pricer-output-panel:has(#pricer-unit-results-container:empty) {
+.pricer-output-panel:has(.pricer-unit-results-container:empty) {
     display: none;
 }
 
-.pricer-output-section:not(:has(.pricer-result-card)):not(:has(.pricer-empty-state)) {
+.pricer-result-grid-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.pricer-result-subsection-title {
+    margin: 8px 0 0;
+    color: #0f172a;
+    font-size: 12px;
+    font-weight: 750;
+    letter-spacing: 0.01em;
+}
+
+.pricer-strip-details {
+    margin-top: 1px;
+}
+
+.pricer-strip-details-summary {
+    width: max-content;
+    max-width: 100%;
+    min-height: 24px;
+    margin: 0;
+    padding: 4px 0;
+    box-sizing: border-box;
+    cursor: pointer;
+}
+
+.pricer-strip-details-summary:hover {
+    color: #0f4c81;
+}
+
+.pricer-strip-details-summary:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+.pricer-strip-details-content {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-top: 4px;
+}
+
+.pricer-strip-details:not([open]) > .pricer-strip-details-content {
     display: none;
+}
+
+.pricer-strip-details-content .pricer-result-subsection-note {
+    margin: 0;
+}
+
+.pricer-result-subsection-note {
+    margin: -2px 0 0;
+    color: #64748b;
+    font-size: 10.5px;
+    line-height: 1.35;
 }
 
 .pricer-output-panel-note {
@@ -4580,6 +5194,877 @@ button:hover {
     padding-left: 12px;
 }
 
+/* Compact multi-structure trading tickets. */
+.pricer-structure-panel.pricer-config-section {
+    padding-right: 8px;
+    padding-bottom: 8px;
+    padding-left: 8px;
+}
+
+.pricer-structure-panel.pricer-config-section > .pricer-section-header {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    gap: 2px;
+    margin-right: -8px;
+    margin-bottom: 6px;
+    margin-left: -8px;
+    padding: 5px 8px;
+}
+
+.pricer-structure-panel > .pricer-section-header .pricer-section-title {
+    align-self: center;
+    font-size: 12px;
+    font-weight: 800;
+}
+
+.pricer-structure-panel > .pricer-section-header .pricer-section-title::before {
+    display: none;
+}
+
+.pricer-structure-panel > .pricer-section-header .pricer-section-actions {
+    display: contents;
+}
+
+.pricer-structure-panel > .pricer-section-header > .pricer-section-title {
+    grid-column: 1;
+    grid-row: 1;
+}
+
+.pricer-structure-panel > .pricer-section-header .pricer-structure-header-controls {
+    grid-column: 2;
+    grid-row: 1;
+}
+
+.pricer-structure-panel > .pricer-section-header .pricer-structure-header-actions {
+    grid-column: 3;
+    grid-row: 1;
+}
+
+.pricer-structure-header-controls .pricer-market-strip {
+    display: contents;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
+.pricer-structure-header-controls,
+.pricer-structure-header-actions {
+    display: flex;
+    align-items: flex-end;
+    min-width: 0;
+}
+
+.pricer-structure-header-controls {
+    flex: 1 1 auto;
+    align-items: flex-start;
+    flex-wrap: nowrap;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+    white-space: nowrap;
+}
+
+.pricer-structure-header-actions {
+    flex: 0 0 auto;
+    gap: 4px;
+}
+
+.pricer-header-context {
+    display: contents;
+}
+
+.pricer-structure-header-controls .pricer-context-grid {
+    display: contents;
+}
+
+.pricer-structure-header-controls .pricer-field {
+    gap: 3px;
+}
+
+.pricer-structure-header-controls .pricer-field-label {
+    display: flex;
+    align-items: flex-end;
+    height: 11px;
+    min-height: 11px;
+    font-size: 8.5px;
+    line-height: 1;
+}
+
+.pricer-structure-header-controls .pricer-field-hint {
+    display: none;
+}
+
+.pricer-structure-header-controls .pricer-asset-field {
+    flex: 0 0 64px;
+    min-width: 64px;
+}
+
+.pricer-structure-header-controls .pricer-price-unit-field {
+    flex: 0 0 64px;
+    min-width: 64px;
+}
+
+.pricer-price-unit-value {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 34px;
+    min-height: 34px;
+    padding: 0 3px;
+    box-sizing: border-box;
+    border: 1px solid rgba(203, 213, 225, 0.95);
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 9.5px;
+    font-weight: 750;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.pricer-structure-header-controls .pricer-model-field {
+    flex: 0 0 82px;
+    min-width: 82px;
+}
+
+.pricer-structure-header-controls .pricer-premium-convention-field {
+    flex: 0 0 110px;
+    min-width: 110px;
+}
+
+.pricer-structure-header-controls .pricer-shape-field {
+    flex: 0 0 72px;
+    min-width: 72px;
+}
+
+.pricer-structure-header-controls .pricer-delivery-month-field {
+    flex: 0 0 70px;
+    min-width: 70px;
+}
+
+.pricer-structure-header-controls .pricer-filter-dropdown,
+.pricer-structure-header-controls .dash-dropdown,
+.pricer-structure-header-controls .dash-dropdown-wrapper {
+    width: 100%;
+    min-width: 0;
+}
+
+.pricer-structure-header-controls .dash-dropdown-grid-container {
+    gap: 3px;
+    padding-right: 5px;
+    padding-left: 5px;
+}
+
+.pricer-structure-header-controls .dash-dropdown-value-item {
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.pricer-structure-header-controls .dash-dropdown-trigger-icon {
+    width: 13px;
+    height: 13px;
+}
+
+.pricer-structure-header-controls .Select-control {
+    min-height: 29px !important;
+    height: 29px !important;
+}
+
+.pricer-structure-header-controls .Select-value,
+.pricer-structure-header-controls .Select-placeholder {
+    line-height: 27px !important;
+}
+
+.pricer-structure-header-controls .Select-input {
+    height: 27px !important;
+}
+
+.pricer-structure-header-controls .Select-value-label,
+.pricer-structure-header-controls .Select-placeholder {
+    font-size: 11px !important;
+    font-weight: 700;
+}
+
+.pricer-structure-header-actions .pricer-structure-status {
+    flex: 0 0 24px;
+    min-width: 24px;
+    max-width: 24px;
+}
+
+.pricer-structure-header-actions .pricer-structure-status:empty {
+    flex-basis: 0;
+    width: 0;
+    min-width: 0;
+}
+
+.pricer-structure-header-actions .pricer-structure-status .pricer-empty-state {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    min-height: 29px;
+    padding: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    font-size: 0;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pricer-structure-header-actions
+    .pricer-structure-status
+    .pricer-empty-state::before {
+    font-size: 12px;
+    font-weight: 850;
+    line-height: 1;
+}
+
+.pricer-structure-header-actions
+    .pricer-structure-status
+    .pricer-empty-state-success::before {
+    content: "✓";
+}
+
+.pricer-structure-header-actions
+    .pricer-structure-status
+    .pricer-empty-state-warning::before,
+.pricer-structure-header-actions
+    .pricer-structure-status
+    .pricer-empty-state-danger::before {
+    content: "!";
+}
+
+.pricer-structure-header-actions
+    .pricer-structure-status
+    .pricer-empty-state-neutral::before {
+    content: "•";
+}
+
+.pricer-structure-header-actions
+    .pricer-structure-status
+    .pricer-empty-state-danger {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pricer-structure-header-actions .pricer-calculate-button,
+.pricer-structure-header-actions .pricer-secondary-button,
+.pricer-structure-header-actions .pricer-remove-button {
+    min-height: 29px;
+    padding: 5px;
+    font-size: 10.5px;
+}
+
+.pricer-structure-header-actions .pricer-remove-button {
+    min-width: 29px;
+    padding-right: 6px;
+    padding-left: 6px;
+    font-size: 16px;
+    line-height: 1;
+}
+
+.pricer-market-strip {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 5px 7px;
+    align-items: flex-end;
+    padding: 6px 7px;
+    border: 1px solid #d8e2ee;
+    border-radius: 7px;
+    background: linear-gradient(180deg, #ffffff 0%, #f8fbfe 100%);
+}
+
+.pricer-market-strip .pricer-field,
+.pricer-market-strip .pricer-date-field,
+.pricer-market-strip .pricer-number-field {
+    flex: 0 0 112px;
+    width: 112px;
+    max-width: 112px;
+    min-width: 0;
+    gap: 3px;
+}
+
+.pricer-market-strip .pricer-date-field {
+    flex-basis: 142px;
+    width: 142px;
+    max-width: 142px;
+}
+
+.pricer-market-strip .pricer-field-label {
+    min-height: 11px;
+    align-items: center;
+    font-size: 8.5px;
+    line-height: 1;
+}
+
+.pricer-market-strip .pricer-field-hint {
+    display: none;
+}
+
+.pricer-market-strip .pricer-number-input,
+.pricer-market-strip .dash-datepicker {
+    min-height: 30px;
+    height: 30px;
+}
+
+.pricer-market-strip .pricer-date-picker .SingleDatePickerInput,
+.pricer-market-strip .pricer-date-picker .DateInput,
+.pricer-market-strip .pricer-date-picker .DateInput_input {
+    height: 28px;
+    min-height: 28px;
+    line-height: 28px;
+}
+
+.pricer-structure-header-controls .pricer-market-strip .pricer-field,
+.pricer-structure-header-controls .pricer-market-strip .pricer-number-field {
+    flex: 0 0 64px;
+    width: 64px;
+    max-width: 64px;
+}
+
+.pricer-structure-header-controls .pricer-market-strip .pricer-date-field {
+    flex: 0 0 94px;
+    width: 94px;
+    max-width: 94px;
+}
+
+.pricer-structure-header-controls .pricer-market-strip .pricer-contract-size-field {
+    flex-basis: 92px;
+    width: 92px;
+    max-width: 92px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-structure-header-controls
+    .pricer-market-strip
+    .pricer-forward-field {
+    flex: 0 0 80px;
+    width: 80px;
+    max-width: 80px;
+}
+
+.pricer-structure-header-controls .pricer-number-input {
+    height: 34px;
+    min-height: 34px;
+}
+
+/* Compact controls are exclusive to the current /pricer workflow. */
+.options-dashboard-container.pricer-page-current
+    .pricer-filter-dropdown {
+    height: 30px;
+    min-height: 30px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-number-input {
+    height: 30px;
+    min-height: 30px;
+    padding-right: 8px;
+    padding-left: 8px;
+    line-height: 28px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-number-input
+    > .dash-input-element {
+    height: 28px;
+    min-height: 28px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+    line-height: 22px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-date-field
+    .dash-datepicker,
+.options-dashboard-container.pricer-page-current
+    .pricer-date-field
+    .SingleDatePicker,
+.options-dashboard-container.pricer-page-current
+    .pricer-date-field
+    .SingleDatePickerInput,
+.options-dashboard-container.pricer-page-current
+    .pricer-date-field
+    .DateInput {
+    height: 30px;
+    min-height: 30px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-date-field
+    .dash-datepicker-input,
+.options-dashboard-container.pricer-page-current
+    .pricer-date-field
+    .DateInput_input {
+    height: 28px;
+    min-height: 28px;
+    line-height: 28px;
+}
+
+.pricer-structure-header-controls .pricer-inline-method-note {
+    display: none;
+}
+
+.pricer-leg-toolbar {
+    min-height: 30px;
+    gap: 5px 10px;
+    margin-top: 0;
+}
+
+.pricer-leg-heading,
+.pricer-leg-edit-actions,
+.pricer-leg-toolbar-status {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    min-width: 0;
+}
+
+.pricer-leg-toolbar-status {
+    justify-content: flex-end;
+    margin-left: auto;
+}
+
+.pricer-leg-edit-actions .pricer-secondary-button,
+.pricer-leg-edit-actions .pricer-remove-button {
+    min-height: 27px;
+    padding: 4px 8px;
+    font-size: 10.5px;
+}
+
+.pricer-calculation-meta {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.pricer-calculation-meta:empty {
+    display: none;
+}
+
+.pricer-calculation-meta-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 23px;
+    padding: 2px 7px;
+    box-sizing: border-box;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 10.5px;
+    font-weight: 750;
+    font-variant-numeric: tabular-nums;
+    cursor: help;
+}
+
+.pricer-calculation-meta-label {
+    color: #64748b;
+    font-size: 9px;
+    font-weight: 850;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+.pricer-leg-toolbar-status .pricer-warning-container {
+    flex-direction: row;
+    gap: 4px;
+}
+
+.pricer-leg-toolbar-status .pricer-empty-state {
+    max-width: 320px;
+    margin: 0;
+    padding: 3px 7px;
+    font-size: 10px;
+    line-height: 1.2;
+}
+
+.pricer-unit-results-container:empty {
+    display: none;
+}
+
+.pricer-unit-results-container > .pricer-strip-details {
+    margin-top: 3px;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell.pricer-result-column-group {
+    background: #dde8f3 !important;
+    border-top: 2px solid #8da9c3 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell.pricer-result-column-group-position {
+    background: #dcefe5 !important;
+    border-top-color: #659979 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell.pricer-result-column-group-inputs {
+    background: #e9eef5 !important;
+    border-top-color: #64748b !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell.pricer-result-column-group-published {
+    background: #eee9f6 !important;
+    border-top-color: #8b78ad !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell.pricer-result-column-group-premium {
+    background: #f6e8cf !important;
+    border-top-color: #b7883e !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell.pricer-result-column-group-adjustment {
+    background: #eee9f6 !important;
+    border-top-color: #8b78ad !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
+    .ag-header-group-cell-label {
+    justify-content: center;
+    color: #172033;
+    font-size: 10px;
+    font-weight: 850;
+    letter-spacing: 0.035em;
+    text-transform: uppercase;
+}
+
+/* Current Pricer: compact institutional option-leg ticket. */
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid {
+    --ag-row-height: 28px;
+    --ag-header-height: 30px;
+    --ag-cell-horizontal-padding: 4px;
+    --ag-border-color: #cfdbe7;
+    --ag-row-border-color: #edf2f7;
+    --ag-odd-row-background-color: #fafbfd;
+    --ag-row-hover-color: #edf5fc;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    border: 0;
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow:
+        inset 0 0 0 1px #cfdbe7,
+        0 1px 2px rgba(15, 23, 42, 0.045),
+        0 5px 14px rgba(15, 23, 42, 0.035);
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-root-wrapper {
+    max-width: 100%;
+    overflow: hidden;
+    border: 0;
+    border-radius: 7px;
+    background: #ffffff;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header,
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell {
+    background: #f7f9fc !important;
+    border-color: #dbe4ed !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell {
+    border-right: 0 !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell {
+    border-right: 1px solid #d5e0ea !important;
+    border-bottom: 1px solid #d5e0ea !important;
+    background: #eef2f6 !important;
+    box-shadow: inset 0 2px 0 #60758a;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell.pricer-result-column-group-volatility {
+    background: #e8f1fb !important;
+    box-shadow: inset 0 2px 0 #3b6f9c;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell.pricer-result-column-group-adjustment {
+    background: #f0ecf8 !important;
+    box-shadow: inset 0 2px 0 #7b68a6;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell.pricer-result-column-group-premium {
+    background: #fbf1db !important;
+    box-shadow: inset 0 2px 0 #b07a2d;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell.pricer-result-column-group-unit {
+    background: #edf3f9 !important;
+    box-shadow: inset 0 2px 0 #6a8299;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell.pricer-result-column-group-position {
+    background: #e8f3ed !important;
+    box-shadow: inset 0 2px 0 #4f8064;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-group-cell-label {
+    padding-right: 4px;
+    padding-left: 4px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell.pricer-table-text-header
+    .ag-header-cell-label {
+    justify-content: flex-start;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell.pricer-table-number-header
+    .ag-header-cell-label {
+    justify-content: flex-end;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell.pricer-table-category-header
+    .ag-header-cell-label {
+    justify-content: center;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell[col-id="unit_value"],
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell[col-id="trade_value"] {
+    background: #fff9ed !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell {
+    padding-right: 4px;
+    padding-left: 4px;
+    border-right: 0 !important;
+    border-bottom: 1px solid #edf2f7 !important;
+    background-image: none;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-table-number-cell {
+    padding-right: 5px !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-table-category-cell {
+    justify-content: center;
+    text-align: center;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell[col-id="name"]
+    .pricer-leg-selector {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .pricer-leg-selector-checkbox {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    accent-color: #2563eb;
+    cursor: pointer;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .pricer-leg-selector-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-header-cell.pricer-column-group-start,
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-column-group-start {
+    border-left: 1px solid #cfdbe7 !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-row-odd
+    .ag-cell {
+    background-color: #fafbfd;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-positive-cell,
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-negative-cell,
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-missing-cell {
+    background-color: transparent !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-positive-cell {
+    color: #047857 !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-negative-cell {
+    color: #b42318 !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-missing-cell {
+    color: #94a3b8 !important;
+    font-weight: 500 !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-editable-cell {
+    background-color: #f4f9ff !important;
+    background-image: none !important;
+    box-shadow: inset 0 -1px 0 #7daed4;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell[col-id="unit_value"],
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell[col-id="trade_value"] {
+    background-color: #fff9ed !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell.pricer-invalid-cell {
+    outline: 1px solid #dc2626;
+    outline-offset: -1px;
+    background-color: #fef2f2 !important;
+    color: #991b1b !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-row-hover
+    .ag-cell {
+    background-color: #edf5fc !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-row-selected {
+    box-shadow: inset 3px 0 0 #2563eb;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-row-selected
+    .ag-cell {
+    background-color: #e4f0fb !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-cell-focus {
+    outline: 2px solid #2563eb !important;
+    outline-offset: -2px !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-row-pinned
+    .ag-cell {
+    border-top: 1px solid #94a3b8 !important;
+    background: #e9eff5 !important;
+    box-shadow: inset 0 1px 0 #ffffff;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-pinned-left-header,
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-pinned-left-cols-container
+    .ag-cell {
+    border-right: 1px solid #aebdcb !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-body-horizontal-scroll {
+    min-height: 10px !important;
+    height: 10px !important;
+}
+
+.options-dashboard-container.pricer-page-current
+    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
+    .ag-tooltip {
+    padding: 6px 8px;
+    border: 1px solid #334155;
+    border-radius: 5px;
+    background: #172033;
+    box-shadow: 0 5px 14px rgba(15, 23, 42, 0.22);
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
 .pricer-config-section .pricer-section-header,
 .pricer-output-section .pricer-section-header {
     margin-right: -12px;
@@ -4610,10 +6095,6 @@ button:hover {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .pricer-context-with-valuation {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
     .pricer-sticky-filter-group {
         flex: 1 1 100%;
         max-width: none;
@@ -4638,6 +6119,44 @@ button:hover {
     .options-dashboard-container.pricer-page {
         padding-left: 10px;
         padding-right: 10px;
+    }
+
+    .pricer-workspace-toolbar {
+        align-items: flex-start;
+        margin-left: -10px;
+        margin-right: -10px;
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
+    .pricer-workspace-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .pricer-workspace-actions .pricer-calculate-button,
+    .pricer-workspace-actions .pricer-secondary-button {
+        width: auto;
+        flex: 0 1 auto;
+    }
+
+    .pricer-structure-panel .pricer-section-actions {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        width: 100%;
+        margin-left: 0;
+    }
+
+    .pricer-structure-panel .pricer-structure-status {
+        grid-column: 1 / -1;
+    }
+
+    .pricer-structure-panel .pricer-structure-header-actions > button {
+        width: 100%;
+    }
+
+    .pricer-analysis-selector-field {
+        width: 100%;
     }
 
     .professional-section-header.pricer-sticky-filter-bar {
@@ -4669,12 +6188,10 @@ button:hover {
     }
 
     .pricer-context-grid,
-    .pricer-context-with-valuation,
     .pricer-sizing-grid {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .pricer-model-field,
     .pricer-leg-actions,
     .pricer-leg-actions button,
     .pricer-calculate-button {
@@ -4688,6 +6205,142 @@ button:hover {
 
     .pricer-chart-card {
         min-height: 420px;
+    }
+}
+
+@media (max-width: 480px) {
+    .pricer-context-with-valuation .pricer-field {
+        flex: 1 1 100%;
+        width: 100%;
+        max-width: none;
+    }
+
+    .pricer-context-with-valuation .pricer-field-hint {
+        overflow: visible;
+        text-overflow: clip;
+        white-space: normal;
+    }
+
+    .pricer-structure-panel .pricer-section-actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pricer-structure-panel .pricer-calculate-button {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 900px) {
+    .pricer-structure-panel.pricer-config-section > .pricer-section-header {
+        grid-template-columns: max-content minmax(0, 1fr);
+    }
+
+    .pricer-structure-header-controls {
+        grid-column: 1 / -1 !important;
+        grid-row: 2 !important;
+        width: 100%;
+    }
+
+    .pricer-structure-header-actions {
+        grid-column: 2 !important;
+        grid-row: 1 !important;
+        justify-content: flex-end;
+    }
+
+}
+
+@media (min-width: 1600px) {
+    .pricer-structure-panel.pricer-config-section > .pricer-section-header {
+        grid-template-columns: max-content minmax(0, 1fr) max-content;
+    }
+
+    .pricer-structure-panel > .pricer-section-header .pricer-structure-header-controls {
+        grid-column: 2;
+        grid-row: 1;
+    }
+}
+
+@media (max-width: 640px) {
+    .pricer-structure-panel.pricer-config-section > .pricer-section-header {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-structure-panel > .pricer-section-header .pricer-section-actions {
+        display: contents;
+    }
+
+    .pricer-structure-panel > .pricer-section-header > .pricer-section-title {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .pricer-structure-header-controls {
+        display: flex;
+        grid-column: 1 !important;
+        grid-row: 3 !important;
+        flex-wrap: nowrap;
+        width: 100%;
+        overflow-x: auto;
+    }
+
+    .pricer-structure-header-controls .pricer-asset-field,
+    .pricer-structure-header-controls .pricer-model-field,
+    .pricer-structure-header-controls .pricer-premium-convention-field,
+    .pricer-structure-header-controls .pricer-shape-field,
+    .pricer-structure-header-controls .pricer-delivery-month-field {
+        width: auto;
+        max-width: none;
+    }
+
+    .pricer-structure-header-actions {
+        display: grid;
+        grid-column: 1 !important;
+        grid-row: 2 !important;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        width: 100%;
+    }
+
+    .pricer-structure-header-actions .pricer-structure-status {
+        grid-column: 1 / -1;
+        width: 100%;
+        max-width: none;
+    }
+
+    .pricer-market-strip .pricer-field,
+    .pricer-market-strip .pricer-date-field,
+    .pricer-market-strip .pricer-number-field {
+        width: 100%;
+        max-width: none;
+    }
+
+    .pricer-structure-header-controls .pricer-market-strip .pricer-field,
+    .pricer-structure-header-controls .pricer-market-strip .pricer-number-field {
+        flex: 0 0 64px;
+        width: 64px;
+        max-width: 64px;
+    }
+
+    .pricer-structure-header-controls .pricer-market-strip .pricer-date-field {
+        flex: 0 0 94px;
+        width: 94px;
+        max-width: 94px;
+    }
+
+    .pricer-structure-header-controls .pricer-market-strip .pricer-contract-size-field {
+        flex-basis: 92px;
+        width: 92px;
+        max-width: 92px;
+    }
+
+    .pricer-leg-toolbar,
+    .pricer-leg-toolbar-status {
+        align-items: flex-start;
+    }
+
+    .pricer-leg-toolbar-status {
+        justify-content: flex-start;
+        width: 100%;
+        margin-left: 0;
     }
 }
 
@@ -6248,6 +7901,24 @@ button:hover {
         margin-left: -8px;
     }
 }
+.dashboard-source-status-row {
+    display: contents;
+}
+
+.dashboard-source-status-row-pricer {
+    position: sticky;
+    top: 55px;
+    z-index: 1190;
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    min-height: 50px;
+    padding: 7px 18px;
+    background: #f8fafc;
+    box-sizing: border-box;
+}
+
 .dashboard-source-status-banner {
     position: sticky;
     top: var(--dashboard-top-bar-height, 54px);
@@ -6256,6 +7927,102 @@ button:hover {
     padding: 8px 18px 0;
     background: #f8fafc;
     box-sizing: border-box;
+}
+
+.dashboard-source-status-row-pricer .dashboard-source-status-banner {
+    position: static;
+    top: auto;
+    z-index: auto;
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+}
+
+.dashboard-source-status-row-pricer .dashboard-source-status-content {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+}
+
+.dashboard-source-status-row-pricer .dashboard-source-status-headline,
+.dashboard-source-status-row-pricer .dashboard-source-status-chip {
+    flex: 0 0 auto;
+}
+
+.pricer-global-valuation-control {
+    flex: 0 0 202.4px;
+    min-width: 202.4px;
+    min-height: 36px;
+    padding: 3px 8px;
+    box-sizing: border-box;
+    border: 1px solid #c7d7e8;
+    border-left: 4px solid #477aa6;
+    border-radius: 6px;
+    background: linear-gradient(180deg, #f8fbff 0%, #eaf2fa 100%);
+}
+
+.pricer-global-valuation-control-hidden {
+    display: none;
+}
+
+.pricer-global-valuation-control-visible {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.pricer-global-valuation-control .pricer-field-label {
+    flex: 0 0 auto;
+    color: #334155;
+    font-size: 8.5px;
+    font-weight: 800;
+    letter-spacing: 0.055em;
+    line-height: 1;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.pricer-global-valuation-control .pricer-global-valuation-picker {
+    grid-template-columns: minmax(0, 1fr) 15px;
+    column-gap: 4px;
+    width: 100%;
+    min-width: 0;
+    padding-right: 4px;
+    padding-left: 4px;
+}
+
+.pricer-global-valuation-control .dash-datepicker,
+.pricer-global-valuation-control .SingleDatePicker,
+.pricer-global-valuation-control .SingleDatePickerInput,
+.pricer-global-valuation-control .DateInput {
+    width: 100%;
+    min-width: 0;
+}
+
+.pricer-global-valuation-control .DateInput,
+.pricer-global-valuation-control .DateInput_input,
+.pricer-global-valuation-control .dash-datepicker-input {
+    height: 22px;
+    min-height: 22px;
+    line-height: 22px;
+}
+
+.pricer-global-valuation-control .DateInput_input,
+.pricer-global-valuation-control .dash-datepicker-input {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    min-width: 0;
+    padding: 0 5px;
+    border-radius: 4px;
+    color: #172033;
+    font-size: 10.5px;
+    font-weight: 750;
+    font-variant-numeric: tabular-nums;
 }
 
 .dashboard-source-status-banner-hidden {
@@ -6281,6 +8048,73 @@ button:hover {
 .dashboard-source-status-warning { border-left-color: #f59e0b; background: #fffbeb; }
 .dashboard-source-status-danger { border-left-color: #ef4444; background: #fef2f2; }
 
+.dashboard-source-status-row-pricer-valuation-warning {
+    background: #fff1f2;
+    box-shadow: inset 0 -2px 0 #dc2626;
+}
+
+.dashboard-source-status-row-pricer-valuation-warning .pricer-global-valuation-control {
+    border-color: #ef4444;
+    border-left-color: #991b1b;
+    background: linear-gradient(180deg, #fff7f7 0%, #fee2e2 100%);
+    box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.20);
+}
+
+.dashboard-source-status-row-pricer-valuation-warning .pricer-field-label {
+    color: #991b1b;
+}
+
+.dashboard-source-status-row-pricer-valuation-warning .pricer-global-valuation-picker {
+    border-color: #dc2626;
+    background: #ffffff;
+}
+
+.dashboard-source-status-valuation-warning {
+    border-color: #dc2626;
+    border-left-color: #991b1b;
+    background: linear-gradient(90deg, #fee2e2 0%, #fff1f2 100%);
+    color: #7f1d1d;
+    box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.16);
+}
+
+.dashboard-source-status-valuation-warning .dashboard-source-status-headline {
+    color: #7f1d1d;
+    font-weight: 900;
+    letter-spacing: 0.025em;
+}
+
+.dashboard-source-status-alert-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 24px;
+    width: 24px;
+    height: 24px;
+    border-radius: 999px;
+    background: #b91c1c;
+    color: #ffffff;
+    font-size: 16px;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.dashboard-source-status-alert-detail {
+    flex: 0 0 auto;
+    padding: 3px 8px;
+    border: 1px solid rgba(185, 28, 28, 0.32);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.78);
+    color: #991b1b;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.dashboard-source-status-context {
+    border-color: rgba(185, 28, 28, 0.28);
+    color: #7f1d1d;
+    font-weight: 750;
+}
+
 .dashboard-source-status-headline {
     font-weight: 700;
     color: #0f172a;
@@ -6296,14 +8130,60 @@ button:hover {
 }
 
 @media (max-width: 1180px) {
+    .dashboard-source-status-row-pricer {
+        top: 55px;
+    }
+
+    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
+        top: 111px;
+    }
+
     .dashboard-source-status-banner {
         top: 91px;
     }
 }
 
+@media (max-width: 1100px) {
+    .dashboard-source-status-row-pricer {
+        top: 111px;
+    }
+
+    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
+        top: 167px;
+    }
+}
+
+@media (max-width: 900px) {
+    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
+        top: 178px;
+    }
+}
+
 @media (max-width: 768px) {
+    .dashboard-source-status-row-pricer {
+        top: 193px;
+        gap: 6px;
+        min-height: 48px;
+        padding: 6px 10px;
+    }
+
+    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
+        top: 258px;
+    }
+
     .dashboard-source-status-banner {
         top: 136px;
+    }
+
+    .dashboard-source-status-row-pricer .dashboard-source-status-banner {
+        top: auto;
+    }
+
+    .pricer-global-valuation-control {
+        flex-basis: 191.4px;
+        min-width: 191.4px;
+        padding-right: 6px;
+        padding-left: 6px;
     }
 
     .dashboard-source-status-content {

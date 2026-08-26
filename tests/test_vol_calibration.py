@@ -34,7 +34,7 @@ def _components_by_id(component):
     return {
         item.id: item
         for item in _walk(component)
-        if getattr(item, "id", None) is not None
+        if isinstance(getattr(item, "id", None), str)
     }
 
 
@@ -154,7 +154,7 @@ def test_excel_summary_records_model_version(module):
     assert excel_file.sheet_names == ["Parameters", "Summary"]
 
 
-@pytest.mark.parametrize("module", (hh, ttf, jkm))
+@pytest.mark.parametrize("module", (hh, ttf))
 def test_comparison_save_is_rejected_server_side_when_writes_disabled(monkeypatch, module):
     monkeypatch.setattr(module, "writes_enabled", lambda: False)
     monkeypatch.setattr(
@@ -188,7 +188,7 @@ def test_comparison_save_is_rejected_server_side_when_writes_disabled(monkeypatc
         )
 
 
-@pytest.mark.parametrize("module", (hh, ttf, jkm))
+@pytest.mark.parametrize("module", (hh, ttf))
 def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch, module):
     monkeypatch.setattr(module, "writes_enabled", lambda: False)
     monkeypatch.setattr(
@@ -294,6 +294,48 @@ def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch,
         result[5]["results"] if module is ttf else result[5]
     )
     assert batch_results[0]["status"] == "Success"
+
+
+def test_jkm_batch_auto_save_option_never_uses_legacy_parameter_store(monkeypatch):
+    monkeypatch.setattr(
+        jkm,
+        "ctx",
+        SimpleNamespace(triggered_id="jkm-batch-confirm-btn"),
+    )
+    monkeypatch.setattr(
+        jkm,
+        "get_database_engine",
+        lambda: pytest.fail("legacy database save must not be requested"),
+    )
+    monkeypatch.setattr(
+        jkm,
+        "calibrate_jkm_batch",
+        lambda market, table, **kwargs: {
+            "results": [{"expiry": "2026-09-01", "status": "Success"}],
+            "table_data": table,
+            "success_count": 1,
+            "skip_count": 0,
+            "fail_count": 0,
+        },
+    )
+    market = pd.DataFrame(
+        [{"expiry": pd.Timestamp("2026-09-01"), "forward": 1.0}]
+    )
+    table = [{"expiry": "Sep-26"}]
+
+    result = jkm.run_batch_calibration(
+        1,
+        None,
+        market.to_json(date_format="iso", orient="split"),
+        table,
+        ["auto_save"],
+        [],
+        "2026-07-08",
+        False,
+    )
+
+    assert result[1] == 100
+    assert result[5]["results"][0]["status"] == "Success"
 
 
 def test_save_controls_are_disabled_by_default(monkeypatch):
@@ -500,11 +542,12 @@ def test_ttf_date_or_reload_clears_the_calibration_snapshot():
     )
 
 
-def test_basis_is_exposed_only_in_ttf_shared_components():
+def test_basis_and_hybrid_diagnostics_are_exposed_for_ttf_and_jkm():
     ttf_table = _components_by_id(create_parameter_table("TTF"))["ttf-param-table"]
     jkm_table = _components_by_id(create_parameter_table("JKM"))["jkm-param-table"]
     assert [column["id"] for column in ttf_table.columns][1] == "calibration_basis"
-    assert "calibration_basis" not in {
+    assert [column["id"] for column in jkm_table.columns][1] == "calibration_basis"
+    assert "tail_fit_tv_rmse" in {
         column["id"] for column in jkm_table.columns
     }
 
@@ -512,10 +555,10 @@ def test_basis_is_exposed_only_in_ttf_shared_components():
         comparison_modal.create_comparison_modal("TTF", show_basis=True)
     )
     jkm_modal = _components_by_id(
-        comparison_modal.create_comparison_modal("JKM")
+        comparison_modal.create_comparison_modal("JKM", show_basis=True)
     )
     assert "ttf-comparison-basis" in ttf_modal
-    assert "jkm-comparison-basis" not in jkm_modal
+    assert "jkm-comparison-basis" in jkm_modal
 
 
 def test_host_app_registers_route_callbacks_without_overwriting_url_search():

@@ -31,7 +31,9 @@ from runtime_config import get_database_engine
 from brent_option_chain_refresh import (
     INTRADAY_REQUEST_KIND,
     SETTLEMENT_REQUEST_KIND,
+    WORKER_FRESHNESS_SECONDS,
     get_refresh_job,
+    get_worker_readiness,
     intraday_refresh_enabled,
     settlement_refresh_enabled,
     submit_refresh_job,
@@ -1191,128 +1193,113 @@ def _page_implied_volatility(
     )
 
 
-def _indicative_last_price_smile(raw: pd.DataFrame) -> pd.DataFrame:
-    """Build a non-executable OTM smile from Bloomberg last prices.
-
-    Bloomberg can return a valid LAST_PRICE for an illiquid contract without a
-    current bid/ask or trade timestamp.  Such a price must not become an
-    executable quote, but it is still useful for calculating an indicative IV
-    and retaining that strike's activity on the Delta view.
-    """
-    columns = [
-        "strike",
-        "put_call",
-        "option_security",
-        "last_price",
-        "reference_iv",
-        "forward",
-        "display_delta",
-        "delta_source",
-        "reference_time",
-        "volume",
-        "open_interest",
-        "open_interest_date",
-        "open_interest_scope_status",
-    ]
+def _last_price_parity_quality(raw: pd.DataFrame) -> dict[str, Any]:
+    """Audit TFO LAST_PRICE timing without treating it as a current smile."""
+    result = {
+        "status": "not_applicable",
+        "pair_count": 0,
+        "parity_forward": None,
+        "parity_mad": None,
+        "live_forward": None,
+        "live_spread": None,
+        "gap": None,
+        "tolerance": None,
+        "timestamp_coverage": 0.0,
+    }
     if raw is None or raw.empty:
-        return pd.DataFrame(columns=columns)
+        return result
     work = raw.copy()
-    if str(work.get("snapshot_kind", pd.Series([""])).iloc[0]).upper() != "INTRADAY":
-        return pd.DataFrame(columns=columns)
-
-    business_dates = pd.to_datetime(work.get("business_date"), errors="coerce").dropna()
-    expirations = pd.to_datetime(
-        work.get("option_expiration_date"), errors="coerce"
-    ).dropna()
-    forward_values = pd.to_numeric(
-        work.get("underlying_mid", pd.Series(np.nan, index=work.index)),
-        errors="coerce",
-    ).where(
-        pd.to_numeric(
-            work.get("underlying_mid", pd.Series(np.nan, index=work.index)),
-            errors="coerce",
-        ).gt(0.0),
-        pd.to_numeric(
-            work.get("underlying_price", pd.Series(np.nan, index=work.index)),
-            errors="coerce",
-        ),
-    ).dropna()
-    if business_dates.empty or expirations.empty or forward_values.empty:
-        return pd.DataFrame(columns=columns)
-    dte = (expirations.iloc[0].normalize() - business_dates.iloc[0].normalize()).days
-    forward = float(forward_values.median())
-    product = _normalize_product(
-        work.get("product", pd.Series([PRODUCT])).iloc[0]
-    )
-    if dte <= 0 or forward <= 0.0:
-        return pd.DataFrame(columns=columns)
+    if (
+        _normalize_product(work.get("product", pd.Series([PRODUCT])).iloc[0]) != "TFO"
+        or str(work.get("snapshot_kind", pd.Series([""])).iloc[0]).upper()
+        != "INTRADAY"
+    ):
+        return result
 
     work["strike"] = pd.to_numeric(work.get("strike"), errors="coerce")
     work["last_price"] = pd.to_numeric(work.get("last_price"), errors="coerce")
-    work = work.loc[
-        work["strike"].gt(0.0) & work["last_price"].gt(0.0)
+    work["put_call"] = work.get(
+        "put_call", pd.Series("", index=work.index)
+    ).astype(str).str.upper()
+    valid = work.loc[
+        work["strike"].gt(0.0)
+        & work["last_price"].gt(0.0)
+        & work["put_call"].isin(["C", "P"])
     ].copy()
-    if work.empty:
-        return pd.DataFrame(columns=columns)
+    if valid.empty:
+        result["status"] = "insufficient"
+        return result
 
-    rows = []
-    for strike, strike_rows in work.groupby("strike", sort=True):
-        coordinate_side = _option_side_for_strike(strike, forward)
-        candidates = strike_rows.assign(
-            _preferred_side=strike_rows["put_call"].astype(str).str.upper().eq(
-                coordinate_side
-            )
-        ).sort_values("_preferred_side", ascending=False)
-        for candidate in candidates.itertuples(index=False):
-            put_call = str(candidate.put_call).strip().upper()
-            if put_call not in {"C", "P"}:
-                continue
-            implied = _page_implied_volatility(
-                product,
-                put_call,
-                float(candidate.last_price),
-                forward,
-                float(strike),
-                dte / 365.25,
-            )
-            if not math.isfinite(implied) or implied <= 0.0:
-                continue
-            last_trade_date = pd.to_datetime(
-                getattr(candidate, "last_trade_date", None), errors="coerce"
-            )
-            rows.append(
-                {
-                    "strike": float(strike),
-                    "put_call": put_call,
-                    "option_security": getattr(candidate, "option_security", None),
-                    "last_price": float(candidate.last_price),
-                    "reference_iv": float(implied),
-                    "forward": forward,
-                    "display_delta": _delta_x_from_market_inputs(
-                        strike=strike,
-                        forward=forward,
-                        volatility=implied,
-                        dte=dte,
-                        put_call=coordinate_side,
-                    ),
-                    "delta_source": "Indicative last price · non-executable",
-                    "reference_time": (
-                        last_trade_date.strftime("%d %b %Y")
-                        if pd.notna(last_trade_date)
-                        else "Timestamp unavailable"
-                    ),
-                    "volume": getattr(candidate, "volume", None),
-                    "open_interest": getattr(candidate, "open_interest", None),
-                    "open_interest_date": getattr(
-                        candidate, "open_interest_date", None
-                    ),
-                    "open_interest_scope_status": getattr(
-                        candidate, "open_interest_scope_status", "unavailable"
-                    ),
-                }
-            )
-            break
-    return pd.DataFrame(rows, columns=columns)
+    paired = valid.pivot_table(
+        index="strike", columns="put_call", values="last_price", aggfunc="median"
+    )
+    if "C" not in paired or "P" not in paired:
+        result["status"] = "insufficient"
+        return result
+    paired = paired.dropna(subset=["C", "P"])
+    parity_forwards = (
+        pd.Series(paired.index.to_numpy(dtype=float), index=paired.index)
+        + paired["C"]
+        - paired["P"]
+    )
+    parity_forwards = parity_forwards.loc[
+        np.isfinite(parity_forwards) & parity_forwards.gt(0.0)
+    ]
+    result["pair_count"] = int(len(parity_forwards))
+    if parity_forwards.empty:
+        result["status"] = "insufficient"
+        return result
+
+    parity_forward = float(parity_forwards.median())
+    parity_mad = float((parity_forwards - parity_forward).abs().median())
+    live_values = pd.to_numeric(
+        work.get("underlying_mid", pd.Series(np.nan, index=work.index)),
+        errors="coerce",
+    )
+    live_values = live_values.loc[live_values.gt(0.0)]
+    live_forward = float(live_values.median()) if not live_values.empty else None
+    bid = pd.to_numeric(
+        work.get("underlying_bid", pd.Series(np.nan, index=work.index)),
+        errors="coerce",
+    )
+    ask = pd.to_numeric(
+        work.get("underlying_ask", pd.Series(np.nan, index=work.index)),
+        errors="coerce",
+    )
+    spreads = (ask - bid).loc[ask.gt(bid) & bid.gt(0.0)]
+    live_spread = float(spreads.median()) if not spreads.empty else 0.0
+    timestamp_coverage = float(
+        pd.to_datetime(
+            valid.get("last_trade_date", pd.Series(pd.NaT, index=valid.index)),
+            errors="coerce",
+        ).notna().mean()
+    )
+    result.update(
+        {
+            "parity_forward": parity_forward,
+            "parity_mad": parity_mad,
+            "live_forward": live_forward,
+            "live_spread": live_spread,
+            "timestamp_coverage": timestamp_coverage,
+        }
+    )
+    if len(parity_forwards) < 3:
+        result["status"] = "insufficient"
+        return result
+    if live_forward is None:
+        result["status"] = "unverifiable"
+        return result
+
+    tolerance = max(2.0 * live_spread, 0.25, 0.005 * live_forward)
+    gap = live_forward - parity_forward
+    result.update({"gap": gap, "tolerance": tolerance})
+    if parity_mad > tolerance:
+        result["status"] = "incoherent"
+    elif abs(gap) <= tolerance:
+        result["status"] = "current_compatible"
+    else:
+        result["status"] = "coherent_historical"
+    return result
 
 
 def _settlement_reference_selection(
@@ -1504,9 +1491,10 @@ def _settlement_reference_smile(
 
 def _activity_delta_projection(
     raw: pd.DataFrame,
-    indicative_smile: pd.DataFrame | None = None,
+    trade_tape: pd.DataFrame | None = None,
+    prior_settlement: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Map every activity strike to the governed primary smile's delta axis."""
+    """Map activity to current quotes, exact trades, then prior settlement."""
     if raw is None or raw.empty:
         return pd.DataFrame(columns=["strike", "display_delta", "delta_source"])
     work = raw.copy()
@@ -1532,27 +1520,6 @@ def _activity_delta_projection(
         .mean()
         .sort_values("strike")
     )
-    reference_kind = "primary"
-    if reference.empty and is_intraday:
-        indicative = (
-            _indicative_last_price_smile(work)
-            if indicative_smile is None
-            else indicative_smile.copy()
-        )
-        if not indicative.empty:
-            reference = (
-                indicative[["strike", "reference_iv"]]
-                .rename(columns={"reference_iv": "_primary_iv"})
-                .dropna()
-                .sort_values("strike")
-            )
-            reference_kind = "indicative_last_price"
-    if reference.empty:
-        return pd.DataFrame(columns=["strike", "display_delta", "delta_source"])
-
-    reference_strikes = reference["strike"].to_numpy(dtype=float)
-    reference_vols = reference["_primary_iv"].to_numpy(dtype=float)
-    direct_strikes = set(reference_strikes.tolist())
     business_date = pd.to_datetime(work["business_date"], errors="coerce").dropna()
     expiration = pd.to_datetime(
         work["option_expiration_date"], errors="coerce"
@@ -1565,40 +1532,251 @@ def _activity_delta_projection(
     if dte <= 0 or forward <= 0.0:
         return pd.DataFrame(columns=["strike", "display_delta", "delta_source"])
 
-    rows = []
-    for strike in sorted(pd.to_numeric(work["strike"], errors="coerce").dropna().unique()):
-        strike_value = float(strike)
-        reference_iv = float(
-            np.interp(strike_value, reference_strikes, reference_vols)
-        )
-        if reference_kind == "indicative_last_price":
+    activity_strikes = sorted(
+        pd.to_numeric(work["strike"], errors="coerce").dropna().unique()
+    )
+    rows: list[dict[str, Any]] = []
+    projected: set[float] = set()
+
+    def add_curve_projection(
+        curve: pd.DataFrame,
+        *,
+        curve_forward: float,
+        curve_dte: int,
+        label: str,
+    ) -> None:
+        if curve.empty or curve_forward <= 0.0 or curve_dte <= 0:
+            return
+        curve = curve.sort_values("strike")
+        reference_strikes = curve["strike"].to_numpy(dtype=float)
+        reference_vols = curve["_primary_iv"].to_numpy(dtype=float)
+        direct_strikes = set(reference_strikes.tolist())
+        for strike in activity_strikes:
+            strike_value = float(strike)
+            if strike_value in projected:
+                continue
+            reference_iv = float(
+                np.interp(strike_value, reference_strikes, reference_vols)
+            )
             if strike_value in direct_strikes:
-                source = "Indicative last price · non-executable"
+                source = f"{label} at strike"
             elif reference_strikes[0] < strike_value < reference_strikes[-1]:
-                source = "Interpolated indicative last-price smile"
+                source = f"Interpolated {label.lower()}"
             else:
-                source = "Nearest indicative last-price smile wing"
-        elif strike_value in direct_strikes:
-            source = "Primary smile at strike"
-        elif reference_strikes[0] < strike_value < reference_strikes[-1]:
-            source = "Interpolated primary smile"
-        else:
-            source = "Nearest primary smile wing"
-        option_type = _option_side_for_strike(strike_value, forward)
-        rows.append(
-            {
-                "strike": strike_value,
-                "display_delta": _delta_x_from_market_inputs(
-                    strike=strike_value,
-                    forward=forward,
-                    volatility=reference_iv,
-                    dte=dte,
-                    put_call=option_type,
-                ),
-                "delta_source": source,
-            }
+                source = f"Nearest {label.lower()} wing"
+            rows.append(
+                {
+                    "strike": strike_value,
+                    "display_delta": _delta_x_from_market_inputs(
+                        strike=strike_value,
+                        forward=curve_forward,
+                        volatility=reference_iv,
+                        dte=curve_dte,
+                        put_call=_option_side_for_strike(
+                            strike_value, curve_forward
+                        ),
+                    ),
+                    "delta_source": source,
+                }
+            )
+            projected.add(strike_value)
+
+    if not reference.empty:
+        add_curve_projection(
+            reference,
+            curve_forward=forward,
+            curve_dte=dte,
+            label="Current executable smile",
         )
-    return pd.DataFrame(rows)
+
+    if is_intraday and trade_tape is not None and not trade_tape.empty:
+        trades = trade_tape.copy()
+        contract_months = pd.to_datetime(
+            trades.get(
+                "underlying_contract_month",
+                pd.Series(pd.NaT, index=trades.index),
+            ),
+            errors="coerce",
+        ).dt.normalize()
+        raw_month = pd.to_datetime(
+            work["underlying_contract_month"], errors="coerce"
+        ).dropna()
+        if not raw_month.empty:
+            trades = trades.loc[contract_months.eq(raw_month.iloc[0].normalize())]
+        trades = trades.loc[
+            trades.get(
+                "trade_iv_status", pd.Series("", index=trades.index)
+            ).astype(str).eq("resolved")
+            & pd.to_numeric(
+                trades.get("trade_iv", pd.Series(np.nan, index=trades.index)),
+                errors="coerce",
+            ).gt(0.0)
+            & pd.to_numeric(
+                trades.get(
+                    "future_match_price", pd.Series(np.nan, index=trades.index)
+                ),
+                errors="coerce",
+            ).gt(0.0)
+        ].copy()
+        if not trades.empty:
+            trades["strike"] = pd.to_numeric(trades["strike"], errors="coerce")
+            trades = (
+                trades.sort_values("trade_at")
+                .dropna(subset=["strike"])
+                .drop_duplicates("strike", keep="last")
+            )
+            for trade in trades.itertuples(index=False):
+                strike_value = float(trade.strike)
+                if strike_value in projected or strike_value not in activity_strikes:
+                    continue
+                trade_expiration = pd.to_datetime(
+                    trade.option_expiration_date, errors="coerce"
+                )
+                trade_business_date = pd.to_datetime(
+                    trade.business_date, errors="coerce"
+                )
+                trade_dte = (
+                    trade_expiration.normalize() - trade_business_date.normalize()
+                ).days
+                rows.append(
+                    {
+                        "strike": strike_value,
+                        "display_delta": _delta_x_from_market_inputs(
+                            strike=strike_value,
+                            forward=float(trade.future_match_price),
+                            volatility=float(trade.trade_iv),
+                            dte=trade_dte,
+                            put_call=_option_side_for_strike(
+                                strike_value, float(trade.future_match_price)
+                            ),
+                        ),
+                        "delta_source": "Exact trade-time IV and future",
+                    }
+                )
+                projected.add(strike_value)
+
+    if is_intraday and prior_settlement is not None and not prior_settlement.empty:
+        prior = prior_settlement.copy()
+        prior["strike"] = pd.to_numeric(prior["strike"], errors="coerce")
+        prior["_primary_iv"] = pd.to_numeric(
+            prior["reference_iv"], errors="coerce"
+        )
+        prior = prior.dropna(subset=["strike", "_primary_iv"])
+        prior_dates = pd.to_datetime(
+            prior.get("business_date", pd.Series(dtype=object)), errors="coerce"
+        ).dropna()
+        prior_expirations = pd.to_datetime(
+            prior.get("option_expiration_date", pd.Series(dtype=object)),
+            errors="coerce",
+        ).dropna()
+        prior_forwards = pd.to_numeric(prior["forward"], errors="coerce").dropna()
+        if not prior_dates.empty and not prior_expirations.empty and not prior_forwards.empty:
+            prior_date = prior_dates.iloc[0].normalize()
+            add_curve_projection(
+                prior[["strike", "_primary_iv"]],
+                curve_forward=float(prior_forwards.median()),
+                curve_dte=(prior_expirations.iloc[0].normalize() - prior_date).days,
+                label=f"Prior settlement {prior_date.strftime('%d %b %Y')}",
+            )
+
+    return pd.DataFrame(rows, columns=["strike", "display_delta", "delta_source"])
+
+
+def _intraday_expiry_quality(
+    raw: pd.DataFrame,
+    trade_tape: pd.DataFrame | None,
+    prior_settlement: pd.DataFrame | None,
+) -> dict[str, Any]:
+    """Return one compact, trader-facing quality state for an expiry."""
+    if raw is None or raw.empty or str(raw["snapshot_kind"].iloc[0]).upper() != "INTRADAY":
+        return {}
+    executable_count = int(
+        (
+            raw.get("executable_iv_status", pd.Series(index=raw.index, dtype=object))
+            .astype(str)
+            .eq("resolved")
+            & pd.to_numeric(
+                raw.get("executable_iv_mid", pd.Series(np.nan, index=raw.index)),
+                errors="coerce",
+            ).gt(0.0)
+        ).sum()
+    )
+    trade_count = 0
+    if trade_tape is not None and not trade_tape.empty:
+        trade_count = int(
+            (
+                trade_tape.get(
+                    "trade_iv_status",
+                    pd.Series(index=trade_tape.index, dtype=object),
+                )
+                .astype(str)
+                .eq("resolved")
+                & pd.to_numeric(
+                    trade_tape.get(
+                        "trade_iv", pd.Series(np.nan, index=trade_tape.index)
+                    ),
+                    errors="coerce",
+                ).gt(0.0)
+            ).sum()
+        )
+    elif "last_trade_iv_status" in raw:
+        trade_count = int(
+            (
+                raw["last_trade_iv_status"].astype(str).eq("resolved")
+                & pd.to_numeric(raw["last_trade_iv"], errors="coerce").gt(0.0)
+            ).sum()
+        )
+
+    prior_count = 0 if prior_settlement is None else int(len(prior_settlement))
+    prior_dates = (
+        pd.Series(dtype="datetime64[ns]")
+        if prior_settlement is None or prior_settlement.empty
+        else pd.to_datetime(prior_settlement.get("business_date"), errors="coerce").dropna()
+    )
+    prior_label = (
+        prior_dates.iloc[0].strftime("%d %b %Y") if not prior_dates.empty else None
+    )
+    parity = _last_price_parity_quality(raw)
+
+    if executable_count:
+        label = "Live executable"
+        color = "success"
+        detail = f"{executable_count:,} synchronized two-sided IV observations"
+    elif trade_count:
+        label = "Trades only"
+        color = "info"
+        detail = f"No executable smile · {trade_count:,} exact trade-time IV observations"
+    elif prior_count:
+        label = f"Prior settle · {prior_label}" if prior_label else "Prior settle reference"
+        color = "secondary"
+        detail = "No reliable current IV"
+    else:
+        label = "No reliable IV"
+        color = "danger"
+        detail = "No executable quotes, matched trades, or prior settlement reference"
+
+    if not executable_count and parity["status"] == "coherent_historical":
+        direction = "higher" if float(parity["gap"]) > 0.0 else "lower"
+        detail += (
+            f" · FJS last-price parity implies TZT {parity['parity_forward']:.4f}; "
+            f"live TZT {parity['live_forward']:.4f} is {abs(parity['gap']):.4f} "
+            f"EUR/MWh {direction}"
+        )
+    elif not executable_count and parity["status"] == "incoherent":
+        detail += " · FJS last-price pairs are internally inconsistent"
+    elif not executable_count and parity["status"] in {"insufficient", "unverifiable"}:
+        detail += " · Bloomberg LAST_PRICE timing cannot be verified"
+
+    return {
+        "status": label,
+        "color": color,
+        "detail": detail,
+        "executable_count": executable_count,
+        "trade_count": trade_count,
+        "prior_settlement_count": prior_count,
+        "prior_settlement_date": prior_label,
+        "last_price_parity": parity,
+    }
 
 
 def _seconds_since_midnight_gst(values: pd.Series) -> pd.Series:
@@ -1749,6 +1927,7 @@ def build_expiry_figure(
     expiry: pd.Timestamp,
     x_axis: str = X_AXIS_STRIKE,
     trade_tape: pd.DataFrame | None = None,
+    prior_settlement_chain: pd.DataFrame | None = None,
     product: str | None = None,
 ) -> go.Figure:
     x_axis = _normalize_x_axis(x_axis)
@@ -1785,11 +1964,48 @@ def build_expiry_figure(
             errors="coerce",
         ).notna()
     )
-    indicative_smile = (
-        _indicative_last_price_smile(raw)
-        if is_intraday and not executable_mask.any()
+    prior_raw = (
+        prior_settlement_chain.loc[
+            _expiry_mask(
+                prior_settlement_chain,
+                expiry,
+                "underlying_contract_month",
+            )
+        ].copy()
+        if is_intraday
+        and prior_settlement_chain is not None
+        and not prior_settlement_chain.empty
         else pd.DataFrame()
     )
+    prior_reference = (
+        _settlement_reference_smile(prior_raw, x_axis)
+        if not prior_raw.empty
+        else pd.DataFrame()
+    )
+    if not prior_reference.empty:
+        current_strikes = set(
+            pd.to_numeric(raw["strike"], errors="coerce").dropna().astype(float)
+        )
+        prior_reference = prior_reference.loc[
+            pd.to_numeric(prior_reference["strike"], errors="coerce").isin(
+                current_strikes
+            )
+        ].copy()
+        prior_dates = pd.to_datetime(
+            prior_raw["business_date"], errors="coerce"
+        ).dropna()
+        prior_expirations = pd.to_datetime(
+            prior_raw["option_expiration_date"], errors="coerce"
+        ).dropna()
+        if prior_dates.empty:
+            prior_reference = pd.DataFrame()
+        else:
+            prior_reference["business_date"] = prior_dates.iloc[0]
+            prior_reference["option_expiration_date"] = (
+                prior_expirations.iloc[0]
+                if not prior_expirations.empty
+                else pd.NaT
+            )
     market = (
         prepared.loc[_expiry_mask(prepared, expiry, "expiry")].copy()
         if prepared is not None and not prepared.empty
@@ -1823,38 +2039,13 @@ def build_expiry_figure(
             activity.loc[activity_data_mask, "strike"], errors="coerce"
         ).dropna()
     )
-    reference_activity = raw.assign(
-        _reference_volume=pd.to_numeric(
-            raw.get("source_volume", raw.get("volume")), errors="coerce"
-        ),
-        _reference_open_interest=pd.to_numeric(
-            raw.get("source_open_interest", raw.get("open_interest")),
-            errors="coerce",
-        ),
-    )
-    indicative_reference_strikes = set(
-        pd.to_numeric(
-            reference_activity.loc[
-                reference_activity[
-                    ["_reference_volume", "_reference_open_interest"]
-                ].notna().any(axis=1),
-                "strike",
-            ],
-            errors="coerce",
-        ).dropna()
-    )
-    indicative_plot = (
-        indicative_smile.loc[
-            pd.to_numeric(indicative_smile["strike"], errors="coerce").isin(
-                indicative_reference_strikes
-            )
-        ].copy()
-        if not indicative_smile.empty
-        else pd.DataFrame()
-    )
     if x_axis == X_AXIS_DELTA:
         activity = activity.merge(
-            _activity_delta_projection(raw, indicative_smile),
+            _activity_delta_projection(
+                raw,
+                trade_tape=trade_tape,
+                prior_settlement=prior_reference,
+            ),
             how="left",
             on="strike",
             validate="many_to_one",
@@ -2082,6 +2273,41 @@ def build_expiry_figure(
     axis_hover = " · Δ %{x:.3f}" if x_axis == X_AXIS_DELTA else ""
     if is_intraday:
         executable = raw.loc[executable_mask].copy()
+        if not prior_reference.empty:
+            prior_date = pd.to_datetime(
+                prior_reference["business_date"], errors="coerce"
+            ).dropna().iloc[0]
+            figure.add_trace(
+                go.Scatter(
+                    x=prior_reference["display_x"],
+                    y=100.0 * prior_reference["reference_iv"],
+                    mode="lines",
+                    name=f"Prior settlement IV · {prior_date.strftime('%d %b %Y')}",
+                    legendrank=25,
+                    legendgroup="prior-settlement",
+                    line={"color": "#94A3B8", "width": 1.2, "dash": "dash"},
+                    customdata=np.column_stack(
+                        [
+                            prior_reference["strike"],
+                            prior_reference["option_security"],
+                            prior_reference["settlement_price"],
+                            prior_reference["forward"],
+                        ]
+                    ),
+                    hovertemplate=(
+                        f"<b>Prior official settlement · {prior_date.strftime('%d %b %Y')}</b>"
+                        "<br>Strike %{customdata[0]:.2f}"
+                        + axis_hover
+                        + " · IV <b>%{y:.2f}%</b>"
+                        "<br>%{customdata[1]} · Premium <b>%{customdata[2]:.4f} "
+                        + spec["price_unit"]
+                        + "</b>"
+                        f" · {underlying_hover_label} settle %{{customdata[3]:.3f}}"
+                        "<extra></extra>"
+                    ),
+                ),
+                secondary_y=False,
+            )
         side_colors = {"C": "#2563EB", "P": "#0F766E"}
         for put_call, side_label in (("C", "Calls"), ("P", "Puts")):
             side = executable.loc[executable["put_call"].eq(put_call)].sort_values("strike")
@@ -2173,64 +2399,6 @@ def build_expiry_figure(
                         "<br>Volume / OI <b>%{customdata[9]} / %{customdata[10]}</b>"
                         " · OI %{customdata[11]} (%{customdata[12]})"
                         "<br>Quote skew %{customdata[7]:.0f} ms<extra></extra>"
-                    ),
-                ),
-                secondary_y=False,
-            )
-        if executable.empty and not indicative_plot.empty:
-            indicative_plot["_axis_x"] = (
-                indicative_plot["display_delta"]
-                if x_axis == X_AXIS_DELTA
-                else indicative_plot["strike"]
-            )
-            indicative_plot = indicative_plot.loc[
-                pd.to_numeric(indicative_plot["_axis_x"], errors="coerce").notna()
-            ].sort_values("_axis_x")
-            figure.add_trace(
-                go.Scatter(
-                    x=indicative_plot["_axis_x"],
-                    y=100.0 * indicative_plot["reference_iv"],
-                    mode="markers+lines",
-                    name="Indicative last-price IV",
-                    legendrank=25,
-                    legendgroup="indicative-last-price",
-                    line={"color": "#A16207", "width": 1.4, "dash": "dot"},
-                    marker={
-                        "color": "#FEF3C7",
-                        "line": {"color": "#A16207", "width": 1.2},
-                        "size": 6,
-                        "symbol": "circle",
-                    },
-                    customdata=np.column_stack(
-                        [
-                            indicative_plot["strike"],
-                            indicative_plot["option_security"],
-                            indicative_plot["last_price"],
-                            indicative_plot["forward"],
-                            indicative_plot["reference_time"],
-                            _hover_count_strings(indicative_plot["volume"]),
-                            _hover_count_strings(indicative_plot["open_interest"]),
-                            indicative_plot["put_call"].map(
-                                {"C": "Call", "P": "Put"}
-                            ),
-                            _hover_date_strings(
-                                indicative_plot["open_interest_date"]
-                            ),
-                            _hover_oi_status_strings(
-                                indicative_plot["open_interest_scope_status"]
-                            ),
-                        ]
-                    ),
-                    hovertemplate=(
-                        "<b>Indicative last · %{customdata[7]}</b>"
-                        "<br>Strike %{customdata[0]:.2f}"
-                        + axis_hover
-                        + " · IV <b>%{y:.2f}%</b>"
-                        "<br>%{customdata[1]} · Last %{customdata[2]:.4f}"
-                        f" · {underlying_hover_label} %{{customdata[3]:.3f}}"
-                        "<br>Volume / OI <b>%{customdata[5]} / %{customdata[6]}</b>"
-                        " · OI %{customdata[8]} (%{customdata[9]})"
-                        "<br>%{customdata[4]} · Non-executable<extra></extra>"
                     ),
                 ),
                 secondary_y=False,
@@ -2586,9 +2754,9 @@ def build_expiry_figure(
         focus_strikes.extend(
             pd.to_numeric(executable["strike"], errors="coerce").dropna()
         )
-    if not indicative_plot.empty:
+    if not prior_reference.empty:
         focus_strikes.extend(
-            pd.to_numeric(indicative_plot["strike"], errors="coerce").dropna()
+            pd.to_numeric(prior_reference["strike"], errors="coerce").dropna()
         )
     if not matched_trades.empty:
         focus_strikes.extend(
@@ -2666,6 +2834,14 @@ def build_expiry_figure(
         )
     else:
         figure.update_xaxes(title_text=f"Strike ({spec['price_unit']})")
+    expiry_trade_tape = (
+        trade_tape.loc[
+            _expiry_mask(trade_tape, expiry, "underlying_contract_month")
+        ].copy()
+        if trade_tape is not None and not trade_tape.empty
+        else pd.DataFrame()
+    )
+    quality = _intraday_expiry_quality(raw, expiry_trade_tape, prior_reference)
     figure.update_layout(
         template="plotly_white",
         height=440,
@@ -2690,7 +2866,7 @@ def build_expiry_figure(
             f"vol-trades-{resolved_product.lower()}-"
             f"{expiry.date().isoformat()}-{x_axis}"
         ),
-        meta={"expiry": expiry.date().isoformat()},
+        meta={"expiry": expiry.date().isoformat(), "quality": quality},
     )
     return figure
 
@@ -2959,6 +3135,7 @@ def build_plot_cards(
     published: pd.DataFrame,
     x_axis: str = X_AXIS_STRIKE,
     trade_tape: pd.DataFrame | None = None,
+    prior_settlement_chain: pd.DataFrame | None = None,
     product: str | None = None,
 ):
     x_axis = _normalize_x_axis(x_axis)
@@ -3004,13 +3181,36 @@ def build_plot_cards(
             expiry,
             x_axis=x_axis,
             trade_tape=trade_tape,
+            prior_settlement_chain=prior_settlement_chain,
             product=resolved_product,
         )
         label = expiry.strftime("%b-%y")
+        quality = dict(figure.layout.meta or {}).get("quality") or {}
+        quality_row = (
+            html.Div(
+                [
+                    dbc.Badge(
+                        quality["status"],
+                        color=quality["color"],
+                        pill=True,
+                        className="me-2",
+                    ),
+                    html.Span(quality["detail"], className="text-muted"),
+                ],
+                className=(
+                    "d-flex align-items-center flex-wrap px-2 py-1 "
+                    "border-bottom bg-light small"
+                ),
+                role="status",
+            )
+            if quality
+            else None
+        )
         cards.append(
             html.Section(
                 [
                     html.H3(label, className="brent-vol-history-card-title"),
+                    quality_row,
                     dcc.Graph(
                         id={
                             "type": "brent-vol-history-expiry-graph",
@@ -3492,7 +3692,8 @@ def _expiry_legend_items(
             "Executable band", "brent-vol-history-legend-executable-band"
         ),
         _expiry_legend_item(
-            "Indicative last IV", "brent-vol-history-legend-indicative-last"
+            "Prior official settlement IV",
+            "brent-vol-history-legend-settlement-reference",
         ),
         _expiry_legend_item(
             "Trade-time IV", "brent-vol-history-legend-trade"
@@ -3810,6 +4011,12 @@ layout = html.Main(
             n_intervals=0,
             disabled=True,
         ),
+        dcc.Interval(
+            id="brent-vol-history-worker-poll",
+            interval=10000,
+            n_intervals=0,
+            disabled=False,
+        ),
         html.Section(
             [
                 html.Div(
@@ -4096,6 +4303,41 @@ def _refresh_stage_label(job, request_kind: str) -> str:
     return label
 
 
+def _worker_readiness_message(readiness, product_label: str) -> str:
+    if readiness.ready:
+        return f"Bloomberg {product_label} worker ready."
+    if readiness.reason == "registry_unavailable":
+        return (
+            "Bloomberg worker status is unavailable. Apply migration 010 and "
+            "start the worker."
+        )
+    if readiness.reason == "no_eligible_worker":
+        return (
+            f"No Bloomberg worker is enabled for {product_label}. Enable "
+            f"{readiness.product} and start the worker."
+        )
+    if readiness.reason == "stale_heartbeat":
+        return (
+            f"Bloomberg {product_label} worker is offline—no heartbeat in "
+            f"{WORKER_FRESHNESS_SECONDS} seconds. Start or restart the worker."
+        )
+    return f"Bloomberg {product_label} worker is offline. Start or restart it."
+
+
+def _queued_job_wait_exceeded(job, *, now: Any = None) -> bool:
+    created_at = pd.to_datetime(
+        getattr(job, "updated_at", None) or getattr(job, "created_at", None),
+        errors="coerce",
+        utc=True,
+    )
+    if pd.isna(created_at):
+        return False
+    current = pd.to_datetime(now, errors="coerce", utc=True)
+    if pd.isna(current):
+        current = pd.Timestamp.now(tz="UTC")
+    return (current - created_at).total_seconds() > WORKER_FRESHNESS_SECONDS
+
+
 def _product_store(value: Any, payload_key: str) -> dict[str, dict[str, Any]]:
     if not isinstance(value, dict):
         return {}
@@ -4122,6 +4364,7 @@ def _product_store(value: Any, payload_key: str) -> dict[str, dict[str, Any]]:
     Input("brent-vol-history-refresh-button", "n_clicks"),
     Input("brent-vol-history-settlement-refresh-button", "n_clicks"),
     Input("brent-vol-history-refresh-poll", "n_intervals"),
+    Input("brent-vol-history-worker-poll", "n_intervals"),
     Input("brent-vol-history-product", "value"),
     State("brent-vol-history-refresh-job", "data"),
     State("brent-vol-history-refresh-completion", "data"),
@@ -4130,6 +4373,7 @@ def manage_bloomberg_refresh(
     _refresh_clicks,
     _settlement_refresh_clicks,
     _poll_count,
+    _worker_poll_count,
     product,
     active_jobs_value,
     completions_value,
@@ -4140,6 +4384,14 @@ def manage_bloomberg_refresh(
     completions = _product_store(completions_value, "result_snapshot_id")
     active_job = active_jobs.get(product)
     current_completion = completions.get(product)
+    try:
+        triggered = ctx.triggered_id
+    except Exception:
+        triggered = None
+    suppress_unchanged_stores = triggered in {
+        "brent-vol-history-refresh-poll",
+        "brent-vol-history-worker-poll",
+    }
 
     def response(
         job_payload,
@@ -4160,9 +4412,19 @@ def manage_bloomberg_refresh(
             updated_jobs[product] = dict(job_payload)
         if completion_payload is not None:
             updated_completions[product] = dict(completion_payload)
+        jobs_output = (
+            no_update
+            if suppress_unchanged_stores and updated_jobs == active_jobs
+            else updated_jobs
+        )
+        completions_output = (
+            no_update
+            if suppress_unchanged_stores and updated_completions == completions
+            else updated_completions
+        )
         return (
-            updated_jobs,
-            updated_completions,
+            jobs_output,
+            completions_output,
             poll_disabled,
             intraday_disabled,
             settlement_disabled,
@@ -4207,10 +4469,6 @@ def manage_bloomberg_refresh(
         )
 
     try:
-        triggered = ctx.triggered_id
-    except Exception:
-        triggered = None
-    try:
         triggered_kind = None
         if triggered == "brent-vol-history-refresh-button":
             triggered_kind = INTRADAY_REQUEST_KIND
@@ -4226,6 +4484,26 @@ def manage_bloomberg_refresh(
                 )
 
         if triggered_kind:
+            readiness = get_worker_readiness(product)
+            if not readiness.ready:
+                job_needs_polling = bool(
+                    active_job
+                    and active_job.get("status") in {"queued", "running"}
+                )
+                return response(
+                    active_job,
+                    current_completion,
+                    not job_needs_polling,
+                    True,
+                    True,
+                    _worker_readiness_message(readiness, product_label),
+                    (
+                        "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-danger"
+                    ),
+                    intraday_style,
+                    settlement_style,
+                )
             job, created = submit_refresh_job(
                 identity.subject or "",
                 product=product,
@@ -4261,6 +4539,7 @@ def manage_bloomberg_refresh(
                 raise RuntimeError("The queued refresh job no longer exists.")
             request_kind = _job_request_kind(job, active_job)
             if job.status == "succeeded":
+                readiness = get_worker_readiness(product)
                 completion = {
                     "job_id": job.job_id,
                     "product": product,
@@ -4291,18 +4570,28 @@ def manage_bloomberg_refresh(
                     else "brent-vol-history-refresh-status "
                     "brent-vol-history-refresh-status-success"
                 )
+                if not readiness.ready:
+                    message = (
+                        f"{message} "
+                        f"{_worker_readiness_message(readiness, product_label)}"
+                    )
+                    status_class = (
+                        "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-danger"
+                    )
                 return response(
                     job.as_dict(),
                     completion,
                     True,
-                    idle_disabled[0],
-                    idle_disabled[1],
+                    not (intraday_enabled and readiness.ready),
+                    not (settlement_enabled and readiness.ready),
                     message,
                     status_class,
                     intraday_style,
                     settlement_style,
                 )
             if job.status == "failed":
+                readiness = get_worker_readiness(product)
                 if job.metrics.get("failure_category") == "daily_capacity_reached":
                     failure_message = (
                         "Bloomberg daily request capacity has been reached. "
@@ -4323,13 +4612,50 @@ def manage_bloomberg_refresh(
                     job.as_dict(),
                     current_completion,
                     True,
-                    idle_disabled[0],
-                    idle_disabled[1],
+                    not (intraday_enabled and readiness.ready),
+                    not (settlement_enabled and readiness.ready),
                     failure_message,
                     "brent-vol-history-refresh-status brent-vol-history-refresh-status-danger",
                     intraday_style,
                     settlement_style,
                 )
+            readiness = None
+            if job.status == "queued":
+                readiness = get_worker_readiness(product)
+                if not readiness.ready:
+                    return response(
+                        job.as_dict(),
+                        current_completion,
+                        False,
+                        True,
+                        True,
+                        _worker_readiness_message(readiness, product_label),
+                        (
+                            "brent-vol-history-refresh-status "
+                            "brent-vol-history-refresh-status-danger"
+                        ),
+                        intraday_style,
+                        settlement_style,
+                    )
+                if _queued_job_wait_exceeded(job):
+                    return response(
+                        job.as_dict(),
+                        current_completion,
+                        False,
+                        True,
+                        True,
+                        (
+                            f"Bloomberg {product_label} worker is online—this "
+                            "request is queued behind another refresh. The page "
+                            "will keep monitoring it."
+                        ),
+                        (
+                            "brent-vol-history-refresh-status "
+                            "brent-vol-history-refresh-status-active"
+                        ),
+                        intraday_style,
+                        settlement_style,
+                    )
             stage = _refresh_stage_label(job, request_kind)
             return response(
                 job.as_dict(),
@@ -4342,14 +4668,22 @@ def manage_bloomberg_refresh(
                 intraday_style,
                 settlement_style,
             )
+        readiness = get_worker_readiness(product)
         return response(
             None,
             current_completion,
             True,
-            idle_disabled[0],
-            idle_disabled[1],
-            "",
-            "brent-vol-history-refresh-status",
+            not (intraday_enabled and readiness.ready),
+            not (settlement_enabled and readiness.ready),
+            _worker_readiness_message(readiness, product_label),
+            (
+                "brent-vol-history-refresh-status "
+                + (
+                    "brent-vol-history-refresh-status-success"
+                    if readiness.ready
+                    else "brent-vol-history-refresh-status-danger"
+                )
+            ),
             intraday_style,
             settlement_style,
         )
@@ -4490,6 +4824,36 @@ def render_history(
             if snapshot_kind == "INTRADAY"
             else pd.DataFrame()
         )
+        prior_settlement_chain = pd.DataFrame()
+        if snapshot_kind == "INTRADAY":
+            snapshot_dates = pd.to_datetime(
+                snapshots["business_date"], errors="coerce"
+            ).dt.normalize()
+            prior_candidates = snapshots.loc[
+                snapshots["snapshot_kind"].astype(str).str.upper().eq("SETTLEMENT")
+                & snapshot_dates.lt(pd.Timestamp(selected_date))
+            ].copy()
+            if not prior_candidates.empty:
+                prior_candidates["_business_date"] = pd.to_datetime(
+                    prior_candidates["business_date"], errors="coerce"
+                )
+                prior_candidates["_observed_at"] = pd.to_datetime(
+                    prior_candidates["observed_at"], errors="coerce", utc=True
+                )
+                prior_snapshot = prior_candidates.sort_values(
+                    ["_business_date", "_observed_at"], ascending=False
+                ).iloc[0]
+                try:
+                    prior_settlement_chain = _filter_contract_months(
+                        load_chain_snapshot(
+                            str(prior_snapshot["snapshot_id"]),
+                            product=product,
+                            snapshot_kind="SETTLEMENT",
+                        ),
+                        display_expiries,
+                    )
+                except Exception:
+                    prior_settlement_chain = pd.DataFrame()
         published = (
             pd.DataFrame()
             if snapshot_kind == "INTRADAY"
@@ -4546,6 +4910,11 @@ def render_history(
             build_plot_cards(
                 chain, published, x_axis=x_axis,
                 trade_tape=(trade_tape if snapshot_kind == "INTRADAY" else None),
+                prior_settlement_chain=(
+                    prior_settlement_chain
+                    if snapshot_kind == "INTRADAY"
+                    else None
+                ),
                 product=product,
             ),
             expiry_options,

@@ -30,6 +30,7 @@ def create_batch_calibration_confirm_modal(
         Confirmation modal component
     """
     prefix = commodity.lower()
+    expected_duration = "several minutes" if hybrid else "several seconds"
 
     modal = dbc.Modal(
         [
@@ -46,7 +47,10 @@ def create_batch_calibration_confirm_modal(
                     html.Strong("This action will calibrate ALL expiries."),
                     html.P([
                         "The optimizer will run on each expiry to find the best-fit parameters. ",
-                        "This operation may take several seconds depending on the number of expiries."
+                        (
+                            f"This operation may take {expected_duration} "
+                            "depending on the number of expiries."
+                        ),
                     ], className="mb-0 mt-2"),
                 ], color="warning", className="mb-3"),
 

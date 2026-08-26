@@ -52,3 +52,19 @@ def ttf_publication_enabled() -> bool:
         "TTF_PUBLICATION_ENABLED",
         False,
     )
+
+
+def jkm_writes_enabled() -> bool:
+    return calibration_enabled() and _enabled(
+        "VOL_CALIBRATION_JKM_WRITES_ENABLED",
+        "JKM_WRITES_ENABLED",
+        False,
+    )
+
+
+def jkm_publication_enabled() -> bool:
+    return jkm_writes_enabled() and _enabled(
+        "VOL_CALIBRATION_JKM_PUBLICATION_ENABLED",
+        "JKM_PUBLICATION_ENABLED",
+        False,
+    )

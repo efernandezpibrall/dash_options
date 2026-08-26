@@ -75,9 +75,9 @@ TTF_HYBRID_COLUMNS = [
 
 
 def parameter_columns_for_commodity(commodity: Optional[str] = None) -> List[Dict]:
-    """Return the shared parameter columns plus TTF-only provenance."""
+    """Return shared parameters plus hybrid-surface provenance when applicable."""
     columns = [dict(column) for column in PARAM_COLUMNS]
-    if str(commodity or '').strip().upper() == 'TTF':
+    if str(commodity or '').strip().upper() in {'TTF', 'JKM'}:
         columns.insert(1, dict(TTF_BASIS_COLUMN))
         rmse_column = next(column for column in columns if column['id'] == 'rmse')
         rmse_column['name'] = 'Core TV RMSE'
@@ -305,7 +305,7 @@ def get_param_tooltip(param_id: str) -> str:
         'iv_rmse': 'Secondary IV RMSE diagnostic for the internal Wing approximation; the operational core remains PCHIP.',
         'calibration_method': 'The governed operational surface construction method.',
         'arb_status': 'Arbitrage Status: Pass/Warn/Fail butterfly arbitrage check',
-        'rmse': 'TTF: exact PCHIP core total-variance RMSE. Other products: model IV RMSE.',
+        'rmse': 'TTF/JKM: exact PCHIP core total-variance RMSE. Other products: model IV RMSE.',
     }
     return tooltips.get(param_id, '')
 
@@ -440,7 +440,7 @@ def format_params_for_table(
                 except Exception:
                     pass
 
-        if str(commodity or '').strip().upper() == 'TTF':
+        if str(commodity or '').strip().upper() in {'TTF', 'JKM'}:
             left_width = pd.to_numeric(
                 pd.Series([row.get('left_blend_width')]), errors='coerce'
             ).iloc[0]
@@ -466,22 +466,22 @@ def format_params_for_table(
             params_df['calibration_basis'].astype(str).str.strip().str.title()
         )
 
-    is_ttf = str(commodity or '').strip().upper() == 'TTF'
-    # TTF total-variance metrics retain their native units.  Shared products
+    is_hybrid = str(commodity or '').strip().upper() in {'TTF', 'JKM'}
+    # Hybrid total-variance metrics retain their native units. Other products
     # keep the historical percentage IV-RMSE presentation.
     if 'rmse' in params_df.columns:
         params_df['rmse'] = params_df['rmse'].apply(
             lambda x: (
                 f"{float(x):.6f}"
-                if is_ttf and pd.notna(x)
+                if is_hybrid and pd.notna(x)
                 else (f"{x*100:.2f}%" if pd.notna(x) else "")
             )
         )
-    if is_ttf and 'tail_fit_tv_rmse' in params_df.columns:
+    if is_hybrid and 'tail_fit_tv_rmse' in params_df.columns:
         params_df['tail_fit_tv_rmse'] = params_df['tail_fit_tv_rmse'].apply(
             lambda x: f"{float(x):.6f}" if pd.notna(x) else ""
         )
-    if is_ttf and 'iv_rmse' in params_df.columns:
+    if is_hybrid and 'iv_rmse' in params_df.columns:
         params_df['iv_rmse'] = params_df['iv_rmse'].apply(
             lambda x: f"{float(x) * 100:.2f}%" if pd.notna(x) else ""
         )

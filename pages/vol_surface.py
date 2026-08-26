@@ -46,6 +46,15 @@ SURFACE_COLUMNS = [
 SURFACE_SOURCE_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF', 'NBP'}
 CALIBRATION_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF'}
 SURFACE_PRODUCT_DISPLAY_MAP = {'BRENT': 'Brent'}
+ICE_SUMMER_MONTHS = {4, 5, 6, 7, 8, 9}
+SURFACE_EXPIRY_MONTH = 'month'
+SURFACE_EXPIRY_QUARTER = 'quarter'
+SURFACE_EXPIRY_SEASON = 'season'
+SURFACE_EXPIRY_TYPES = {
+    SURFACE_EXPIRY_MONTH,
+    SURFACE_EXPIRY_QUARTER,
+    SURFACE_EXPIRY_SEASON,
+}
 SURFACE_SOURCE_COLUMNS = [
     'cob_date',
     'product',
@@ -227,6 +236,137 @@ def _format_vol_mode(value):
         'rolling_tenor': 'Rolling Tenor',
     }
     return mode_labels.get(value, str(value).replace('_', ' ').title() if value else None)
+
+
+def _surface_quarter_key(value):
+    timestamp = pd.to_datetime(value, errors='coerce')
+    if pd.isna(timestamp):
+        return None
+    return f'{timestamp.year}-Q{timestamp.quarter}'
+
+
+def _surface_season_key(value):
+    timestamp = pd.to_datetime(value, errors='coerce')
+    if pd.isna(timestamp):
+        return None
+    if timestamp.month in ICE_SUMMER_MONTHS:
+        return f'{timestamp.year}-Summer'
+    winter_year = timestamp.year if timestamp.month >= 10 else timestamp.year - 1
+    return f'{winter_year}-Winter'
+
+
+def _surface_expiry_value(expiry_type, key):
+    if expiry_type not in SURFACE_EXPIRY_TYPES or key is None:
+        return None
+    if expiry_type == SURFACE_EXPIRY_MONTH:
+        timestamp = pd.to_datetime(key, errors='coerce')
+        if pd.isna(timestamp):
+            return None
+        key = timestamp.strftime('%Y-%m-%d')
+    return f'{expiry_type}:{key}'
+
+
+def _parse_surface_expiry_selection(value):
+    if value is None or value == '':
+        return None, None
+
+    text_value = str(value)
+    if ':' in text_value:
+        expiry_type, key = text_value.split(':', 1)
+        if expiry_type in SURFACE_EXPIRY_TYPES:
+            if expiry_type == SURFACE_EXPIRY_MONTH:
+                timestamp = pd.to_datetime(key, errors='coerce')
+                if pd.isna(timestamp):
+                    return None, None
+                return expiry_type, timestamp.strftime('%Y-%m-%d')
+            return expiry_type, key
+
+    timestamp = pd.to_datetime(text_value, errors='coerce')
+    if pd.isna(timestamp):
+        return None, None
+    return SURFACE_EXPIRY_MONTH, timestamp.strftime('%Y-%m-%d')
+
+
+def _normalize_surface_expiry_selection(value):
+    expiry_type, key = _parse_surface_expiry_selection(value)
+    return _surface_expiry_value(expiry_type, key)
+
+
+def _format_surface_expiry_selection_label(value):
+    expiry_type, key = _parse_surface_expiry_selection(value)
+    if expiry_type == SURFACE_EXPIRY_MONTH:
+        return pd.to_datetime(key).strftime("%b'%y")
+    if expiry_type in {SURFACE_EXPIRY_QUARTER, SURFACE_EXPIRY_SEASON}:
+        return _format_vol_period_header(key)
+    return None
+
+
+def _filter_surface_by_expiry_selection(surface_df, selected_expiry):
+    if surface_df.empty:
+        return surface_df.copy()
+
+    expiry_type, key = _parse_surface_expiry_selection(selected_expiry)
+    if expiry_type is None:
+        return surface_df.iloc[0:0].copy()
+
+    contract_dates = pd.to_datetime(surface_df['contract_date'], errors='coerce')
+    if expiry_type == SURFACE_EXPIRY_MONTH:
+        selected_date = pd.to_datetime(key).normalize()
+        mask = contract_dates.dt.normalize().eq(selected_date)
+    elif expiry_type == SURFACE_EXPIRY_QUARTER:
+        mask = contract_dates.apply(_surface_quarter_key).eq(key)
+    else:
+        mask = contract_dates.apply(_surface_season_key).eq(key)
+
+    return surface_df.loc[mask].copy()
+
+
+def _build_surface_expiry_options(surface_df):
+    if surface_df.empty:
+        return []
+
+    expiries = sorted(
+        pd.to_datetime(surface_df['contract_date'], errors='coerce')
+        .dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+    if not expiries:
+        return []
+
+    month_options = [
+        {
+            'label': expiry.strftime("%b'%y"),
+            'value': _surface_expiry_value(SURFACE_EXPIRY_MONTH, expiry),
+        }
+        for expiry in expiries
+    ]
+
+    quarter_keys = _sort_grouped_period_columns(
+        {_surface_quarter_key(expiry) for expiry in expiries if _surface_quarter_key(expiry)},
+        'quarterly',
+    )
+    quarter_options = [
+        {
+            'label': _format_vol_period_header(key),
+            'value': _surface_expiry_value(SURFACE_EXPIRY_QUARTER, key),
+        }
+        for key in quarter_keys
+    ]
+
+    season_keys = _sort_grouped_period_columns(
+        {_surface_season_key(expiry) for expiry in expiries if _surface_season_key(expiry)},
+        'season',
+    )
+    season_options = [
+        {
+            'label': _format_vol_period_header(key),
+            'value': _surface_expiry_value(SURFACE_EXPIRY_SEASON, key),
+        }
+        for key in season_keys
+    ]
+
+    return month_options + quarter_options + season_options
 
 
 def _build_vol_chart_chip(label, value=None, tone='neutral'):
@@ -711,7 +851,7 @@ def get_operational_surface_snapshot(product, requested_cob, refresh=False):
         'error': None,
     }
 
-    if normalized_product not in CALIBRATION_PRODUCTS:
+    if normalized_product not in SURFACE_SOURCE_PRODUCTS:
         result['error'] = f'Unsupported operational surface product: {product}'
         return result
     if pd.isna(requested_timestamp):
@@ -1291,8 +1431,9 @@ def _build_smile_series(surface_slice, ordered_buckets):
 
     deduped_slice = (
         surface_slice
+        .groupby('delta_bucket', as_index=False)
+        .agg({'volatility': 'mean', 'delta_sort_key': 'min'})
         .sort_values(['delta_sort_key', 'delta_bucket'])
-        .drop_duplicates('delta_bucket', keep='first')
     )
     return deduped_slice.set_index('delta_bucket')['volatility'].reindex(ordered_buckets)
 
@@ -1301,16 +1442,16 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
     if current_surface.empty or selected_expiry is None:
         return _empty_figure('Select an expiry with available surface data to see the smile.', f'{product} Smile Evolution')
 
-    selected_expiry = pd.to_datetime(selected_expiry)
-    current_expiry = current_surface[current_surface['contract_date'] == selected_expiry].copy()
+    expiry_label = _format_surface_expiry_selection_label(selected_expiry) or 'selected expiry'
+    current_expiry = _filter_surface_by_expiry_selection(current_surface, selected_expiry)
 
     if current_expiry.empty:
-        return _empty_figure('No current-date smile data available for the selected expiry.', f'{product} Smile Evolution')
+        return _empty_figure(f'No current-date smile data available for {expiry_label}.', f'{product} Smile Evolution')
 
     combined = current_expiry.copy()
     previous_expiry = pd.DataFrame()
     if not previous_surface.empty:
-        previous_expiry = previous_surface[previous_surface['contract_date'] == selected_expiry].copy()
+        previous_expiry = _filter_surface_by_expiry_selection(previous_surface, selected_expiry)
         if not previous_expiry.empty:
             combined = concat_dataframes([combined, previous_expiry], ignore_index=True)
 
@@ -1325,10 +1466,10 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
     if not history_df.empty:
         history_df = history_df[
             (history_df['code'] == product) &
-            (history_df['contract_date'] == selected_expiry) &
             (history_df['cob_date'].dt.normalize() >= start_date) &
             (history_df['cob_date'].dt.normalize() <= end_date)
         ].copy()
+        history_df = _filter_surface_by_expiry_selection(history_df, selected_expiry)
 
     previous_date = None
     if not previous_expiry.empty:
@@ -1408,7 +1549,11 @@ def _get_selected_tenor_rank(product, selected_expiry, end_date):
     if not expiries:
         return 0
 
-    selected_expiry = pd.to_datetime(selected_expiry)
+    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
+    if expiry_type != SURFACE_EXPIRY_MONTH:
+        return 0
+
+    selected_expiry = pd.to_datetime(expiry_key)
     return expiries.index(selected_expiry) if selected_expiry in expiries else 0
 
 
@@ -1434,7 +1579,9 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
         return _empty_figure('Select a product, expiry, and delta bucket to view history.', 'Delta Vol History')
 
     end_date = pd.to_datetime(end_date)
-    selected_expiry = pd.to_datetime(selected_expiry)
+    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
+    if expiry_type is None:
+        return _empty_figure('Select a valid expiry, quarter, or season to view history.', 'Delta Vol History')
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
@@ -1449,8 +1596,8 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
         (history_df['cob_date'] <= end_date)
     ].copy()
 
-    if history_mode == 'fixed_expiry':
-        history_df = history_df[history_df['contract_date'] == selected_expiry].copy()
+    if history_mode == 'fixed_expiry' or expiry_type != SURFACE_EXPIRY_MONTH:
+        history_df = _filter_surface_by_expiry_selection(history_df, selected_expiry)
     else:
         tenor_rank = _get_selected_tenor_rank(product, selected_expiry, end_date)
         history_df = _select_rolling_tenor_history(history_df, tenor_rank)
@@ -1634,6 +1781,12 @@ def _format_vol_period_header(column):
         return f"Q{quarter}'{year[-2:]}"
     if '-Summer' in label or '-Winter' in label:
         year, season = label.split('-', 1)
+        if season == 'Winter':
+            try:
+                next_year = (int(year) + 1) % 100
+                return f"{season}'{year[-2:]}/{next_year:02d}"
+            except (TypeError, ValueError):
+                return label
         return f"{season}'{year[-2:]}"
     return label
 
@@ -2264,12 +2417,7 @@ def group_data_by_period(data, grouping_mode):
         return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
 
     if grouping_mode == 'season':
-        def get_season(date):
-            if 5 <= date.month <= 9:
-                return f'{date.year}-Summer'
-            return f'{date.year}-Winter'
-
-        data['period'] = data['contract_date'].apply(get_season)
+        data['period'] = data['contract_date'].apply(_surface_season_key)
         return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
 
     if grouping_mode == 'calendar':
@@ -2305,7 +2453,7 @@ def _sort_grouped_period_columns(date_cols, grouping_mode):
         def season_key(value):
             try:
                 year, season = value.split('-')
-                return int(year), 0 if season == 'Winter' else 1
+                return int(year), 0 if season == 'Summer' else 1
             except Exception:
                 return 9999, 0
 
@@ -2890,10 +3038,17 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
     if current_surface.empty:
         return [], None, hidden_style
 
-    expiries = sorted(pd.to_datetime(current_surface['contract_date']).drop_duplicates())
-    expiry_options = [{'label': expiry.strftime('%Y-%m'), 'value': expiry.strftime('%Y-%m-%d')} for expiry in expiries]
+    expiry_options = _build_surface_expiry_options(current_surface)
+    if not expiry_options:
+        return [], None, hidden_style
+
     valid_expiries = {option['value'] for option in expiry_options}
-    selected_expiry = current_expiry if current_expiry in valid_expiries else expiry_options[0]['value']
+    normalized_current_expiry = _normalize_surface_expiry_selection(current_expiry)
+    selected_expiry = (
+        normalized_current_expiry
+        if normalized_current_expiry in valid_expiries
+        else expiry_options[0]['value']
+    )
     return expiry_options, selected_expiry, visible_style
 
 
@@ -2906,8 +3061,9 @@ def build_calibration_link(active_product, selected_date, selected_expiry):
     query = {'product': product.lower()}
     if selected_date:
         query['cob_date'] = pd.to_datetime(selected_date).date().isoformat()
-    if selected_expiry:
-        query['expiry'] = pd.to_datetime(selected_expiry).strftime('%b-%y')
+    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
+    if expiry_type == SURFACE_EXPIRY_MONTH:
+        query['expiry'] = pd.to_datetime(expiry_key).strftime('%b-%y')
     return f"/vol_calibration?{urlencode(query)}", {'display': 'inline-flex'}
 
 
@@ -2941,7 +3097,7 @@ def update_surface_delta_dropdown(snapshot_reference, selected_date, active_prod
     if current_surface.empty:
         return [], []
 
-    expiry_surface = current_surface[current_surface['contract_date'] == pd.to_datetime(selected_expiry)].copy()
+    expiry_surface = _filter_surface_by_expiry_selection(current_surface, selected_expiry)
     delta_options = _get_delta_bucket_options(expiry_surface)
     valid_deltas = {option['value'] for option in delta_options}
     history_buckets = [bucket for bucket in (current_history_buckets or []) if bucket in valid_deltas]
@@ -3014,9 +3170,12 @@ def update_surface_section(
         )
 
     if selected_expiry is None:
-        selected_expiry = pd.to_datetime(current_surface['contract_date'].min()).strftime('%Y-%m-%d')
+        selected_expiry = _surface_expiry_value(
+            SURFACE_EXPIRY_MONTH,
+            pd.to_datetime(current_surface['contract_date'].min()),
+        )
 
-    expiry_surface = current_surface[current_surface['contract_date'] == pd.to_datetime(selected_expiry)].copy()
+    expiry_surface = _filter_surface_by_expiry_selection(current_surface, selected_expiry)
     delta_options = _get_delta_bucket_options(expiry_surface)
     valid_deltas = {option['value'] for option in delta_options}
     selected_history_buckets = [bucket for bucket in (selected_history_buckets or []) if bucket in valid_deltas]
@@ -3106,10 +3265,19 @@ def update_ttf_source_comparison(
             ),
             [],
         )
+    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
+    if expiry_type != SURFACE_EXPIRY_MONTH:
+        message = 'TTF ICAP–ICE comparison is available for monthly expiries only.'
+        return (
+            visible,
+            message,
+            _empty_figure(message, 'TTF ICAP vs ICE'),
+            [],
+        )
     try:
         curves, trades = _load_ttf_source_comparison(
             selected_date,
-            selected_expiry,
+            expiry_key,
         )
     except Exception as exc:
         message = (
