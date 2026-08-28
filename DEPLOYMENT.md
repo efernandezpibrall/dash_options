@@ -99,10 +99,11 @@ Publication remains disabled until verified option-expiry calendars and source
 eligibility rules are complete for every enabled product.
 
 The Brent market-data refreshes have separate fail-closed intake flags. Apply
-BBG `migrations/003_bbg_option_chain_intraday.sql`,
-`migrations/008_bbg_option_settlement_refresh.sql`, and
-`migrations/010_bbg_option_chain_worker_registry.sql`; register the worker in
-the logged-in Bloomberg user session; and verify `/health/ready` before enabling either
+BBG migrations `002` through `009` in numeric order; the worker-registry
+contract is consolidated into `migrations/003_bbg_option_chain_intraday.sql`
+and settlement refresh into `migrations/008_bbg_option_settlement_refresh.sql`.
+Register the worker in the logged-in Bloomberg user session and verify
+`/health/ready` before enabling either
 `BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED` or
 `BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED` (or their `config.ini`
 equivalents). The web process only queues jobs; Bloomberg calls, persistence,
