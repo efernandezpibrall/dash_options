@@ -34,7 +34,7 @@ def _leg(leg_id="leg-1", *, strike=100.0, call_put="C", basis="VOL"):
 
 
 def _surface_expiry(asset, month, as_of=AS_OF):
-    model = "black76" if asset == "TTF" else "asian76"
+    model = "asian76" if asset == "JKM" else "black76"
     return date.fromisoformat(
         build_delivery_month_component(asset, model, month, as_of, 100.0)[
             "option_expiration_date"
@@ -113,11 +113,12 @@ def _comparison_item(snapshot, structure_id="structure-1", label="S1"):
 def _operational_loader(volatility, *, cob_date="2026-07-30"):
     def load(asset, _valuation_date, months, *, force_refresh=False):
         del force_refresh
+        pricing_asset = "Brent" if asset == "BRENT" else asset
         rows = []
         for month in months:
             expiry = date.fromisoformat(
                 build_delivery_month_component(
-                    asset,
+                    pricing_asset,
                     "black76",
                     month,
                     AS_OF,
@@ -160,10 +161,12 @@ def _leaf_columns(definitions):
 def _assert_compact_surface_tooltip(value, model):
     parts = value.split(" · ")
     assert parts[0] == "Published: 2026-08-24 12:00 UTC"
-    assert len(parts) == 2
+    assert len(parts) in {2, 3}
     model_label = "Asian-76" if model == "asian76" else "Black-76"
     assert parts[1].startswith(f"Surface call delta ({model_label}): ")
     assert parts[1].endswith("%")
+    if len(parts) == 3:
+        assert parts[2].startswith("Expiry adjustment: ")
 
 
 def test_only_black_and_asian_add_two_read_only_surface_columns():
@@ -445,6 +448,431 @@ def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor():
         )
 
 
+def test_hh_pricer_uses_operational_cme_lne_surface_as_the_unit_vol_source():
+    month = "2026-12-01"
+    context, component = _monthly_context(
+        "HH",
+        "black76",
+        month,
+        forward=3.25,
+    )
+    context["premium_convention"] = "upfront"
+    context["rate"] = 0.04
+
+    def governed_loader(*_args, **_kwargs):
+        raise AssertionError("HH must use the operational LNE surface loader")
+
+    rows = [_leg(strike=3.25)]
+    payload = surface_reference.build_published_surface_reference(
+        "HH",
+        "black76",
+        context,
+        rows,
+        AS_OF,
+        surface_loader=governed_loader,
+        operational_loader=_operational_loader(0.55),
+    )
+
+    result = payload["rows"]["leg-1"]
+    assert component["expiry_convention_code"] == "CME_HH_LNE_560_EXPIRY"
+    assert component["variance_calendar_code"] == "CME_NYMEX_HH_OPTION_TRADING"
+    assert payload["source_kind"] == "operational"
+    assert payload["source_revision"]
+    assert payload["publication_id"] is None
+    assert payload["publication_cob"] == AS_OF.isoformat()
+    assert result["surface_input_vol"] == pytest.approx(0.55)
+    assert result["surface_pricing_vol"] == pytest.approx(0.55)
+    assert result["surface_atm_input_vol"] == pytest.approx(0.55)
+    assert result["surface_skew_input_vol"] == pytest.approx(0.0)
+    assert result["surface_input_tooltip"].startswith(
+        "Surface COB: 2026-07-30 · Source: raw.icap."
+    )
+    expected_signature = pricer._surface_reference_input_signature(
+        "HH",
+        "black76",
+        rows,
+        context,
+        AS_OF.isoformat(),
+    )
+    payload["_ui_reference_signature"] = expected_signature
+    resolved_rows, source_signature = pricer._published_surface_calculation_rows(
+        "HH",
+        "black76",
+        rows,
+        payload,
+        expected_signature,
+    )
+    assert resolved_rows[0]["quote_value"] == pytest.approx(0.55)
+    assert source_signature["source_kind"] == "operational"
+    assert source_signature["source_revision"] == payload["source_revision"]
+
+
+def test_brent_pricer_uses_the_operational_surface_for_unit_analytics():
+    context, _component = _monthly_context(
+        "Brent",
+        "black76",
+        "2026-12-01",
+        forward=80.0,
+    )
+
+    def governed_loader(*_args, **_kwargs):
+        raise AssertionError("Brent must use the operational surface loader")
+
+    rows = [_leg(strike=80.0)]
+    payload = surface_reference.build_published_surface_reference(
+        "Brent",
+        "black76",
+        context,
+        rows,
+        AS_OF,
+        surface_loader=governed_loader,
+        operational_loader=_operational_loader(0.42),
+    )
+
+    result = payload["rows"]["leg-1"]
+    assert payload["asset"] == "Brent"
+    assert payload["source_kind"] == "operational"
+    assert payload["source_revision"]
+    assert payload["publication_cob"] == AS_OF.isoformat()
+    assert result["surface_input_vol"] == pytest.approx(0.42)
+    assert result["surface_pricing_vol"] == pytest.approx(0.42)
+
+
+def test_cme_bzo_uses_user_forward_and_ice_brent_surface_with_target_expiry():
+    month = "2026-12-01"
+    component = build_delivery_month_component(
+        "Brent",
+        "black76",
+        month,
+        AS_OF,
+        80.0,
+        mapping_id="CME-BRENT-BZO",
+    )
+    context = {
+        "exchange_mapping_id": "CME-BRENT-BZO",
+        "premium_convention": "futures_style",
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": 80.0,
+        "rate": 0.0,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+    rows = [_leg(strike=80.0)]
+
+    payload = surface_reference.build_published_surface_reference(
+        "Brent",
+        "black76",
+        context,
+        rows,
+        AS_OF,
+        operational_loader=_operational_loader(0.42),
+    )
+    snapshot = _snapshot("Brent", "black76", context, rows)
+
+    assert payload["source_kind"] == "operational"
+    assert payload["rows"]["leg-1"]["surface_input_vol"] == pytest.approx(0.42)
+    assert snapshot["context"]["exchange_mapping_id"] == "CME-BRENT-BZO"
+    assert (
+        snapshot["context"]["expiry_convention_code"]
+        == "CME_BRENT_BZO_504_EXPIRY"
+    )
+    assert snapshot["context"]["forward_source"] == "USER_INPUT"
+    assert snapshot["context"]["volatility_surface_source"] == "ICE_BRENT"
+
+
+def test_phe_allows_the_governed_one_day_january_2033_surface_extension():
+    month = "2033-01-01"
+    component = build_delivery_month_component(
+        "HH", "black76", month, AS_OF, 3.0, mapping_id="ICE-HH-PHE"
+    )
+    assert component["surface_option_expiration_date"] == "2032-12-27"
+    assert component["option_expiration_date"] == "2032-12-28"
+    context = {
+        "exchange_mapping_id": "ICE-HH-PHE",
+        "premium_convention": "upfront",
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": 3.0,
+        "rate": 0.03,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+
+    payload = surface_reference.build_published_surface_reference(
+        "HH",
+        "black76",
+        context,
+        [_leg(strike=3.0)],
+        AS_OF,
+        operational_loader=_operational_loader(0.5),
+    )
+    result = payload["rows"]["leg-1"]
+
+    assert result["surface_pricing_vol"] > 0.5
+    assert "2032-12-27 to 2032-12-28" in result["surface_pricing_tooltip"]
+    assert "extended" in result["surface_pricing_tooltip"]
+
+
+@pytest.mark.parametrize(
+    ("mapping_id", "asset", "model", "month", "direction"),
+    [
+        ("CME-TTF-TTL", "TTF", "black76", "2031-12-01", "shortening"),
+        ("CME-TTF-TFP", "TTF", "black76", "2026-10-01", "extension"),
+        ("CME-TTF-TFF", "TTF", "black76", "2026-10-01", "extension"),
+        ("CME-JKM-JKO", "JKM", "asian76", "2027-03-01", "shortening"),
+        ("CME-JKM-JFO", "JKM", "asian76", "2027-03-01", "shortening"),
+        ("CME-HH-ON", "HH", "american_futures", "2026-09-01", "equal"),
+    ],
+)
+def test_remaining_mappings_apply_and_disclose_governed_expiry_factors(
+    mapping_id,
+    asset,
+    model,
+    month,
+    direction,
+):
+    mapping = pricer.exchange_option_mapping(mapping_id)
+    forward = 12.0 if asset != "HH" else 3.0
+    component = build_delivery_month_component(
+        asset,
+        model,
+        month,
+        AS_OF,
+        forward,
+        mapping_id=mapping_id,
+    )
+    context = {
+        "exchange_mapping_id": mapping_id,
+        "premium_convention": mapping.premium_convention,
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": forward,
+        "rate": 0.03,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+    if model == "asian76":
+        context["averaging_start_date"] = component["averaging_start_date"]
+    year, month_number = map(int, month[:7].split("-"))
+    loader = (
+        {"surface_loader": _loader({(year, month_number): 0.4})}
+        if asset in {"TTF", "JKM"}
+        else {"operational_loader": _operational_loader(0.4)}
+    )
+
+    payload = surface_reference.build_published_surface_reference(
+        asset,
+        model,
+        context,
+        [_leg(strike=forward)],
+        AS_OF,
+        **loader,
+    )
+    row = payload["rows"]["leg-1"]
+    adjustment = row["surface_expiry_adjustments"][0]
+
+    assert adjustment["source_expiry"] == component[
+        "surface_option_expiration_date"
+    ]
+    assert adjustment["target_expiry"] == component["option_expiration_date"]
+    assert adjustment["direction"] == direction
+    assert adjustment["source_governed_days"] > 0
+    assert adjustment["target_governed_days"] > 0
+    if direction == "shortening":
+        assert adjustment["factor"] < 1.0
+        assert row["surface_pricing_vol"] < 0.4
+    elif direction == "extension":
+        assert adjustment["factor"] > 1.0
+        assert row["surface_pricing_vol"] > 0.4
+    else:
+        assert adjustment["factor"] == pytest.approx(1.0)
+        assert row["surface_pricing_vol"] == pytest.approx(0.4)
+
+
+def test_tfp_strip_uses_distinct_monthly_expiry_factors_before_flattening():
+    context = {
+        "exchange_mapping_id": "CME-TTF-TFP",
+        "premium_convention": "upfront",
+        "delivery_shape": "Q1",
+        "delivery_year": 2027,
+        "forward": 12.0,
+        "rate": 0.03,
+    }
+    payload = surface_reference.build_published_surface_reference(
+        "TTF",
+        "black76",
+        context,
+        [_leg(strike=12.0)],
+        AS_OF,
+        surface_loader=_loader(
+            {(2027, 1): 0.4, (2027, 2): 0.4, (2027, 3): 0.4}
+        ),
+    )
+    row = payload["rows"]["leg-1"]
+    adjustments = row["surface_expiry_adjustments"]
+
+    assert len(adjustments) == 3
+    assert len({round(item["factor"], 10) for item in adjustments}) > 1
+    assert all(item["direction"] == "extension" for item in adjustments)
+    assert row["surface_pricing_vol"] > 0.4
+
+
+@pytest.mark.parametrize("mapping_id", ["CME-TTF-TFP", "CME-TTF-TFF"])
+def test_ttf_usd_surface_selection_is_unit_independent_at_equal_moneyness(
+    mapping_id,
+):
+    mapping = pricer.exchange_option_mapping(mapping_id)
+    month = "2026-10-01"
+
+    def skew_loader(
+        asset,
+        _valuation_date,
+        months,
+        *,
+        force_refresh=False,
+        engine=None,
+    ):
+        del force_refresh, engine
+        rows = []
+        for contract_month in months:
+            expiry = _surface_expiry(asset, contract_month)
+            for delta in (0.10, 0.25, 0.50, 0.75, 0.90):
+                rows.append(
+                    {
+                        "contract_date": contract_month,
+                        "option_expiration_date": expiry,
+                        "delta": delta,
+                        "volatility": 0.30 + 0.15 * abs(delta - 0.50),
+                        "working_forward": 999.0,
+                    }
+                )
+        return {
+            "publication_id": "00000000-0000-0000-0000-000000000001",
+            "run_id": "00000000-0000-0000-0000-000000000002",
+            "commodity": asset,
+            "cob_date": AS_OF.isoformat(),
+            "published_at": "2026-08-24T12:00:00+00:00",
+            "published_by": "tester",
+            "points": pd.DataFrame(rows),
+        }
+
+    vols = []
+    for forward in (12.0, 42.0):
+        component = build_delivery_month_component(
+            "TTF",
+            "black76",
+            month,
+            AS_OF,
+            forward,
+            mapping_id=mapping_id,
+        )
+        context = {
+            "exchange_mapping_id": mapping_id,
+            "premium_convention": mapping.premium_convention,
+            "delivery_shape": "MONTH",
+            "delivery_month": month,
+            "forward": forward,
+            "rate": 0.03,
+            "expiration_date": component["option_expiration_date"],
+            "contract_expiration_date": component["contract_expiration_date"],
+        }
+        payload = surface_reference.build_published_surface_reference(
+            "TTF",
+            "black76",
+            context,
+            [_leg(strike=forward)],
+            AS_OF,
+            surface_loader=skew_loader,
+        )
+        vols.append(payload["rows"]["leg-1"]["surface_pricing_vol"])
+
+    assert vols[0] == pytest.approx(vols[1], rel=1e-12, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("asset", "mapping_id", "premium_convention"),
+    [
+        ("TTF", "CME-TTF-TFO", "futures_style"),
+        ("TTF", "CME-TTF-TTO", "upfront"),
+        ("NBP", "CME-NBP-UFO", "futures_style"),
+        ("NBP", "CME-NBP-UKO", "upfront"),
+    ],
+)
+def test_cme_ttf_nbp_pairs_use_ice_surface_with_target_expiry_adjustment(
+    asset,
+    mapping_id,
+    premium_convention,
+):
+    month = "2028-01-01"
+    forward = 42.0
+    component = build_delivery_month_component(
+        asset, "black76", month, AS_OF, forward, mapping_id=mapping_id
+    )
+    assert component["surface_option_expiration_date"] == "2027-12-24"
+    expected_target_expiry = "2027-12-24" if asset == "TTF" else "2027-12-23"
+    assert component["option_expiration_date"] == expected_target_expiry
+    context = {
+        "exchange_mapping_id": mapping_id,
+        "premium_convention": premium_convention,
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": forward,
+        "rate": 0.03,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+    kwargs = (
+        {"surface_loader": _loader({(2028, 1): 0.4})}
+        if asset == "TTF"
+        else {"operational_loader": _operational_loader(0.4)}
+    )
+
+    payload = surface_reference.build_published_surface_reference(
+        asset,
+        "black76",
+        context,
+        [_leg(strike=forward)],
+        AS_OF,
+        **kwargs,
+    )
+    result = payload["rows"]["leg-1"]
+
+    if asset == "TTF":
+        assert result["surface_pricing_vol"] == pytest.approx(0.4)
+        assert "Expiry adjustment" not in result["surface_pricing_tooltip"]
+    else:
+        assert 0.0 < result["surface_pricing_vol"] < 0.4
+        assert "2027-12-24 to 2027-12-23" in result[
+            "surface_pricing_tooltip"
+        ]
+        assert "shortened" in result["surface_pricing_tooltip"]
+
+
+def test_surface_extension_rejects_more_than_the_mapping_allowance():
+    month = date(2033, 1, 1)
+    publication = _operational_loader(0.5)("HH", AS_OF, [month])
+    component = {
+        "contract_month": month.isoformat(),
+        "option_expiration_date": "2032-12-30",
+        "max_surface_extension_days": 1,
+        "weight": 1.0,
+        "forward": 3.0,
+    }
+
+    with pytest.raises(
+        surface_reference.SurfaceReferenceError,
+        match="this mapping permits 1",
+    ):
+        surface_reference._prepare_component_surface(
+            publication["points"],
+            component,
+            asset="HH",
+            valuation_date=AS_OF,
+            current_forward=3.0,
+        )
+
+
 def test_surface_input_vol_decomposes_exactly_into_atm_and_skew():
     month = "2026-12-01"
     context, _component = _monthly_context(
@@ -641,14 +1069,14 @@ def test_strip_flat_vol_is_premium_equivalent(asset, model, shape, year, vols):
 
 def test_failure_cells_are_advisory_and_explain_the_reason():
     unsupported = surface_reference.build_published_surface_reference(
-        "Brent",
+        "Unsupported asset",
         "black76",
         {},
         [_leg()],
         AS_OF,
     )
     assert unsupported["rows"]["leg-1"]["surface_input_vol"] is None
-    assert "only for TTF and JKM" in unsupported["rows"]["leg-1"][
+    assert "not configured for this asset" in unsupported["rows"]["leg-1"][
         "surface_input_tooltip"
     ]
 

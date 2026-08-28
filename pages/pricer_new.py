@@ -18,20 +18,25 @@ from dash import (
 )
 
 from pages import pricer as pricer_old
+from pricer_exchange_registry import (
+    exchange_mapping_options,
+    exchange_option_mapping,
+)
 
 
 EXCHANGE_WORKFLOW = "exchange"
 OTC_WORKFLOW = "otc"
 LEGACY_WORKFLOW = "legacy"
 EXCHANGE_STRUCTURE_ID = "exchange-structure-1"
-EXCHANGE_WORKSPACE_SCHEMA_VERSION = 1
+EXCHANGE_WORKSPACE_SCHEMA_VERSION = 2
+EXCHANGE_MAPPING_OPTIONS = tuple(exchange_mapping_options())
 EXCHANGE_MODEL_OPTIONS = {
     "TTF": ({"label": "ICE TTF option", "value": "black76"},),
     "JKM": (
         {"label": "JKM average price option", "value": "asian76"},
         {"label": "JKM vanilla option", "value": "black76"},
     ),
-    "HH": ({"label": "CME Henry Hub option", "value": "black76"},),
+    "HH": ({"label": "ICE Henry Hub PHE option", "value": "black76"},),
     "Brent": ({"label": "ICE Brent option", "value": "black76"},),
     "NBP": ({"label": "ICE NBP option", "value": "black76"},),
 }
@@ -65,6 +70,13 @@ def _normalize_exchange_workspace(workspace):
     raw_structures = workspace.get("structures")
     if not isinstance(raw_structures, list):
         return _default_exchange_workspace()
+    try:
+        migrate_governed_mapping = (
+            int(workspace.get("schema_version", 0))
+            < EXCHANGE_WORKSPACE_SCHEMA_VERSION
+        )
+    except (TypeError, ValueError, OverflowError):
+        migrate_governed_mapping = True
     structures = []
     seen = set()
     for index, raw_structure in enumerate(raw_structures, start=1):
@@ -82,6 +94,11 @@ def _normalize_exchange_workspace(workspace):
             if isinstance(raw_structure.get("template"), dict)
             else None
         )
+        if template is not None:
+            pricer_old._migrate_template_premium_convention(
+                template,
+                migrate_governed_mapping=migrate_governed_mapping,
+            )
         structures.append(
             {
                 "structure_id": structure_id,
@@ -105,15 +122,20 @@ def _normalize_exchange_workspace(workspace):
         )
     except (TypeError, ValueError, OverflowError):
         next_sequence = max(numeric_sequences, default=0) + 1
-    drafts = {
-        structure_id: deepcopy(template)
-        for structure_id, template in (
-            workspace.get("drafts", {}).items()
-            if isinstance(workspace.get("drafts"), dict)
-            else []
+    drafts = {}
+    for structure_id, template in (
+        workspace.get("drafts", {}).items()
+        if isinstance(workspace.get("drafts"), dict)
+        else []
+    ):
+        if structure_id not in seen or not isinstance(template, dict):
+            continue
+        migrated_template = deepcopy(template)
+        pricer_old._migrate_template_premium_convention(
+            migrated_template,
+            migrate_governed_mapping=migrate_governed_mapping,
         )
-        if structure_id in seen and isinstance(template, dict)
-    }
+        drafts[structure_id] = migrated_template
     return {
         "schema_version": EXCHANGE_WORKSPACE_SCHEMA_VERSION,
         "next_structure_sequence": next_sequence,
@@ -181,16 +203,19 @@ def _normalized_workflow(value):
     )
 
 
-def _workflow_model_options(workflow, asset):
+def _workflow_model_options(workflow, asset, mapping_id=None):
     if _normalized_workflow(workflow) in {OTC_WORKFLOW, LEGACY_WORKFLOW}:
         return deepcopy(pricer_old.option_types)
-    return [
-        dict(option)
-        for option in EXCHANGE_MODEL_OPTIONS.get(
-            asset,
-            EXCHANGE_MODEL_OPTIONS[pricer_old.DEFAULT_ASSET],
-        )
-    ]
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is None:
+        return [
+            dict(option)
+            for option in EXCHANGE_MODEL_OPTIONS.get(
+                asset,
+                EXCHANGE_MODEL_OPTIONS[pricer_old.DEFAULT_ASSET],
+            )
+        ]
+    return [{"label": mapping.product, "value": mapping.model}]
 
 
 def _workflow_model_style(workflow, asset):
@@ -211,19 +236,30 @@ def _workflow_rate_style(workflow, asset):
     return {"display": "none"}
 
 
-def _workflow_model_value(workflow, asset, current_model, triggered_id=None):
+def _workflow_model_value(
+    workflow,
+    asset,
+    current_model,
+    triggered_id=None,
+    mapping_id=None,
+):
     if _normalized_workflow(workflow) in {OTC_WORKFLOW, LEGACY_WORKFLOW}:
         return no_update
-    allowed = {
-        option["value"] for option in _workflow_model_options(workflow, asset)
-    }
-    asset_changed = (
-        isinstance(triggered_id, dict)
-        and triggered_id.get("type") == "pricer-asset"
-    )
-    if asset == "JKM" and current_model in allowed and not asset_changed:
-        return no_update
-    selected = pricer_old.default_model_for_asset(asset)
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is not None:
+        return mapping.model
+    else:
+        allowed = {
+            option["value"]
+            for option in _workflow_model_options(workflow, asset)
+        }
+        asset_changed = (
+            isinstance(triggered_id, dict)
+            and triggered_id.get("type") == "pricer-asset"
+        )
+        if asset == "JKM" and current_model in allowed and not asset_changed:
+            return no_update
+        selected = pricer_old.default_model_for_asset(asset)
     return no_update if current_model == selected else selected
 
 
@@ -432,7 +468,7 @@ layout = html.Main(
         ),
         dcc.Interval(
             id="pricer-exchange-workspace-hydration",
-            interval=100,
+            interval=1000,
             max_intervals=1,
             n_intervals=0,
         ),
@@ -466,6 +502,8 @@ layout = html.Main(
     ],
     [
         State("pricer-exchange-workspace-store", "data"),
+        State({"type": "pricer-mapping-id", "structure_id": ALL}, "value"),
+        State({"type": "pricer-mapping-id", "structure_id": ALL}, "id"),
         State({"type": "pricer-asset", "structure_id": ALL}, "value"),
         State({"type": "pricer-asset", "structure_id": ALL}, "id"),
         State(
@@ -537,6 +575,8 @@ def manage_exchange_workspace(
     _remove_clicks,
     _autosave_tick,
     workspace,
+    mapping_values,
+    mapping_ids,
     asset_values,
     asset_ids,
     model_values,
@@ -582,6 +622,8 @@ def manage_exchange_workspace(
             param_ids,
             date_values,
             date_ids,
+            mapping_values=mapping_values,
+            mapping_ids=mapping_ids,
         )
 
     def build_panel(structure, can_remove):
@@ -601,6 +643,8 @@ def manage_exchange_workspace(
 
     if not isinstance(triggered, dict):
         if triggered == "pricer-draft-autosave-trigger":
+            if not _hydration:
+                return no_update, no_update
             updated = deepcopy(workspace)
             drafts = deepcopy(workspace["drafts"])
             for structure in workspace["structures"]:
@@ -748,15 +792,73 @@ def render_exchange_workspace_status(
             {"type": "pricer-structure-workflow", "structure_id": MATCH},
             "data",
         ),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
     ],
 )
-def configure_pricer_workflow_controls(workflow, asset):
+def configure_pricer_workflow_controls(workflow, mapping_id, asset):
+    mapping = exchange_option_mapping(mapping_id)
+    effective_asset = mapping.asset if mapping is not None else asset
     return (
-        _workflow_model_options(workflow, asset),
-        _workflow_model_style(workflow, asset),
-        _workflow_rate_style(workflow, asset),
+        _workflow_model_options(workflow, effective_asset, mapping_id),
+        _workflow_model_style(workflow, effective_asset),
+        _workflow_rate_style(workflow, effective_asset),
     )
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-asset-field", "structure_id": MATCH},
+            "style",
+        ),
+        Output(
+            {"type": "pricer-price-unit-field", "structure_id": MATCH},
+            "style",
+        ),
+    ],
+    [
+        Input(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
+        Input(
+            {"type": "pricer-option-type", "structure_id": MATCH},
+            "value",
+        ),
+    ],
+)
+def configure_otc_asset_identity_controls(workflow, model):
+    normalized = _normalized_workflow(workflow)
+    if normalized == EXCHANGE_WORKFLOW:
+        return {"display": "none"}, {"display": "flex"}
+    style = {"display": "none"} if model == "kirk" else {"display": "flex"}
+    return style, style
+
+
+@callback(
+    Output(
+        {"type": "pricer-asset", "structure_id": MATCH},
+        "value",
+        allow_duplicate=True,
+    ),
+    [
+        Input(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+    ],
+    State({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+    prevent_initial_call=True,
+)
+def select_exchange_mapping_asset(workflow, mapping_id, current_asset):
+    if _normalized_workflow(workflow) != EXCHANGE_WORKFLOW:
+        return no_update
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is None or mapping.asset == current_asset:
+        return no_update
+    return mapping.asset
 
 
 @callback(
@@ -770,6 +872,7 @@ def configure_pricer_workflow_controls(workflow, asset):
             {"type": "pricer-structure-workflow", "structure_id": MATCH},
             "data",
         ),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
     ],
     State(
@@ -778,5 +881,11 @@ def configure_pricer_workflow_controls(workflow, asset):
     ),
     prevent_initial_call=True,
 )
-def select_pricer_workflow_model(workflow, asset, current_model):
-    return _workflow_model_value(workflow, asset, current_model, ctx.triggered_id)
+def select_pricer_workflow_model(workflow, mapping_id, asset, current_model):
+    return _workflow_model_value(
+        workflow,
+        asset,
+        current_model,
+        ctx.triggered_id,
+        mapping_id,
+    )

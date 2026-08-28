@@ -18,9 +18,21 @@ import pandas as pd
 from scipy.optimize import brentq
 from sqlalchemy import text
 
-from options.options_library import asian_76, black_76, black_76_futures_style
+from options.options_library import (
+    american_on_futures_equity_style,
+    american_on_futures_equity_style_price,
+    asian_76,
+    black_76,
+    black_76_futures_style,
+)
+from options.option_contract_conventions import FlatDiscountCurve
+from options.option_expiry_engine import (
+    business_days_between,
+    get_surface_calendar_mapping,
+)
 from options.ttf_volatility import black76_call_delta, delta_node_to_strike
 from pricer_structure import (
+    SUPPORTED_ASSETS,
     StructureValidationError,
     calculate_structure,
     default_leg,
@@ -35,7 +47,8 @@ LOGGER = logging.getLogger(__name__)
 REFERENCE_SCHEMA_VERSION = 1
 SUPPORTED_SURFACE_ASSETS = {"TTF", "JKM"}
 OPERATIONAL_SURFACE_ASSETS = {"BRENT", "HH", "NBP"}
-SUPPORTED_SURFACE_MODELS = {"black76", "asian76"}
+PRICER_SURFACE_ASSETS = SUPPORTED_SURFACE_ASSETS | OPERATIONAL_SURFACE_ASSETS
+SUPPORTED_SURFACE_MODELS = {"black76", "asian76", "american_futures"}
 DAY_COUNT_DENOMINATOR = 365.25
 COMPARISON_SCHEMA_VERSION = 1
 COMPARISON_CURVE_POINT_LIMIT = 81
@@ -204,9 +217,12 @@ def _normalize_reference_context(
     valuation_date: date,
 ) -> dict:
     if model not in SUPPORTED_SURFACE_MODELS:
-        raise SurfaceReferenceError("Published references are not available for Kirk.")
+        raise SurfaceReferenceError(
+            f"Published references are not available for model {model}."
+        )
     raw_context = dict(context or {})
-    raw_context["asset"] = asset
+    canonical_assets = {item.upper(): item for item in SUPPORTED_ASSETS}
+    raw_context["asset"] = canonical_assets.get(str(asset).upper(), asset)
     try:
         forward = float(raw_context.get("forward"))
     except (TypeError, ValueError, OverflowError) as exc:
@@ -241,8 +257,20 @@ def _delivery_components(context: Mapping) -> list[dict]:
         "option_expiration_date": context.get("expiration_date"),
         "time_to_expiry": context.get("time_to_expiry"),
         "forward": context.get("forward"),
+        "rate": context.get("rate"),
         "weight": 1.0,
     }
+    for field in (
+        "surface_option_expiration_date",
+        "surface_expiry_convention_code",
+        "surface_expiry_convention_version",
+        "expiry_convention_code",
+        "expiry_convention_version",
+        "volatility_surface_source",
+        "max_surface_extension_days",
+    ):
+        if context.get(field) is not None:
+            component[field] = context[field]
     if context.get("time_to_averaging_start") is not None:
         component["time_to_averaging_start"] = context[
             "time_to_averaging_start"
@@ -281,6 +309,27 @@ def _surface_model_call_delta(
             reference_time,
             reference_volatility,
         )
+    if model == "american_futures":
+        try:
+            call_delta = american_on_futures_equity_style(
+                "C",
+                current_forward,
+                strike,
+                float(component.get("time_to_expiry")),
+                FlatDiscountCurve(float(component.get("rate") or 0.0)),
+                pricing_volatility,
+                steps=400,
+            )[1]
+        except Exception as exc:
+            raise SurfaceReferenceError(
+                "The American futures surface call delta could not be calculated."
+            ) from exc
+        call_delta = float(call_delta)
+        if not math.isfinite(call_delta) or not 0.0 < call_delta < 1.0:
+            raise SurfaceReferenceError(
+                "The American futures surface call delta is invalid."
+            )
+        return call_delta
     if model != "asian76":
         raise SurfaceReferenceError(
             f"Published surface delta is not supported for model {model}."
@@ -425,12 +474,24 @@ def _prepare_component_surface(
         component.get("option_expiration_date"),
         "Selected option expiration",
     )
+    extension_days = 0
     if option_expiry > reference_expiry:
-        raise SurfaceReferenceError(
-            f"Selected expiry {option_expiry.isoformat()} is after the published "
-            f"reference expiry {reference_expiry.isoformat()} for "
-            f"{contract_month.strftime('%b-%y')}."
+        variance_calendar = get_surface_calendar_mapping(
+            asset
+        ).variance_calendar_code
+        extension_days = business_days_between(
+            reference_expiry,
+            option_expiry,
+            variance_calendar,
         )
+        maximum_extension = int(component.get("max_surface_extension_days", 0))
+        if extension_days > maximum_extension:
+            raise SurfaceReferenceError(
+                f"Selected expiry {option_expiry.isoformat()} extends the published "
+                f"reference expiry {reference_expiry.isoformat()} by "
+                f"{extension_days} governed day(s); this mapping permits "
+                f"{maximum_extension}."
+            )
     try:
         adjustment_factor, option_days, reference_days = volatility_adjustment(
             valuation_date,
@@ -455,6 +516,7 @@ def _prepare_component_surface(
         "atm_pricing_volatility": atm_reference_volatility * adjustment_factor,
         "option_business_days": option_days,
         "reference_business_days": reference_days,
+        "surface_extension_business_days": extension_days,
         "saved_forward": saved_forward,
         "minimum_strike": float(selected["rebased_strike"].iloc[0]),
         "maximum_strike": float(selected["rebased_strike"].iloc[-1]),
@@ -559,7 +621,7 @@ def _component_price(
                 float(context["rate"]),
                 volatility,
             )[0]
-    else:
+    elif model == "asian76":
         value = asian_76(
             call_put,
             float(component["forward"]),
@@ -569,6 +631,18 @@ def _component_price(
             float(context["rate"]),
             volatility,
         )[0]
+    elif model == "american_futures":
+        value = american_on_futures_equity_style_price(
+            call_put,
+            float(component["forward"]),
+            strike,
+            float(component["time_to_expiry"]),
+            FlatDiscountCurve(float(context["rate"])),
+            volatility,
+            steps=400,
+        )
+    else:
+        raise SurfaceReferenceError(f"Unsupported surface model {model}.")
     value = float(value)
     if not math.isfinite(value):
         raise SurfaceReferenceError("Published surface pricing became non-finite.")
@@ -635,6 +709,12 @@ def _premium_equivalent_flat_volatility(
 
 
 def _publication_detail(publication: Mapping) -> str:
+    if publication.get("source_kind") == "operational":
+        return (
+            f"COB {publication.get('cob_date')}; source "
+            f"{publication.get('source') or 'operational surface'}; revision "
+            f"{_surface_revision(publication)}"
+        )
     return (
         f"COB {publication['cob_date']}; published {publication['published_at']}; "
         f"revision {publication['publication_id']}"
@@ -646,17 +726,26 @@ def _published_surface_tooltip(
     component_results: list[dict],
     model: str,
 ) -> str:
-    published_at = pd.to_datetime(
-        publication.get("published_at"),
-        errors="coerce",
-    )
-    if pd.isna(published_at):
-        raise SurfaceReferenceError("The publication timestamp is invalid.")
-    timezone_label = ""
-    if published_at.tzinfo is not None:
-        published_at = published_at.tz_convert("UTC")
-        timezone_label = " UTC"
-    published_label = published_at.strftime("%Y-%m-%d %H:%M") + timezone_label
+    if publication.get("source_kind") == "operational":
+        source_label = (
+            f"Surface COB: {publication.get('cob_date')} · "
+            f"Source: {publication.get('source') or 'operational surface'}"
+        )
+    else:
+        published_at = pd.to_datetime(
+            publication.get("published_at"),
+            errors="coerce",
+        )
+        if pd.isna(published_at):
+            raise SurfaceReferenceError("The publication timestamp is invalid.")
+        timezone_label = ""
+        if published_at.tzinfo is not None:
+            published_at = published_at.tz_convert("UTC")
+            timezone_label = " UTC"
+        published_label = (
+            published_at.strftime("%Y-%m-%d %H:%M") + timezone_label
+        )
+        source_label = f"Published: {published_label}"
 
     deltas = [float(item["call_delta"]) for item in component_results]
     if not deltas or not all(math.isfinite(value) for value in deltas):
@@ -666,11 +755,33 @@ def _published_surface_tooltip(
     delta_label = (
         lower_label if lower_label == upper_label else f"{lower_label}–{upper_label}"
     )
-    model_label = "Asian-76" if model == "asian76" else "Black-76"
-    return (
-        f"Published: {published_label} · "
+    model_label = {
+        "asian76": "Asian-76",
+        "american_futures": "American futures",
+    }.get(model, "Black-76")
+    tooltip = (
+        f"{source_label} · "
         f"Surface call delta ({model_label}): {delta_label}"
     )
+    adjustments = {
+        (
+            item["reference_expiry"],
+            item["option_expiry"],
+            float(item["surface_adjustment_factor"]),
+        )
+        for item in component_results
+        if item["reference_expiry"] != item["option_expiry"]
+    }
+    if adjustments:
+        details = []
+        for source_expiry, target_expiry, factor in sorted(adjustments):
+            direction = "extended" if target_expiry > source_expiry else "shortened"
+            details.append(
+                f"{source_expiry.isoformat()} to {target_expiry.isoformat()} "
+                f"({direction}, factor {factor:.6f})"
+            )
+        tooltip += " · Expiry adjustment: " + "; ".join(details)
+    return tooltip
 
 
 def _failed_rows(rows, reason: str, publication: Mapping | None = None) -> dict:
@@ -758,7 +869,7 @@ def _comparison_context_payload(snapshot: Mapping) -> dict:
         raise SurfaceReferenceError("The calculated structure snapshot is invalid.")
     model = str(snapshot.get("model") or "")
     context = snapshot.get("context")
-    if model not in {"black76", "asian76", "kirk"} or not isinstance(
+    if model not in {"black76", "asian76", "american_futures", "kirk"} or not isinstance(
         context, Mapping
     ):
         raise SurfaceReferenceError("The calculated structure snapshot is invalid.")
@@ -839,6 +950,21 @@ def _pricing_model_call_delta(
         except Exception as exc:
             raise SurfaceReferenceError(
                 "The Asian-76 comparison delta could not be calculated."
+            ) from exc
+    elif model == "american_futures":
+        try:
+            call_delta = american_on_futures_equity_style(
+                "C",
+                forward,
+                strike,
+                time_to_expiry,
+                FlatDiscountCurve(float(context.get("rate") or 0.0)),
+                pricing_volatility,
+                steps=400,
+            )[1]
+        except Exception as exc:
+            raise SurfaceReferenceError(
+                "The American futures comparison delta could not be calculated."
             ) from exc
     else:
         raise SurfaceReferenceError("Kirk has no governed single-asset surface delta.")
@@ -1342,6 +1468,7 @@ def build_published_surface_reference(
     force_refresh: bool = False,
     engine=None,
     surface_loader: Callable = load_published_surface_slice,
+    operational_loader: Callable = load_operational_surface_slice,
 ) -> dict:
     """Build a compact, read-only per-leg published-surface payload."""
     normalized_rows = [dict(row) for row in rows or [] if isinstance(row, Mapping)]
@@ -1354,10 +1481,10 @@ def build_published_surface_reference(
     if not normalized_rows:
         return payload
     normalized_asset = str(asset or "").strip().upper()
-    if normalized_asset not in SUPPORTED_SURFACE_ASSETS:
+    if normalized_asset not in PRICER_SURFACE_ASSETS:
         payload["rows"] = _failed_rows(
             normalized_rows,
-            "published references are supported only for TTF and JKM.",
+            "published references are not configured for this asset.",
         )
         return payload
     if model not in SUPPORTED_SURFACE_MODELS:
@@ -1372,13 +1499,21 @@ def build_published_surface_reference(
         )
         components = _delivery_components(normalized_context)
         months = [_month_start(item["contract_month"]) for item in components]
-        publication = surface_loader(
-            normalized_asset,
-            selected_date,
-            months,
-            force_refresh=force_refresh,
-            engine=engine,
-        )
+        if normalized_asset in SUPPORTED_SURFACE_ASSETS:
+            publication = surface_loader(
+                normalized_asset,
+                selected_date,
+                months,
+                force_refresh=force_refresh,
+                engine=engine,
+            )
+        else:
+            publication = operational_loader(
+                normalized_asset,
+                selected_date,
+                months,
+                force_refresh=force_refresh,
+            )
         points = publication.get("points")
         if not isinstance(points, pd.DataFrame) or points.empty:
             raise SurfaceReferenceError("The selected publication slice is empty.")
@@ -1395,9 +1530,12 @@ def build_published_surface_reference(
 
     payload.update(
         {
-            "publication_id": publication["publication_id"],
+            "publication_id": publication.get("publication_id"),
             "publication_cob": publication["cob_date"],
-            "published_at": publication["published_at"],
+            "published_at": publication.get("published_at"),
+            "source_kind": publication.get("source_kind") or "governed",
+            "source": publication.get("source") or "governed publication",
+            "source_revision": _surface_revision(publication),
         }
     )
     current_forward = float(normalized_context["forward"])
@@ -1482,6 +1620,28 @@ def build_published_surface_reference(
                 "surface_pricing_vol": pricing_volatility,
                 "surface_input_tooltip": tooltip,
                 "surface_pricing_tooltip": tooltip,
+                "surface_expiry_adjustments": [
+                    {
+                        "contract_month": item["contract_month"].isoformat(),
+                        "source_expiry": item["reference_expiry"].isoformat(),
+                        "target_expiry": item["option_expiry"].isoformat(),
+                        "source_governed_days": item[
+                            "reference_business_days"
+                        ],
+                        "target_governed_days": item["option_business_days"],
+                        "direction": (
+                            "equal"
+                            if item["option_expiry"] == item["reference_expiry"]
+                            else (
+                                "extension"
+                                if item["option_expiry"] > item["reference_expiry"]
+                                else "shortening"
+                            )
+                        ),
+                        "factor": item["surface_adjustment_factor"],
+                    }
+                    for item in component_results
+                ],
             }
         except SurfaceReferenceError as exc:
             payload["rows"].update(

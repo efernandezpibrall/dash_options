@@ -1,5 +1,6 @@
 import copy
 import datetime as dt
+import inspect
 import json
 
 import pytest
@@ -202,7 +203,10 @@ def calculate_instance(
 
 def model_instance_state(model, structure_id=pricer.DEFAULT_STRUCTURE_ID):
     context = copy.deepcopy(pricer.default_context(model, FrozenDate.today()))
-    asset = context.pop("asset")
+    if model == "kirk":
+        context["asset_1_code"] = "JKM"
+        context["asset_2_code"] = "HH"
+    asset = context.pop("asset", pricer.DEFAULT_ASSET)
     param_values = []
     param_ids = []
     date_values = []
@@ -211,14 +215,14 @@ def model_instance_state(model, structure_id=pricer.DEFAULT_STRUCTURE_ID):
         component_id = {
             "type": (
                 "pricer-context-date"
-                if param.endswith("_date")
+                if param.endswith(("_date", "_expiry"))
                 else "pricer-context-param"
             ),
             "structure_id": structure_id,
             "model": model,
             "param": param,
         }
-        if param.endswith("_date"):
+        if param.endswith(("_date", "_expiry")):
             date_values.append(value)
             date_ids.append(component_id)
         else:
@@ -339,6 +343,10 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
         for child in context_row.children
         for item in walk(child)
         if getattr(item, "id", None) is not None
+        and not (
+            isinstance(item.id, dict)
+            and item.id.get("type") == "pricer-contract-multiplier-label"
+        )
     ]
     leg_toolbar = next(
         item
@@ -442,12 +450,15 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
         item.id["type"]
         for item in walk(header_controls)
         if isinstance(getattr(item, "id", None), dict)
-        and item.id.get("type")
-        not in {
-            "pricer-header-context",
-            "pricer-model-field",
-            "pricer-rate-field",
-        }
+            and item.id.get("type")
+            not in {
+                "pricer-header-context",
+                "pricer-model-field",
+                "pricer-asset-field",
+                "pricer-price-unit-field",
+                "pricer-contract-multiplier-label",
+                "pricer-rate-field",
+            }
     ]
     assert header_control_types[:5] == [
         "pricer-asset",
@@ -516,7 +527,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
         "structure_id": pricer.DEFAULT_STRUCTURE_ID,
     }
     assert context_row.children[0].children[0].children == "Valuation"
-    assert context_row.children[1].children[0].children == "Contract size"
+    assert context_row.children[1].children[0].children.children == "Contract size"
     assert "exact delivery hours" in context_row.children[1].title
     price_unit = component_by_pattern("pricer-price-unit", root=header_controls)
     price_unit_field = next(
@@ -793,6 +804,223 @@ def test_model_switch_keeps_signed_lot_columns_on_new_pricer(monkeypatch):
     assert "side" not in outputs[2][0]
 
 
+def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
+    exchange_panel = pricer._build_structure_panel(
+        {
+            "structure_id": "exchange-structure-1",
+            "label": "Structure 1",
+            "template": {"asset": "JKM", "model": "black76"},
+        },
+        workflow="exchange",
+        signed_lots=True,
+        use_published_surface=True,
+    )
+    shared_context = component_by_pattern(
+        "pricer-shared-context",
+        structure_id="exchange-structure-1",
+        root=exchange_panel,
+    )
+    children = list(shared_context.children)
+    note_index = next(
+        index
+        for index, child in enumerate(children)
+        if "pricer-jkm-vanilla-surface-note"
+        in str(getattr(child, "className", ""))
+    )
+
+    assert (
+        children[note_index].children
+        == "JKM APO surface, expiry-adjusted to JKZ."
+    )
+    assert "pricer-forward-field" in children[note_index - 1].className
+
+    bzo_panel = pricer._build_structure_panel(
+        {
+            "structure_id": "exchange-bzo-1",
+            "label": "Structure 1",
+            "template": {"mapping_id": "CME-BRENT-BZO"},
+        },
+        workflow="exchange",
+        signed_lots=True,
+        use_published_surface=True,
+    )
+    bzo_context = component_by_pattern(
+        "pricer-shared-context",
+        structure_id="exchange-bzo-1",
+        root=bzo_panel,
+    )
+    bzo_children = list(bzo_context.children)
+    bzo_note = next(
+        child
+        for child in bzo_children
+        if isinstance(getattr(child, "id", None), dict)
+        and child.id.get("type") == "pricer-surface-proxy-note"
+    )
+
+    assert bzo_note.children == ""
+    assert bzo_note.className == "pricer-surface-proxy-note"
+    assert pricer.sync_exchange_surface_proxy_note("CME-BRENT-BZO") == (
+        "",
+        "pricer-surface-proxy-note",
+    )
+
+    for asset, model, workflow in (
+        ("JKM", "asian76", "exchange"),
+        ("TTF", "black76", "exchange"),
+        ("JKM", "black76", "otc"),
+        ("JKM", "black76", "legacy"),
+    ):
+        panel = pricer._build_structure_panel(
+            {
+                "structure_id": f"{workflow}-{asset}-{model}",
+                "label": "Structure 1",
+                "template": {"asset": asset, "model": model},
+            },
+            workflow=workflow,
+        )
+        assert not any(
+            "pricer-jkm-vanilla-surface-note"
+            in str(getattr(component, "className", ""))
+            for component in walk(panel)
+        )
+
+
+def test_otc_header_starts_with_model_while_exchange_order_is_unchanged():
+    structure = {
+        "structure_id": "test-structure",
+        "label": "Structure 1",
+        "template": {"asset": "TTF", "model": "black76"},
+    }
+    otc_panel = pricer._build_structure_panel(structure, workflow="otc")
+    exchange_panel = pricer._build_structure_panel(structure, workflow="exchange")
+
+    def direct_control_types(panel):
+        controls = next(
+            item
+            for item in walk(panel)
+            if getattr(item, "className", None)
+            == "pricer-structure-header-controls"
+        )
+        return [
+            child.id["type"]
+            for child in controls.children
+            if isinstance(getattr(child, "id", None), dict)
+        ]
+
+    assert direct_control_types(otc_panel)[:3] == [
+        "pricer-model-field",
+        "pricer-asset-field",
+        "pricer-price-unit-field",
+    ]
+    assert direct_control_types(exchange_panel)[:4] == [
+        "pricer-mapping-id-field",
+        "pricer-asset-field",
+        "pricer-price-unit-field",
+        "pricer-model-field",
+    ]
+
+
+def test_otc_kirk_form_has_explicit_two_asset_inputs_and_unit_notional_default():
+    panel = pricer._build_structure_panel(
+        {
+            "structure_id": "otc-kirk",
+            "label": "Structure 1",
+            "template": {"model": "kirk"},
+        },
+        workflow="otc",
+        signed_lots=True,
+        use_published_surface=True,
+    )
+    kirk_components = [
+        item
+        for item in walk(panel)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("model") == "kirk"
+        and item.id.get("type")
+        in {"pricer-context-param", "pricer-context-date"}
+    ]
+    by_param = {item.id["param"]: item for item in kirk_components}
+
+    assert {
+        "asset_1_code",
+        "asset_2_code",
+    } == {
+        key for key, item in by_param.items() if isinstance(item, dcc.Dropdown)
+        and key.startswith("asset_") and key.endswith("_code")
+    }
+    assert by_param["asset_1_code"].value is None
+    assert by_param["asset_2_code"].value is None
+    assert by_param["asset_1_code"].clearable is True
+    assert by_param["asset_2_code"].clearable is True
+    assert by_param["asset_1_code"].placeholder == "Select"
+    assert by_param["asset_2_code"].placeholder == "Select"
+    assert {"asset_1_forward", "asset_2_forward"}.issubset(by_param)
+    assert {
+        "asset_1_reference_expiry",
+        "asset_2_reference_expiry",
+        "contractual_expiry",
+    }.issubset(by_param)
+    assert "correlation" in by_param
+    assert "delivery_shape" not in by_param
+    assert "delivery_month" not in by_param
+    shared_context = component_by_pattern(
+        "pricer-shared-context",
+        structure_id="otc-kirk",
+        root=panel,
+    )
+    shared_labels = [
+        item.children[0].children
+        for item in shared_context.children
+        if isinstance(item, html.Label)
+    ]
+    assert "Asset 1 forward" in shared_labels
+    assert "Asset 2 forward" in shared_labels
+    kirk_unit_components = [
+        item
+        for item in walk(panel)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "pricer-kirk-price-unit"
+    ]
+    assert len(kirk_unit_components) == 2
+    assert [item.children for item in kirk_unit_components] == ["—", "—"]
+    assert component_by_pattern(
+        "pricer-contract-multiplier",
+        structure_id="otc-kirk",
+        root=panel,
+    ).value == 1.0
+    assert component_by_pattern(
+        "pricer-asset-field",
+        structure_id="otc-kirk",
+        root=panel,
+    ).style == {"display": "none"}
+    assert component_by_pattern(
+        "pricer-price-unit-field",
+        structure_id="otc-kirk",
+        root=panel,
+    ).style == {"display": "none"}
+
+    labels, _descriptions = pricer.display_kirk_asset_price_units(
+        ["JKM", "HH"],
+        [
+            pricer._context_id("kirk", "asset_1_code", structure_id="otc-kirk"),
+            pricer._context_id("kirk", "asset_2_code", structure_id="otc-kirk"),
+        ],
+        [
+            {
+                "type": "pricer-kirk-price-unit",
+                "structure_id": "otc-kirk",
+                "asset_number": 1,
+            },
+            {
+                "type": "pricer-kirk-price-unit",
+                "structure_id": "otc-kirk",
+                "asset_number": 2,
+            },
+        ],
+    )
+    assert labels == ["USD/MMBtu", "USD/MMBtu"]
+
+
 def test_dashboard_calculation_treats_negative_lots_as_sell(monkeypatch):
     monkeypatch.setattr(
         pricer,
@@ -925,8 +1153,9 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
                 "atm_vol_adjustment": 0.0,
                 "skew_vol_adjustment": 0.0,
                 "smile_vol_adjustment": 0.0,
-                "effective_input_vol": 0.31,
-                "effective_pricing_vol": pricing_volatility,
+                    "effective_input_vol": 0.31,
+                    "effective_pricing_vol": pricing_volatility,
+                    "surface_expiry_adjustments": [],
             }
         ],
     }
@@ -1416,8 +1645,8 @@ def test_modified_input_status_prunes_the_session_snapshot(monkeypatch):
             "2026-08-06",
             "pricer-context-date",
         ),
-        ("kirk", "param", "asset_1", 105.0, "pricer-context-param"),
-        ("kirk", "param", "asset_2", 92.0, "pricer-context-param"),
+        ("kirk", "param", "asset_1_forward", 105.0, "pricer-context-param"),
+        ("kirk", "param", "asset_2_forward", 92.0, "pricer-context-param"),
         ("kirk", "param", "correlation", 0.25, "pricer-context-param"),
     ],
 )
@@ -2236,9 +2465,12 @@ def test_calculation_and_result_grids_reconcile_two_leg_trade(monkeypatch):
 
 def test_kirk_unified_grid_keeps_two_asset_analytics_without_summary_cards():
     as_of = FrozenDate(2026, 7, 29)
+    context = pricer.default_context("kirk", as_of)
+    context["asset_1_code"] = "JKM"
+    context["asset_2_code"] = "HH"
     snapshot = pricer.calculate_structure(
         "kirk",
-        pricer.default_context("kirk", as_of),
+        context,
         {"structure_quantity": 1, "contract_multiplier": 1},
         [pricer.default_leg("kirk", 1)],
         as_of=as_of,
@@ -2670,6 +2902,14 @@ def test_asset_change_resets_contract_size_to_new_exchange_unit(monkeypatch):
 def test_jkm_asset_change_defaults_to_average_price_option_model():
     assert pricer.select_asset_default_model("JKM") == "asian76"
     assert pricer.select_asset_default_model("TTF") is pricer.no_update
+    assert (
+        pricer.select_asset_default_model("JKM", "ICE-JKM-JKZ", "exchange")
+        == "black76"
+    )
+    assert (
+        pricer.select_asset_default_model("JKM", "ICE-JKM-APO", "exchange")
+        == "asian76"
+    )
 
 
 def test_header_uses_the_selected_asset_default_without_a_saved_override():
@@ -2749,6 +2989,26 @@ def test_premium_convention_controls_visible_risk_free_rate():
     invalid_value, invalid_disabled = pricer.sync_risk_free_rate_control(None)
     assert invalid_value is no_update
     assert invalid_disabled is no_update
+    assert pricer.sync_risk_free_rate_control(
+        "futures_style",
+        "CME-TTF-TTO",
+        "exchange",
+    ) == (no_update, False)
+
+
+@pytest.mark.parametrize(
+    ("premium_convention", "workflow", "expected"),
+    [
+        ("upfront", "exchange", {"display": "flex"}),
+        ("futures_style", "exchange", {"display": "none"}),
+        ("upfront", "otc", {}),
+        ("futures_style", "otc", {}),
+    ],
+)
+def test_exchange_rate_visibility_follows_mapping_premium(
+    premium_convention, workflow, expected
+):
+    assert pricer.sync_exchange_rate_visibility(premium_convention, workflow) == expected
 
 
 def test_premium_convention_change_clears_calculation_snapshot(monkeypatch):
@@ -2915,18 +3175,6 @@ def test_black_context_exposes_persisted_delivery_shape_and_year_controls():
             "param": "delivery_shape",
         }
     )
-    delivery_year = next(
-        item
-        for item in walk(form)
-        if getattr(item, "id", None)
-        == {
-            "type": "pricer-context-param",
-            "structure_id": pricer.DEFAULT_STRUCTURE_ID,
-            "model": "black76",
-            "param": "delivery_year",
-        }
-    )
-
     assert isinstance(shape, dcc.Dropdown)
     assert [option["value"] for option in shape.options] == [
         "MONTH",
@@ -2997,7 +3245,7 @@ def test_jkm_asian_context_enables_exchange_delivery_strips():
     assert pricer.toggle_delivery_year_field("WIN") == {}
 
 
-def test_jkm_asian_month_context_selects_delivery_and_locks_governed_dates():
+def test_jkm_asian_month_context_keeps_otc_governed_defaults_editable():
     values = {"delivery_shape": "MONTH", "delivery_month": "2027-01-01"}
     header = html.Div(
         pricer._build_structure_header_context(
@@ -3046,7 +3294,26 @@ def test_jkm_asian_month_context_selects_delivery_and_locks_governed_dates():
     assert dates["averaging_start_date"].date == "2026-11-16"
     assert dates["expiration_date"].date == "2026-12-15"
     assert dates["contract_expiration_date"].date == "2026-12-15"
-    assert all(item.disabled for item in dates.values())
+    assert not any(item.disabled for item in dates.values())
+
+
+def test_jkm_apo_exchange_month_locks_all_governed_dates():
+    form = pricer._build_context_form(
+        "asian76",
+        values={"delivery_shape": "MONTH", "delivery_month": "2027-01-01"},
+        asset="JKM",
+        mapping_id="ICE-JKM-APO",
+    )
+    dates = [
+        item
+        for item in walk(form)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "pricer-context-date"
+        and item.id.get("model") == "asian76"
+    ]
+
+    assert len(dates) == 3
+    assert all(item.disabled for item in dates)
 
 
 @pytest.mark.parametrize(
@@ -3057,7 +3324,6 @@ def test_jkm_asian_month_context_selects_delivery_and_locks_governed_dates():
         ("HH", "black76"),
         ("Brent", "black76"),
         ("NBP", "black76"),
-        ("Brent", "kirk"),
     ],
 )
 def test_every_asset_model_header_has_delivery_immediately_after_shape(asset, model):
@@ -3091,6 +3357,7 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
         "asian76",
         ["MONTH"],
         "2026-08-21",
+        None,
         ["2027-01-01"],
     )
     options = options[0]
@@ -3106,20 +3373,21 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
         "2026-10-01",
         "2027-01-01",
         "JKM",
+        None,
         ["MONTH"],
         selected,
         "2026-08-21",
     ) == (
-        "2026-11-16",
-        "2026-12-15",
-        "2026-11-16",
-        "2026-12-15",
-        "2026-12-15",
-        "2026-12-15",
-        "2026-12-15",
-        True,
-        True,
-        True,
+        no_update,
+        no_update,
+        "2026-09-01",
+        None,
+        "2026-10-01",
+        no_update,
+        "2026-10-01",
+        False,
+        False,
+        False,
     )
 
     strip = pricer.sync_delivery_month_control(
@@ -3127,6 +3395,7 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
         "asian76",
         ["Q1"],
         "2026-08-21",
+        None,
         [selected],
     )
     assert strip[1:] == (
@@ -3136,20 +3405,59 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
     )
 
 
-def test_ttf_delivery_callback_sets_and_locks_the_exchange_contract_anchor():
+def test_asian76_governed_date_callback_passes_mapping_id():
+    from app import app
+
+    app._setup_server()
+    callback = next(
+        item
+        for output, item in app.callback_map.items()
+        if "asian76" in output and "contract_expiration_date" in output
+    )
+    input_types = [json.loads(item["id"])["type"] for item in callback["inputs"]]
+
+    assert "pricer-mapping-id" in input_types
+    assert len(callback["inputs"]) == len(
+        inspect.signature(pricer.sync_asian76_dates).parameters
+    )
+
+
+def test_model_dependent_callbacks_ignore_transient_hydration_state():
+    assert pricer.manage_structure_legs(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ) == (no_update,) * 8
+    assert pricer.sync_delivery_month_control(
+        "HH",
+        None,
+        ["MONTH"],
+        "2026-08-27",
+        "CME-HH-ON",
+        ["2026-10-01"],
+    ) == ([no_update], [no_update], [no_update], no_update)
+
+
+def test_otc_delivery_callback_keeps_contract_dates_editable():
     assert pricer.sync_black76_contract_expiration_date(
         "2027-01-01",
         "2027-01-31",
         "TTF",
+        None,
         ["MONTH"],
         "2026-09-01",
         "2026-08-21",
     ) == (
-        "2026-08-26",
-        "2026-08-26",
-        "2026-08-26",
-        "2026-08-26",
-        True,
+        no_update,
+        None,
+        no_update,
+        "2027-01-01",
+        False,
     )
 
 
@@ -3490,23 +3798,76 @@ def test_actual_model_switch_replaces_columns_rows_context_and_column_state(
         and item.id.get("type") == "pricer-context-param"
     ]
     assert header_params == [
+        "asset_1_code",
+        "asset_2_code",
         "premium_convention",
-        "delivery_shape",
-        "delivery_month",
     ]
     header_dropdowns = [
         item for root in header for item in walk(root) if isinstance(item, dcc.Dropdown)
     ]
-    assert [item.value for item in header_dropdowns[:2]] == [
-        "futures_style",
-        "MONTH",
-    ]
-    assert header_dropdowns[2].value is not None
-    assert [option["value"] for option in header_dropdowns[0].options] == [
+    assert [item.value for item in header_dropdowns] == [
+        None,
+        None,
         "futures_style",
     ]
-    assert header_dropdowns[1].disabled is True
+    assert [option["value"] for option in header_dropdowns[2].options] == [
+        "futures_style",
+    ]
     assert reset is True
+
+
+def test_switching_away_from_kirk_removes_two_asset_context_from_visible_state(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        pricer,
+        "_get_pricer_triggered_id",
+        lambda: {"type": "pricer-option-type", "structure_id": "structure-1"},
+    )
+    kirk_rows = [pricer.default_leg("kirk", 1)]
+    outputs = pricer.manage_structure_legs(
+        "black76",
+        None,
+        None,
+        None,
+        None,
+        kirk_rows,
+        [],
+        {
+            "schema_version": 1,
+            "model": "kirk",
+            "context": {
+                "asset_1_code": "JKM",
+                "asset_2_code": "HH",
+                "asset_1_forward": 12.0,
+                "asset_2_forward": 4.0,
+            },
+            "legs": kirk_rows,
+            "next_leg_sequence": 2,
+        },
+        pricer._instance_id("pricer-option-type", "structure-1"),
+        "TTF",
+    )
+
+    visible_params = {
+        item.id["param"]
+        for root in (outputs[0], outputs[6])
+        for item in walk(root)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type")
+        in {"pricer-context-param", "pricer-context-date"}
+    }
+    assert not {
+        "asset_1_code",
+        "asset_2_code",
+        "asset_1_forward",
+        "asset_2_forward",
+        "asset_1_reference_expiry",
+        "asset_2_reference_expiry",
+        "contractual_expiry",
+    } & visible_params
+    assert outputs[4]["model"] == "black76"
+    assert outputs[4]["context"] is None
 
 
 def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatch):
@@ -3656,6 +4017,305 @@ def test_exchange_calculate_all_routes_only_to_exchange_structures(monkeypatch):
         exchange_calculate_all_clicks=1,
         workflow="exchange",
     ) == (no_update,) * 4
+
+
+def test_exchange_mapping_id_restores_registry_identity_and_contract_size():
+    panel = pricer._build_structure_panel(
+        {
+            "structure_id": "exchange-structure-9",
+            "label": "E9",
+            "template": {"mapping_id": "CME-HH-ON"},
+        },
+        workflow="exchange",
+        signed_lots=True,
+        use_published_surface=True,
+    )
+    components = list(walk(panel))
+    mapping_selector = next(
+        item
+        for item in components
+        if isinstance(item, dcc.Dropdown)
+        and item.id.get("type") == "pricer-mapping-id"
+    )
+    asset_selector = next(
+        item
+        for item in components
+        if isinstance(item, dcc.Dropdown)
+        and item.id.get("type") == "pricer-asset"
+    )
+    contract_size = next(
+        item
+        for item in components
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "pricer-contract-multiplier"
+    )
+    asset_field = next(
+        item
+        for item in components
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "pricer-asset-field"
+    )
+    model_selector = next(
+        item
+        for item in components
+        if isinstance(item, dcc.Dropdown)
+        and item.id.get("type") == "pricer-option-type"
+    )
+    price_unit = next(
+        item
+        for item in components
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "pricer-price-unit"
+    )
+
+    assert mapping_selector.value == "CME-HH-ON"
+    assert len(mapping_selector.options) == 19
+    assert mapping_selector.persistence == (
+        "pricer-exchange-structure-9-mapping-id-v2"
+    )
+    assert asset_selector.value == "HH"
+    assert asset_field.style == {"display": "none"}
+    assert model_selector.value == "american_futures"
+    assert model_selector.disabled is True
+    assert model_selector.options == [
+        {"label": "American futures", "value": "american_futures"}
+    ]
+    assert price_unit.children == "USD/MMBtu"
+    assert contract_size.value == 10_000.0
+
+
+def test_american_futures_is_not_exposed_in_the_otc_model_selector():
+    panel = pricer._build_structure_panel(
+        {"structure_id": "otc-structure-1", "label": "O1", "template": None},
+        workflow="otc",
+    )
+    model_selector = component_by_pattern(
+        "pricer-option-type", "otc-structure-1", panel
+    )
+
+    assert model_selector.disabled is False
+    assert "american_futures" not in {
+        option["value"] for option in model_selector.options
+    }
+
+
+def test_hh_exchange_default_is_the_ready_cme_lne_mapping():
+    mapping = pricer.exchange_mapping_for_asset_model("HH", "black76")
+    assert mapping.mapping_id == "CME-HH-LNE"
+    assert mapping.contract_size == 10_000.0
+    assert mapping.premium_convention == "upfront"
+    assert pricer.exchange_mapping_pricing_supported("CME-HH-LNE")
+    assert pricer.exchange_mapping_pricing_supported("ICE-HH-CURRENT")
+    assert pricer.exchange_option_mapping("ICE-HH-CURRENT").mapping_id == (
+        "ICE-HH-PHE"
+    )
+    assert pricer.exchange_mapping_pricing_supported("CME-HH-ON")
+
+
+def test_ice_brent_uses_the_governed_futures_style_black76_equivalent():
+    mapping = pricer.exchange_option_mapping("ICE-BRENT-B")
+
+    assert mapping.asset == "Brent"
+    assert mapping.model == "black76"
+    assert mapping.premium_convention == "futures_style"
+    assert mapping.contract_size == 1_000.0
+    assert mapping.implementation_status == "Ready"
+    assert mapping.pricing_supported
+    assert pricer.exchange_mapping_for_asset_model("Brent", "black76") == mapping
+
+
+def test_cme_bzo_is_ready_with_the_futures_style_brent_proxy_workflow():
+    mapping = pricer.exchange_option_mapping("CME-BRENT-BZO")
+
+    assert mapping.asset == "Brent"
+    assert mapping.model == "black76"
+    assert mapping.premium_convention == "futures_style"
+    assert mapping.contract_size == 1_000.0
+    assert mapping.implementation_status == "Ready"
+    assert mapping.pricing_supported
+
+
+def test_exchange_registry_premium_and_size_override_asset_defaults(monkeypatch):
+    monkeypatch.setattr(
+        pricer,
+        "_get_pricer_triggered_id",
+        lambda: {"type": "pricer-mapping-id"},
+    )
+    assert pricer.select_asset_default_premium_convention(
+        "TTF",
+        "black76",
+        mapping_id="CME-TTF-TTO",
+        workflow="exchange",
+    ) == ["upfront"]
+    value, default_state = pricer.sync_exchange_contract_size(
+        "HH",
+        "black76",
+        [],
+        [],
+        "2026-07-29",
+        [],
+        [],
+        2_500.0,
+        {"asset": "HH", "mapping_id": "ICE-HH-CURRENT", "value": 2_500.0},
+        mapping_id="CME-HH-ON",
+        workflow="exchange",
+    )
+    assert value == 10_000.0
+    assert default_state == {
+        "asset": "HH",
+        "mapping_id": "CME-HH-ON",
+        "value": 10_000.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mapping_id", "delivery_month", "premium", "expected_size"),
+    [
+        ("ICE-HH-PHE", "2027-01-01", "upfront", 2_500.0),
+        ("CME-BRENT-BE", "2027-01-01", "upfront", 1_000.0),
+        ("CME-TTF-TFO", "2027-01-01", "futures_style", 744.0),
+        ("CME-TTF-TTO", "2027-01-01", "upfront", 744.0),
+        ("CME-NBP-UKO", "2027-01-01", "upfront", 31_000.0),
+        ("CME-NBP-UFO", "2027-01-01", "futures_style", 31_000.0),
+        ("CME-TTF-TTL", "2027-01-01", "futures_style", 744.0),
+        ("CME-TTF-TFP", "2027-01-01", "upfront", 10_000.0),
+        ("CME-TTF-TFF", "2027-01-01", "futures_style", 10_000.0),
+        ("CME-JKM-JKO", "2027-03-01", "upfront", 10_000.0),
+        ("CME-JKM-JFO", "2027-03-01", "futures_style", 10_000.0),
+        ("CME-HH-ON", "2027-01-01", "upfront", 10_000.0),
+    ],
+)
+def test_ready_exchange_mapping_initializes_premium_rate_size_and_governed_dates(
+    mapping_id,
+    delivery_month,
+    premium,
+    expected_size,
+):
+    mapping = pricer.exchange_option_mapping(mapping_id)
+    panel = pricer._build_structure_panel(
+        {
+            "structure_id": "exchange-structure-1",
+            "label": "E1",
+            "template": {
+                "mapping_id": mapping_id,
+                "valuation_date": "2026-08-27",
+                "context": {
+                    "delivery_shape": "MONTH",
+                    "delivery_month": delivery_month,
+                    "expiration_date": "2027-01-31",
+                    "contract_expiration_date": "2027-01-31",
+                    "rate": 0.05,
+                },
+            },
+        },
+        workflow="exchange",
+        signed_lots=True,
+        use_published_surface=True,
+    )
+    premium_input = next(
+        item
+        for item in walk(panel)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("param") == "premium_convention"
+    )
+    rate_input = next(
+        item
+        for item in walk(panel)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("param") == "rate"
+    )
+    dates = {
+        item.id["param"]: item
+        for item in walk(panel)
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "pricer-context-date"
+        and item.id.get("model") == mapping.model
+    }
+    expected_component = pricer.build_delivery_month_component(
+        mapping.asset,
+        mapping.model,
+        delivery_month,
+        dt.date(2026, 8, 27),
+        mapping_id=mapping_id,
+    )
+
+    assert premium_input.value == premium
+    assert rate_input.disabled is (premium == "futures_style")
+    assert component_by_pattern(
+        "pricer-contract-multiplier",
+        "exchange-structure-1",
+        panel,
+    ).value == pytest.approx(expected_size)
+    assert dates["expiration_date"].date == expected_component[
+        "option_expiration_date"
+    ]
+    assert dates["contract_expiration_date"].date == expected_component[
+        "contract_expiration_date"
+    ]
+    assert dates["expiration_date"].disabled is True
+    assert dates["contract_expiration_date"].disabled is True
+
+
+def test_workspace_and_direct_panel_migrate_the_retired_phe_mapping_id():
+    legacy_template = {
+        "mapping_id": "ICE-HH-CURRENT",
+        "asset": "HH",
+        "model": "black76",
+        "contract_multiplier": 1.0,
+        "context": {
+            "exchange_mapping_id": "ICE-HH-CURRENT",
+            "premium_convention": "upfront",
+        },
+    }
+    normalized = pricer._normalize_workspace(
+        {
+            "schema_version": 7,
+            "next_structure_sequence": 2,
+            "structures": [
+                {
+                    "structure_id": "structure-1",
+                    "label": "S1",
+                    "template": copy.deepcopy(legacy_template),
+                }
+            ],
+            "drafts": {"structure-1": copy.deepcopy(legacy_template)},
+        }
+    )
+
+    assert normalized["schema_version"] == 9
+    for template in (
+        normalized["structures"][0]["template"],
+        normalized["drafts"]["structure-1"],
+    ):
+        assert template["mapping_id"] == "ICE-HH-PHE"
+        assert template["context"]["exchange_mapping_id"] == "ICE-HH-PHE"
+        assert template["contract_multiplier"] == 2_500.0
+
+    panel = pricer._build_structure_panel(
+        {
+            "structure_id": "exchange-structure-1",
+            "label": "E1",
+            "template": copy.deepcopy(legacy_template),
+        },
+        workflow="exchange",
+        signed_lots=True,
+        use_published_surface=True,
+    )
+    assert component_by_pattern(
+        "pricer-mapping-id",
+        "exchange-structure-1",
+        panel,
+    ).value == "ICE-HH-PHE"
+
+
+def test_all_registry_mappings_are_ready_for_pricing():
+    options = pricer.exchange_mapping_options()
+
+    assert len(options) == 19
+    assert all(
+        pricer.exchange_mapping_pricing_supported(option["value"])
+        for option in options
+    )
 
 
 def test_corrupt_persisted_snapshot_is_pruned_and_panel_recovers(monkeypatch):
@@ -3923,6 +4583,65 @@ def test_futures_style_workspace_migration_zeroes_saved_rate():
     migrated = pricer._migrate_template_premium_convention(copy.deepcopy(template))
 
     assert migrated["context"]["rate"] == 0.0
+
+
+def test_legacy_kirk_draft_migrates_forwards_dates_and_only_defensible_asset_code():
+    template = {
+        "asset": "JKM",
+        "model": "kirk",
+        "contract_multiplier": 10_000,
+        "context": {
+            "asset_1": 12.5,
+            "asset_2": 8.75,
+            "expiration_date": "2027-02-25",
+            "contract_expiration_date": "2027-03-15",
+            "correlation": 0.8,
+        },
+    }
+
+    migrated = pricer._migrate_template_premium_convention(
+        copy.deepcopy(template),
+        migrate_legacy_contract_size=True,
+    )
+
+    assert migrated["context"]["asset_1_forward"] == 12.5
+    assert migrated["context"]["asset_2_forward"] == 8.75
+    assert migrated["context"]["asset_1_code"] == "JKM"
+    assert "asset_2_code" not in migrated["context"]
+    assert migrated["context"]["contractual_expiry"] == "2027-02-25"
+    assert migrated["context"]["asset_1_reference_expiry"] == "2027-03-15"
+    assert migrated["context"]["asset_2_reference_expiry"] == "2027-03-15"
+    assert "asset_1" not in migrated["context"]
+    assert "asset_2" not in migrated["context"]
+    assert migrated["contract_multiplier"] == 10_000
+
+
+def test_current_kirk_workspace_does_not_infer_asset_1_from_hidden_legacy_asset():
+    workspace = {
+        "schema_version": pricer.PRICER_WORKSPACE_SCHEMA_VERSION,
+        "next_structure_sequence": 2,
+        "drafts": {},
+        "structures": [
+            {
+                "structure_id": "structure-1",
+                "label": "S1",
+                "template": {
+                    "asset": "TTF",
+                    "model": "kirk",
+                    "context": {
+                        "asset_1_forward": 100.0,
+                        "asset_2_forward": 90.0,
+                    },
+                },
+            }
+        ],
+    }
+
+    normalized = pricer._normalize_workspace(workspace)
+
+    context = normalized["structures"][0]["template"]["context"]
+    assert "asset_1_code" not in context
+    assert "asset_2_code" not in context
 
 
 def test_fully_corrupt_draft_recovers_one_default_leg_and_finite_sequence(

@@ -2,6 +2,7 @@ from dash import dcc, html
 
 import index_options
 from app import app
+from pricer_exchange_registry import EXCHANGE_OPTION_MAPPINGS
 
 
 def _walk(component):
@@ -247,6 +248,23 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
     )
     assert exchange_workspace_store.storage_type == 'session'
     assert exchange_workspace_store.data['structures'][0]['label'] == 'E1'
+    mapping_selectors = [
+        item
+        for item in _walk(pricer_layout)
+        if isinstance(getattr(item, 'id', None), dict)
+        and item.id.get('type') == 'pricer-mapping-id'
+        and isinstance(item, dcc.Dropdown)
+    ]
+    assert len(mapping_selectors) == 1
+    assert mapping_selectors[0].value == 'ICE-TTF-TFO'
+    assert [option['value'] for option in mapping_selectors[0].options] == [
+        mapping.mapping_id for mapping in EXCHANGE_OPTION_MAPPINGS
+    ]
+    assert len(mapping_selectors[0].options) == 19
+    assert not any(
+        mapping.mapping_id.startswith('EX-')
+        for mapping in EXCHANGE_OPTION_MAPPINGS
+    )
     hidden_surface_grid = next(
         item
         for item in _walk(pricer_layout)
@@ -398,11 +416,38 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
     assert pricer_new._workflow_rate_style('otc', 'TTF') == {
         'display': 'flex'
     }
+    assert pricer_new.configure_otc_asset_identity_controls('otc', 'kirk') == (
+        {'display': 'none'},
+        {'display': 'none'},
+    )
+    assert pricer_new.configure_otc_asset_identity_controls(
+        'otc', 'black76'
+    ) == ({'display': 'flex'}, {'display': 'flex'})
+    assert pricer_new.configure_otc_asset_identity_controls(
+        'exchange', 'black76'
+    ) == ({'display': 'none'}, {'display': 'flex'})
+    assert pricer_new.select_exchange_mapping_asset(
+        'exchange', 'CME-HH-ON', 'TTF'
+    ) == 'HH'
+    assert pricer_new.select_exchange_mapping_asset(
+        'otc', 'CME-HH-ON', 'TTF'
+    ) is pricer_new.no_update
+    assert pricer_new._workflow_model_options(
+        'exchange', 'JKM', 'ICE-JKM-JKZ'
+    ) == [{'label': 'JKM vanilla option', 'value': 'black76'}]
     assert pricer_new._workflow_model_value(
         'exchange',
         'TTF',
         'kirk',
         {'type': 'pricer-asset'},
+        'ICE-TTF-TFO',
+    ) == 'black76'
+    assert pricer_new._workflow_model_value(
+        'exchange',
+        'JKM',
+        'black76',
+        {'type': 'pricer-mapping-id'},
+        'ICE-JKM-JKZ',
     ) == 'black76'
     assert pricer_new._workflow_model_value(
         'exchange',
@@ -428,6 +473,7 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
     ) is pricer_new.no_update
 
     exchange_workspace = pricer_new._default_exchange_workspace()
+    assert exchange_workspace['schema_version'] == 2
     added_workspace = pricer_new._reduce_exchange_workspace(
         exchange_workspace,
         'add',
@@ -458,6 +504,42 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
     assert [
         structure['label'] for structure in removed_workspace['structures']
     ] == ['E1', 'E3']
+
+    legacy_template = {
+        'mapping_id': 'ICE-HH-CURRENT',
+        'asset': 'TTF',
+        'model': 'asian76',
+        'contract_multiplier': 1,
+        'valuation_date': '2026-08-27',
+        'context': {
+            'delivery_shape': 'MONTH',
+            'delivery_month': '2026-10-01',
+            'forward': 3.0,
+        },
+        'legs': [{'leg_id': 'leg-1'}],
+    }
+    legacy_workspace = {
+        'schema_version': 1,
+        'next_structure_sequence': 2,
+        'structures': [
+            {
+                'structure_id': 'exchange-structure-1',
+                'label': 'E1',
+                'template': legacy_template,
+            }
+        ],
+        'drafts': {'exchange-structure-1': legacy_template},
+    }
+    migrated_workspace = pricer_new._normalize_exchange_workspace(
+        legacy_workspace
+    )
+    migrated_draft = migrated_workspace['drafts']['exchange-structure-1']
+    assert migrated_workspace['schema_version'] == 2
+    assert migrated_draft['mapping_id'] == 'ICE-HH-PHE'
+    assert migrated_draft['asset'] == 'HH'
+    assert migrated_draft['model'] == 'black76'
+    assert migrated_draft['context']['premium_convention'] == 'upfront'
+    assert migrated_draft['contract_multiplier'] == 2500.0
 
 
 def test_valuation_route_integrates_pnl_explain_as_a_view():

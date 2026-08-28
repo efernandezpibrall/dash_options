@@ -160,44 +160,30 @@ button:hover {
     background-color: #2E86C1;
     border-bottom: 1px solid #1B4F72;
     box-shadow: 0 2px 8px rgba(46, 134, 193, 0.3);
-    position: sticky;
-    top: 0;
     z-index: 1000;
 }
 
 /* Top Bar Content Wrapper */
 .top-bar-content {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
     padding: 16px 24px;
     max-width: 1400px;
-    margin: 0 auto;
     min-height: 64px;
 }
 
 /* Main Navigation Container */
 .main-navigation {
-    display: flex;
-    align-items: center;
     gap: 32px;
 }
 
 /* Primary Navigation Link - Europe S&D */
 .nav-link-primary {
-    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 14px;
     font-weight: 600;
     color: white;
-    text-decoration: none;
     padding: 10px 16px;
-    border-radius: 8px;
     background-color: rgba(255, 255, 255, 0.15);
     border: 1px solid rgba(255, 255, 255, 0.2);
-    transition: all 0.2s ease;
     min-height: 44px;
-    display: flex;
-    align-items: center;
 }
 
 .nav-link-primary:hover {
@@ -216,7 +202,6 @@ button:hover {
 
 /* Secondary Navigation Group */
 .nav-group-secondary {
-    display: flex;
     gap: 16px;
     padding-left: 32px;
     border-left: 1px solid rgba(255, 255, 255, 0.3);
@@ -224,17 +209,12 @@ button:hover {
 
 /* Secondary Navigation Links */
 .nav-link-secondary {
-    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
     font-weight: 500;
     color: rgba(255, 255, 255, 0.9);
-    text-decoration: none;
     padding: 8px 12px;
     border-radius: 6px;
-    transition: all 0.2s ease;
     min-height: 44px;
-    display: flex;
-    align-items: center;
 }
 
 .nav-link-secondary:hover {
@@ -250,14 +230,11 @@ button:hover {
 
 /* Top Bar Controls Section */
 .top-bar-controls {
-    display: flex;
-    align-items: center;
     gap: 16px;
 }
 
 /* Professional Refresh Button */
 .btn-refresh {
-    font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
     font-size: 13px;
     font-weight: 600;
     padding: 10px 16px;
@@ -265,11 +242,7 @@ button:hover {
     color: #2E86C1;
     border: none;
     border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.2s ease;
     min-height: 44px;
-    display: flex;
-    align-items: center;
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
@@ -1166,10 +1139,6 @@ button:hover {
         flex: 1 1 0;
     }
 
-    .greeks-kpi-strip {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
     .greeks-aspect-table-grid {
         flex-direction: column;
     }
@@ -1975,8 +1944,25 @@ button:hover {
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
 }
 
-.volatility-surface-grouping-selector input[type="radio"] {
-    display: none;
+.volatility-surface-grouping-selector input[type="radio"],
+.prices-segmented-selector input[type="radio"] {
+    display: block !important;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.volatility-surface-grouping-selector label:has(input[type="radio"]:focus-visible),
+.prices-segmented-selector label:has(input[type="radio"]:focus-visible) {
+    outline: 2px solid #2e86c1;
+    outline-offset: 2px;
 }
 
 /* Volatility Surface section containers */
@@ -2879,10 +2865,6 @@ button:hover {
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
 }
 
-.prices-segmented-selector input[type="radio"] {
-    display: none;
-}
-
 .prices-section {
     width: calc(100% - 6px);
     margin: 8px 3px 22px;
@@ -3380,15 +3362,7 @@ button:hover {
     box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 }
 
-.options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
-    top: 111px;
-}
-
-.options-dashboard-container.pricer-page-current .pricer-valuation-date-field {
-    display: none;
-}
-
-.pricer-field-label-exchange {
+.options-dashboard-container.pricer-page-current .pricer-valuation-date-field, .pricer-field-label-exchange {
     display: none;
 }
 
@@ -3452,8 +3426,7 @@ button:hover {
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
-.pricer-workflow-section-copy,
-.pricer-workflow-section-actions {
+.pricer-workflow-section-copy, .pricer-workflow-section-actions {
     min-width: 0;
 }
 
@@ -3499,9 +3472,7 @@ button:hover {
         0 3px 10px rgba(15, 23, 42, 0.045);
 }
 
-.options-dashboard-container.pricer-page-current
-    .pricer-workflow-section-body
-    .pricer-detailed-analysis-section {
+.options-dashboard-container.pricer-page-current .pricer-workflow-section-body .pricer-detailed-analysis-section {
     width: 100%;
     margin: 6px 0 0;
 }
@@ -3521,10 +3492,7 @@ button:hover {
     .pricer-date-field,
 .options-dashboard-container.pricer-page-current
     .pricer-workflow-exchange
-    .pricer-rate-field {
-    display: none;
-}
-
+    .pricer-rate-field,
 .options-dashboard-container.pricer-page-current
     .pricer-workflow-exchange
     .pricer-model-field
@@ -3539,9 +3507,7 @@ button:hover {
     display: inline;
 }
 
-.options-dashboard-container.pricer-page-current
-    .pricer-workflow-exchange
-    .pricer-model-field {
+.options-dashboard-container.pricer-page-current .pricer-workflow-exchange .pricer-model-field {
     flex-basis: 184px;
     min-width: 184px;
 }
@@ -3552,8 +3518,7 @@ button:hover {
         flex-direction: column;
     }
 
-    .pricer-workflow-section-actions,
-    .pricer-workflow-section-actions .pricer-workspace-actions {
+    .pricer-workflow-section-actions, .pricer-workflow-section-actions .pricer-workspace-actions {
         width: 100%;
         justify-content: flex-start;
     }
@@ -3595,8 +3560,11 @@ button:hover {
 }
 
 .pricer-structure-list > .pricer-structure-panel {
-    margin-top: 0;
-    margin-bottom: 0;
+    width: 100%;
+    margin: 0;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.88),
+        0 3px 10px rgba(15, 23, 42, 0.045);
 }
 
 .pricer-structure-panel .pricer-section-actions {
@@ -3699,13 +3667,11 @@ button:hover {
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.80);
 }
 
-.pricer-sticky-filter-bar .Select-value,
-.pricer-sticky-filter-bar .Select-placeholder {
+.pricer-sticky-filter-bar .Select-value, .pricer-sticky-filter-bar .Select-placeholder {
     line-height: 27px !important;
 }
 
-.pricer-sticky-filter-bar .Select-value-label,
-.pricer-sticky-filter-bar .Select-placeholder {
+.pricer-sticky-filter-bar .Select-value-label, .pricer-sticky-filter-bar .Select-placeholder {
     color: #0f172a !important;
     font-size: 11.5px !important;
     font-weight: 700;
@@ -3753,8 +3719,7 @@ button:hover {
         0 8px 18px rgba(15, 23, 42, 0.04);
 }
 
-.pricer-section-title-row,
-.pricer-section-actions {
+.pricer-section-title-row, .pricer-section-actions {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
@@ -3772,8 +3737,7 @@ button:hover {
     margin-left: auto;
 }
 
-.pricer-section-header .section-title-inline,
-.pricer-section-title {
+.pricer-section-header .section-title-inline, .pricer-section-title {
     display: inline-flex;
     align-items: center;
     gap: 10px;
@@ -3789,8 +3753,7 @@ button:hover {
     white-space: nowrap;
 }
 
-.pricer-section-header .section-title-inline::before,
-.pricer-section-title::before {
+.pricer-section-header .section-title-inline::before, .pricer-section-title::before {
     content: "";
     flex: 0 0 auto;
     width: 4px;
@@ -3805,15 +3768,13 @@ button:hover {
     width: 100%;
 }
 
-.pricer-config-body,
-.pricer-payoff-body {
+.pricer-config-body, .pricer-payoff-body {
     display: flex;
     flex-direction: column;
     gap: 12px;
 }
 
-.pricer-config-toolbar,
-.pricer-payoff-controls {
+.pricer-config-toolbar, .pricer-payoff-controls {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
@@ -3834,8 +3795,7 @@ button:hover {
     min-width: 0;
 }
 
-.pricer-control-label,
-.pricer-field-label {
+.pricer-control-label, .pricer-field-label {
     margin: 0;
     color: #475569;
     font-size: 10px;
@@ -3843,54 +3803,6 @@ button:hover {
     line-height: 1.1;
     letter-spacing: 0.07em;
     text-transform: uppercase;
-}
-
-.pricer-segmented-selector {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    min-height: 27px;
-    padding: 1px;
-    border: 1px solid rgba(203, 213, 225, 0.82);
-    border-radius: 999px;
-    background: #f6f9fc;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.84);
-}
-
-.pricer-segmented-selector label {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 25px;
-    margin: 0 !important;
-    padding: 5px 11px;
-    border-radius: 999px;
-    color: #475569;
-    font-size: 11.5px;
-    font-weight: 800;
-    line-height: 1;
-    cursor: pointer;
-    transition:
-        background-color 0.16s ease,
-        color 0.16s ease,
-        box-shadow 0.16s ease;
-}
-
-.pricer-segmented-selector label:hover {
-    background: rgba(226, 232, 240, 0.72);
-    color: #0f172a;
-}
-
-.pricer-segmented-selector label:has(input:checked),
-.pricer-segmented-selector label[aria-selected="true"],
-.pricer-segmented-selector label.selected {
-    background: #2E86C1;
-    color: #ffffff;
-    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.12);
-}
-
-.pricer-segmented-selector input[type="radio"] {
-    display: none;
 }
 
 .pricer-calculate-button {
@@ -3946,8 +3858,7 @@ button:hover {
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.80);
 }
 
-.pricer-page input[type="number"],
-.pricer-number-input {
+.pricer-page input[type="number"], .pricer-number-input {
     appearance: textfield;
     -moz-appearance: textfield;
 }
@@ -4021,9 +3932,7 @@ button:hover {
     min-width: 0;
 }
 
-.pricer-output-panel,
-.pricer-chart-card,
-.pricer-result-card {
+.pricer-output-panel, .pricer-chart-card, .pricer-result-card {
     min-width: 0;
     border: 1px solid #d8e2ee;
     border-radius: 8px;
@@ -4058,8 +3967,7 @@ button:hover {
     cursor: help;
 }
 
-.pricer-result-card-has-hover-detail:hover,
-.pricer-result-card-has-hover-detail:focus-within {
+.pricer-result-card-has-hover-detail:hover, .pricer-result-card-has-hover-detail:focus-within {
     z-index: 20;
 }
 
@@ -4306,9 +4214,7 @@ button:hover {
     width: 100%;
 }
 
-.pricer-chart-card .js-plotly-plot,
-.pricer-chart-card .plot-container,
-.pricer-chart-card .svg-container {
+.pricer-chart-card .js-plotly-plot, .pricer-chart-card .plot-container, .pricer-chart-card .svg-container {
     width: 100% !important;
 }
 
@@ -4429,9 +4335,7 @@ button:hover {
     min-height: 270px;
 }
 
-.pricer-surface-card .js-plotly-plot,
-.pricer-surface-card .plot-container,
-.pricer-surface-card .svg-container {
+.pricer-surface-card .js-plotly-plot, .pricer-surface-card .plot-container, .pricer-surface-card .svg-container {
     width: 100% !important;
 }
 
@@ -4483,8 +4387,7 @@ button:hover {
     color: #475569;
 }
 
-.pricer-surface-card-error,
-.pricer-surface-card-unsupported {
+.pricer-surface-card-error, .pricer-surface-card-unsupported {
     min-height: 102px;
 }
 
@@ -4823,23 +4726,17 @@ button:hover {
     margin-top: 2px;
 }
 
-.pricer-leg-heading,
-.pricer-leg-actions {
+.pricer-leg-heading, .pricer-leg-actions, .pricer-leg-edit-actions, .pricer-leg-toolbar-status {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
+}
+
+.pricer-leg-heading, .pricer-leg-actions, .pricer-leg-edit-actions {
     gap: 8px;
 }
 
-.pricer-leg-edit-actions {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-
-.pricer-secondary-button,
-.pricer-remove-button {
+.pricer-secondary-button, .pricer-remove-button {
     min-height: 31px;
     padding: 6px 11px;
     border-radius: 6px;
@@ -4890,10 +4787,7 @@ button:hover {
 }
 
 .pricer-calculation-status:empty,
-.pricer-action-status:empty {
-    display: none;
-}
-
+.pricer-action-status:empty,
 .pricer-leg-toolbar:has(.pricer-empty-state-success) .pricer-action-status {
     display: none;
 }
@@ -4967,9 +4861,7 @@ button:hover {
     display: contents;
 }
 
-.pricer-summary-grid:empty,
-.pricer-model-inputs-used-container:empty,
-.pricer-time-info:empty {
+.pricer-summary-grid:empty, .pricer-model-inputs-used-container:empty, .pricer-time-info:empty {
     display: none;
 }
 
@@ -4987,11 +4879,7 @@ button:hover {
     max-width: 100%;
 }
 
-.pricer-output-overview .pricer-result-card-value {
-    white-space: nowrap;
-}
-
-.pricer-output-overview .pricer-result-card-label {
+.pricer-output-overview .pricer-result-card-value, .pricer-output-overview .pricer-result-card-label {
     white-space: nowrap;
 }
 
@@ -4999,8 +4887,7 @@ button:hover {
     display: none;
 }
 
-.pricer-model-inputs-used-container,
-.pricer-time-info {
+.pricer-model-inputs-used-container, .pricer-time-info {
     display: contents;
 }
 
@@ -5145,20 +5032,17 @@ button:hover {
     font-weight: 820 !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
-    .ag-header-group-cell.pricer-result-column-group {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-header-group-cell.pricer-result-column-group {
     background: #dde8f3 !important;
     border-top: 2px solid #8da9c3 !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
-    .ag-header-group-cell.pricer-result-column-group-position {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-header-group-cell.pricer-result-column-group-position {
     background: #dcefe5 !important;
     border-top-color: #659979 !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
-    .ag-header-group-cell-label {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-header-group-cell-label {
     justify-content: center;
     color: #172033;
     font-size: 10.5px;
@@ -5179,15 +5063,13 @@ button:hover {
     line-height: 1.2;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid
-    .ag-cell.pricer-metric-tooltip-cell {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-cell.pricer-metric-tooltip-cell {
     cursor: help;
     text-decoration: underline dotted rgba(51, 65, 85, 0.62);
     text-underline-offset: 2px;
 }
 
-.pricer-config-section,
-.pricer-output-section {
+.pricer-config-section, .pricer-output-section {
     margin-bottom: 14px;
     padding-right: 12px;
     padding-bottom: 12px;
@@ -5248,8 +5130,7 @@ button:hover {
     background: transparent;
 }
 
-.pricer-structure-header-controls,
-.pricer-structure-header-actions {
+.pricer-structure-header-controls, .pricer-structure-header-actions {
     display: flex;
     align-items: flex-end;
     min-width: 0;
@@ -5271,11 +5152,7 @@ button:hover {
     gap: 4px;
 }
 
-.pricer-header-context {
-    display: contents;
-}
-
-.pricer-structure-header-controls .pricer-context-grid {
+.pricer-header-context, .pricer-structure-header-controls .pricer-context-grid {
     display: contents;
 }
 
@@ -5296,14 +5173,26 @@ button:hover {
     display: none;
 }
 
-.pricer-structure-header-controls .pricer-asset-field {
+.pricer-structure-header-controls .pricer-asset-field, .pricer-structure-header-controls .pricer-price-unit-field {
     flex: 0 0 64px;
     min-width: 64px;
 }
 
-.pricer-structure-header-controls .pricer-price-unit-field {
-    flex: 0 0 64px;
-    min-width: 64px;
+.options-dashboard-container.pricer-page-current
+    .pricer-structure-header-controls
+    .pricer-mapping-id-field {
+    flex: 0 0 126px;
+    min-width: 126px;
+}
+
+.options-dashboard-container.pricer-page-current
+    .pricer-mapping-id-dropdown
+    .dash-dropdown-value-item,
+.options-dashboard-container.pricer-page-current
+    .pricer-mapping-id-dropdown
+    .Select-value-label {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
 }
 
 .pricer-price-unit-value {
@@ -5373,8 +5262,7 @@ button:hover {
     height: 29px !important;
 }
 
-.pricer-structure-header-controls .Select-value,
-.pricer-structure-header-controls .Select-placeholder {
+.pricer-structure-header-controls .Select-value, .pricer-structure-header-controls .Select-placeholder {
     line-height: 27px !important;
 }
 
@@ -5382,8 +5270,7 @@ button:hover {
     height: 27px !important;
 }
 
-.pricer-structure-header-controls .Select-value-label,
-.pricer-structure-header-controls .Select-placeholder {
+.pricer-structure-header-controls .Select-value-label, .pricer-structure-header-controls .Select-placeholder {
     font-size: 11px !important;
     font-weight: 700;
 }
@@ -5414,17 +5301,13 @@ button:hover {
     white-space: nowrap;
 }
 
-.pricer-structure-header-actions
-    .pricer-structure-status
-    .pricer-empty-state::before {
+.pricer-structure-header-actions .pricer-structure-status .pricer-empty-state::before {
     font-size: 12px;
     font-weight: 850;
     line-height: 1;
 }
 
-.pricer-structure-header-actions
-    .pricer-structure-status
-    .pricer-empty-state-success::before {
+.pricer-structure-header-actions .pricer-structure-status .pricer-empty-state-success::before {
     content: "✓";
 }
 
@@ -5437,15 +5320,11 @@ button:hover {
     content: "!";
 }
 
-.pricer-structure-header-actions
-    .pricer-structure-status
-    .pricer-empty-state-neutral::before {
+.pricer-structure-header-actions .pricer-structure-status .pricer-empty-state-neutral::before {
     content: "•";
 }
 
-.pricer-structure-header-actions
-    .pricer-structure-status
-    .pricer-empty-state-danger {
+.pricer-structure-header-actions .pricer-structure-status .pricer-empty-state-danger {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -5479,9 +5358,7 @@ button:hover {
     background: linear-gradient(180deg, #ffffff 0%, #f8fbfe 100%);
 }
 
-.pricer-market-strip .pricer-field,
-.pricer-market-strip .pricer-date-field,
-.pricer-market-strip .pricer-number-field {
+.pricer-market-strip .pricer-field, .pricer-market-strip .pricer-date-field, .pricer-market-strip .pricer-number-field {
     flex: 0 0 112px;
     width: 112px;
     max-width: 112px;
@@ -5506,8 +5383,7 @@ button:hover {
     display: none;
 }
 
-.pricer-market-strip .pricer-number-input,
-.pricer-market-strip .dash-datepicker {
+.pricer-market-strip .pricer-number-input, .pricer-market-strip .dash-datepicker {
     min-height: 30px;
     height: 30px;
 }
@@ -5539,10 +5415,7 @@ button:hover {
     max-width: 92px;
 }
 
-.options-dashboard-container.pricer-page-current
-    .pricer-structure-header-controls
-    .pricer-market-strip
-    .pricer-forward-field {
+.pricer-page .pricer-structure-header-controls .pricer-market-strip .pricer-forward-field {
     flex: 0 0 80px;
     width: 80px;
     max-width: 80px;
@@ -5553,15 +5426,13 @@ button:hover {
     min-height: 34px;
 }
 
-/* Compact controls are exclusive to the current /pricer workflow. */
-.options-dashboard-container.pricer-page-current
-    .pricer-filter-dropdown {
+/* Canonical compact controls shared by /pricer and /pricer_old. */
+.pricer-page .pricer-filter-dropdown {
     height: 30px;
     min-height: 30px;
 }
 
-.options-dashboard-container.pricer-page-current
-    .pricer-number-input {
+.pricer-page .pricer-number-input {
     height: 30px;
     min-height: 30px;
     padding-right: 8px;
@@ -5569,9 +5440,7 @@ button:hover {
     line-height: 28px;
 }
 
-.options-dashboard-container.pricer-page-current
-    .pricer-number-input
-    > .dash-input-element {
+.pricer-page .pricer-number-input > .dash-input-element {
     height: 28px;
     min-height: 28px;
     padding-top: 3px;
@@ -5579,35 +5448,103 @@ button:hover {
     line-height: 22px;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .pricer-date-field
     .dash-datepicker,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .pricer-date-field
     .SingleDatePicker,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .pricer-date-field
     .SingleDatePickerInput,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .pricer-date-field
     .DateInput {
     height: 30px;
     min-height: 30px;
 }
 
-.options-dashboard-container.pricer-page-current
-    .pricer-date-field
-    .dash-datepicker-input,
-.options-dashboard-container.pricer-page-current
-    .pricer-date-field
-    .DateInput_input {
+.pricer-page .pricer-date-field .dash-datepicker-input, .pricer-page .pricer-date-field .DateInput_input {
     height: 28px;
     min-height: 28px;
     line-height: 28px;
 }
 
-.pricer-structure-header-controls .pricer-inline-method-note {
+.pricer-structure-header-controls .pricer-inline-method-note,
+.pricer-surface-proxy-note {
     display: none;
+}
+
+/* Kirk needs two readable control rows; forcing thirteen fields into the
+   single-asset ticket row causes the long expiry labels to overlap. */
+.pricer-structure-panel.pricer-config-section > .pricer-section-header:has(.pricer-kirk-asset-field) {
+    grid-template-columns: max-content minmax(0, 1fr);
+    row-gap: 6px;
+}
+
+.pricer-structure-panel > .pricer-section-header .pricer-structure-header-controls:has(.pricer-kirk-asset-field) {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    align-items: end;
+    width: 100%;
+    gap: 6px;
+    overflow: visible;
+    white-space: normal;
+}
+
+.pricer-structure-panel > .pricer-section-header:has(.pricer-kirk-asset-field) .pricer-structure-header-actions {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: start;
+    justify-content: flex-end;
+}
+
+.pricer-structure-header-controls:has(.pricer-kirk-asset-field)
+    .pricer-field,
+.pricer-structure-header-controls:has(.pricer-kirk-asset-field)
+    .pricer-date-field,
+.pricer-structure-header-controls:has(.pricer-kirk-asset-field)
+    .pricer-number-field {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+}
+
+.pricer-structure-header-controls:has(.pricer-kirk-asset-field) .pricer-field-label {
+    height: auto;
+    min-height: 20px;
+    align-items: flex-end;
+    line-height: 1.1;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.pricer-structure-header-controls:has(.pricer-kirk-asset-field) .pricer-price-unit-value {
+    height: 30px;
+    min-height: 30px;
+}
+
+.pricer-structure-header-controls:has(.pricer-kirk-asset-field) .pricer-rate-field:empty {
+    display: none !important;
+}
+
+.options-dashboard-container.pricer-page-current .pricer-workflow-exchange .pricer-surface-proxy-note:not(:empty) {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    margin-top: 14px;
+    min-height: 30px;
+    padding: 0 7px;
+    border: 1px solid #c7d8e8;
+    border-radius: 6px;
+    background: #eef5fb;
+    color: #40586d;
+    font-size: 10px;
+    font-weight: 650;
+    line-height: 1.2;
+    white-space: nowrap;
 }
 
 .pricer-leg-toolbar {
@@ -5616,12 +5553,7 @@ button:hover {
     margin-top: 0;
 }
 
-.pricer-leg-heading,
-.pricer-leg-edit-actions,
-.pricer-leg-toolbar-status {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
+.pricer-leg-heading, .pricer-leg-edit-actions, .pricer-leg-toolbar-status {
     gap: 5px;
     min-width: 0;
 }
@@ -5631,8 +5563,7 @@ button:hover {
     margin-left: auto;
 }
 
-.pricer-leg-edit-actions .pricer-secondary-button,
-.pricer-leg-edit-actions .pricer-remove-button {
+.pricer-leg-edit-actions .pricer-secondary-button, .pricer-leg-edit-actions .pricer-remove-button {
     min-height: 27px;
     padding: 4px 8px;
     font-size: 10.5px;
@@ -5695,44 +5626,37 @@ button:hover {
     margin-top: 3px;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell.pricer-result-column-group {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell.pricer-result-column-group {
     background: #dde8f3 !important;
     border-top: 2px solid #8da9c3 !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell.pricer-result-column-group-position {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell.pricer-result-column-group-position {
     background: #dcefe5 !important;
     border-top-color: #659979 !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell.pricer-result-column-group-inputs {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell.pricer-result-column-group-inputs {
     background: #e9eef5 !important;
     border-top-color: #64748b !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell.pricer-result-column-group-published {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell.pricer-result-column-group-published {
     background: #eee9f6 !important;
     border-top-color: #8b78ad !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell.pricer-result-column-group-premium {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell.pricer-result-column-group-premium {
     background: #f6e8cf !important;
     border-top-color: #b7883e !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell.pricer-result-column-group-adjustment {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell.pricer-result-column-group-adjustment {
     background: #eee9f6 !important;
     border-top-color: #8b78ad !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid
-    .ag-header-group-cell-label {
+.ag-theme-alpine.mckinsey-ag-grid.pricer-unified-grid .ag-header-group-cell-label {
     justify-content: center;
     color: #172033;
     font-size: 10px;
@@ -5741,9 +5665,8 @@ button:hover {
     text-transform: uppercase;
 }
 
-/* Current Pricer: compact institutional option-leg ticket. */
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid {
+/* Canonical compact option-leg ticket shared by /pricer and /pricer_old. */
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid {
     --ag-row-height: 28px;
     --ag-header-height: 30px;
     --ag-cell-horizontal-padding: 4px;
@@ -5763,9 +5686,7 @@ button:hover {
         0 5px 14px rgba(15, 23, 42, 0.035);
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-root-wrapper {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-root-wrapper {
     max-width: 100%;
     overflow: hidden;
     border: 0;
@@ -5773,106 +5694,94 @@ button:hover {
     background: #ffffff;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell {
     background: #f7f9fc !important;
     border-color: #dbe4ed !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-header-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-header-cell {
     border-right: 0 !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-header-group-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-header-group-cell {
     border-right: 1px solid #d5e0ea !important;
     border-bottom: 1px solid #d5e0ea !important;
     background: #eef2f6 !important;
     box-shadow: inset 0 2px 0 #60758a;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-group-cell.pricer-result-column-group-volatility {
     background: #e8f1fb !important;
     box-shadow: inset 0 2px 0 #3b6f9c;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-group-cell.pricer-result-column-group-adjustment {
     background: #f0ecf8 !important;
     box-shadow: inset 0 2px 0 #7b68a6;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-header-group-cell.pricer-result-column-group-premium {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-header-group-cell.pricer-result-column-group-premium {
     background: #fbf1db !important;
     box-shadow: inset 0 2px 0 #b07a2d;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-header-group-cell.pricer-result-column-group-unit {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-header-group-cell.pricer-result-column-group-unit {
     background: #edf3f9 !important;
     box-shadow: inset 0 2px 0 #6a8299;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-group-cell.pricer-result-column-group-position {
     background: #e8f3ed !important;
     box-shadow: inset 0 2px 0 #4f8064;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-header-group-cell-label {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-header-group-cell-label {
     padding-right: 4px;
     padding-left: 4px;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell.pricer-table-text-header
     .ag-header-cell-label {
     justify-content: flex-start;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell.pricer-table-number-header
     .ag-header-cell-label {
     justify-content: flex-end;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell.pricer-table-category-header
     .ag-header-cell-label {
     justify-content: center;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell[col-id="unit_value"],
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell[col-id="trade_value"] {
     background: #fff9ed !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell {
     padding-right: 4px;
     padding-left: 4px;
     border-right: 0 !important;
@@ -5880,23 +5789,16 @@ button:hover {
     background-image: none;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-table-number-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-table-number-cell {
     padding-right: 5px !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-table-category-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-table-category-cell {
     justify-content: center;
     text-align: center;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell[col-id="name"]
-    .pricer-leg-selector {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell[col-id="name"] .pricer-leg-selector {
     display: flex;
     align-items: center;
     gap: 5px;
@@ -5905,9 +5807,7 @@ button:hover {
     height: 100%;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .pricer-leg-selector-checkbox {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .pricer-leg-selector-checkbox {
     flex: 0 0 16px;
     width: 16px;
     height: 16px;
@@ -5916,144 +5816,112 @@ button:hover {
     cursor: pointer;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .pricer-leg-selector-label {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .pricer-leg-selector-label {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-header-cell.pricer-column-group-start,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-cell.pricer-column-group-start {
     border-left: 1px solid #cfdbe7 !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-row-odd
-    .ag-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-row-odd .ag-cell {
     background-color: #fafbfd;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-cell.pricer-positive-cell,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-cell.pricer-negative-cell,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-cell.pricer-missing-cell {
     background-color: transparent !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-positive-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-positive-cell {
     color: #047857 !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-negative-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-negative-cell {
     color: #b42318 !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-missing-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-missing-cell {
     color: #94a3b8 !important;
     font-weight: 500 !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-editable-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-editable-cell {
     background-color: #f4f9ff !important;
     background-image: none !important;
     box-shadow: inset 0 -1px 0 #7daed4;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-cell[col-id="unit_value"],
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-cell[col-id="trade_value"] {
     background-color: #fff9ed !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell.pricer-invalid-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell.pricer-invalid-cell {
     outline: 1px solid #dc2626;
     outline-offset: -1px;
     background-color: #fef2f2 !important;
     color: #991b1b !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-row-hover
-    .ag-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-row-hover .ag-cell {
     background-color: #edf5fc !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-row-selected {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-row-selected {
     box-shadow: inset 3px 0 0 #2563eb;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-row-selected
-    .ag-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-row-selected .ag-cell {
     background-color: #e4f0fb !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-cell-focus {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-cell-focus {
     outline: 2px solid #2563eb !important;
     outline-offset: -2px !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-row-pinned
-    .ag-cell {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-row-pinned .ag-cell {
     border-top: 1px solid #94a3b8 !important;
     background: #e9eff5 !important;
     box-shadow: inset 0 1px 0 #ffffff;
 }
 
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-pinned-left-header,
-.options-dashboard-container.pricer-page-current
+.pricer-page
     .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
     .ag-pinned-left-cols-container
     .ag-cell {
     border-right: 1px solid #aebdcb !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-body-horizontal-scroll {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-body-horizontal-scroll {
     min-height: 10px !important;
     height: 10px !important;
 }
 
-.options-dashboard-container.pricer-page-current
-    .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid
-    .ag-tooltip {
+.pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-tooltip {
     padding: 6px 8px;
     border: 1px solid #334155;
     border-radius: 5px;
@@ -6065,8 +5933,7 @@ button:hover {
     line-height: 1.2;
 }
 
-.pricer-config-section .pricer-section-header,
-.pricer-output-section .pricer-section-header {
+.pricer-config-section .pricer-section-header, .pricer-output-section .pricer-section-header {
     margin-right: -12px;
     margin-bottom: 10px;
     margin-left: -12px;
@@ -6086,12 +5953,7 @@ button:hover {
 }
 
 @media (max-width: 1000px) {
-    .pricer-output-body,
-    .pricer-chart-grid {
-        grid-template-columns: minmax(0, 1fr);
-    }
-
-    .pricer-market-sizing-layout {
+    .pricer-output-body, .pricer-chart-grid, .pricer-market-sizing-layout {
         grid-template-columns: minmax(0, 1fr);
     }
 
@@ -6134,8 +5996,7 @@ button:hover {
         justify-content: flex-start;
     }
 
-    .pricer-workspace-actions .pricer-calculate-button,
-    .pricer-workspace-actions .pricer-secondary-button {
+    .pricer-workspace-actions .pricer-calculate-button, .pricer-workspace-actions .pricer-secondary-button {
         width: auto;
         flex: 0 1 auto;
     }
@@ -6151,11 +6012,7 @@ button:hover {
         grid-column: 1 / -1;
     }
 
-    .pricer-structure-panel .pricer-structure-header-actions > button {
-        width: 100%;
-    }
-
-    .pricer-analysis-selector-field {
+    .pricer-structure-panel .pricer-structure-header-actions > button, .pricer-analysis-selector-field {
         width: 100%;
     }
 
@@ -6164,37 +6021,25 @@ button:hover {
         margin-right: -10px;
     }
 
-    .pricer-config-toolbar,
-    .pricer-payoff-controls {
+    .pricer-config-toolbar, .pricer-payoff-controls {
         align-items: stretch;
     }
 
-    .pricer-config-control,
-    .pricer-payoff-date-field,
-    .pricer-payoff-slider-field,
-    .pricer-calculate-button {
+    .pricer-config-control, .pricer-payoff-date-field, .pricer-payoff-slider-field, .pricer-calculate-button {
         flex: 1 1 100%;
         max-width: none;
         margin-left: 0;
     }
 
-    .pricer-segmented-selector,
     .pricer-date-control {
         width: 100%;
     }
 
-    .pricer-segmented-selector label {
-        flex: 1 1 0;
-    }
-
-    .pricer-context-grid,
-    .pricer-sizing-grid {
+    .pricer-context-grid, .pricer-sizing-grid {
         grid-template-columns: minmax(0, 1fr);
     }
 
-    .pricer-leg-actions,
-    .pricer-leg-actions button,
-    .pricer-calculate-button {
+    .pricer-leg-actions, .pricer-leg-actions button, .pricer-calculate-button {
         width: 100%;
     }
 
@@ -6258,6 +6103,52 @@ button:hover {
         grid-column: 2;
         grid-row: 1;
     }
+
+    /* Preserve the compact structure-header ticket when the viewport can hold
+       every Kirk control at a readable, purpose-specific width. */
+    .pricer-structure-panel.pricer-config-section
+        > .pricer-section-header:has(.pricer-kirk-asset-field) {
+        grid-template-columns: max-content minmax(0, 1fr) max-content;
+        row-gap: 2px;
+    }
+
+    .pricer-structure-panel
+        > .pricer-section-header
+        .pricer-structure-header-controls:has(.pricer-kirk-asset-field) {
+        grid-column: 2;
+        grid-row: 1;
+        grid-template-columns:
+            82px
+            76px 64px
+            76px 64px
+            110px
+            92px
+            96px 96px
+            160px 160px 168px
+            64px;
+        gap: 2px;
+        width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        white-space: nowrap;
+    }
+
+    .pricer-structure-panel
+        > .pricer-section-header:has(.pricer-kirk-asset-field)
+        .pricer-structure-header-actions {
+        grid-column: 3;
+        grid-row: 1;
+        align-self: stretch;
+    }
+
+    .pricer-structure-header-controls:has(.pricer-kirk-asset-field)
+        .pricer-field-label {
+        height: 11px;
+        min-height: 11px;
+        line-height: 1;
+        white-space: nowrap;
+        overflow-wrap: normal;
+    }
 }
 
 @media (max-width: 640px) {
@@ -6284,6 +6175,7 @@ button:hover {
     }
 
     .pricer-structure-header-controls .pricer-asset-field,
+    .pricer-structure-header-controls .pricer-mapping-id-field,
     .pricer-structure-header-controls .pricer-model-field,
     .pricer-structure-header-controls .pricer-premium-convention-field,
     .pricer-structure-header-controls .pricer-shape-field,
@@ -6306,9 +6198,7 @@ button:hover {
         max-width: none;
     }
 
-    .pricer-market-strip .pricer-field,
-    .pricer-market-strip .pricer-date-field,
-    .pricer-market-strip .pricer-number-field {
+    .pricer-market-strip .pricer-field, .pricer-market-strip .pricer-date-field, .pricer-market-strip .pricer-number-field {
         width: 100%;
         max-width: none;
     }
@@ -6332,8 +6222,7 @@ button:hover {
         max-width: 92px;
     }
 
-    .pricer-leg-toolbar,
-    .pricer-leg-toolbar-status {
+    .pricer-leg-toolbar, .pricer-leg-toolbar-status {
         align-items: flex-start;
     }
 
@@ -6341,6 +6230,27 @@ button:hover {
         justify-content: flex-start;
         width: 100%;
         margin-left: 0;
+    }
+
+    .pricer-structure-panel.pricer-config-section > .pricer-section-header:has(.pricer-kirk-asset-field) {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .pricer-structure-panel > .pricer-section-header .pricer-structure-header-controls:has(.pricer-kirk-asset-field) {
+        grid-column: 1 !important;
+        grid-row: 3 !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pricer-structure-panel > .pricer-section-header:has(.pricer-kirk-asset-field) .pricer-structure-header-actions {
+        grid-column: 1 !important;
+        grid-row: 2 !important;
+    }
+}
+
+@media (max-width: 360px) {
+    .pricer-structure-panel > .pricer-section-header .pricer-structure-header-controls:has(.pricer-kirk-asset-field) {
+        grid-template-columns: minmax(0, 1fr);
     }
 }
 
@@ -8012,8 +7922,7 @@ button:hover {
     line-height: 22px;
 }
 
-.pricer-global-valuation-control .DateInput_input,
-.pricer-global-valuation-control .dash-datepicker-input {
+.pricer-global-valuation-control .DateInput_input, .pricer-global-valuation-control .dash-datepicker-input {
     box-sizing: border-box !important;
     width: 100% !important;
     min-width: 0;
@@ -8134,10 +8043,6 @@ button:hover {
         top: 55px;
     }
 
-    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
-        top: 111px;
-    }
-
     .dashboard-source-status-banner {
         top: 91px;
     }
@@ -8148,15 +8053,6 @@ button:hover {
         top: 111px;
     }
 
-    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
-        top: 167px;
-    }
-}
-
-@media (max-width: 900px) {
-    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
-        top: 178px;
-    }
 }
 
 @media (max-width: 768px) {
@@ -8165,10 +8061,6 @@ button:hover {
         gap: 6px;
         min-height: 48px;
         padding: 6px 10px;
-    }
-
-    .options-dashboard-container.pricer-page-current .pricer-workspace-toolbar {
-        top: 258px;
     }
 
     .dashboard-source-status-banner {
@@ -8446,7 +8338,7 @@ button:hover {
 .brent-vol-history-toolbar {
     display: grid;
     grid-template-columns:
-        132px
+        312px
         168px
         minmax(320px, 1fr)
         210px
@@ -8546,7 +8438,7 @@ button:hover {
     display: flex;
     min-width: 0;
     min-height: 34px;
-    flex: 1 1 50%;
+    flex: 1 1 0;
     align-items: center;
     justify-content: center;
     gap: 4px;
@@ -8555,6 +8447,7 @@ button:hover {
     color: #475569;
     font-size: 10px;
     font-weight: 700;
+    white-space: nowrap;
     cursor: pointer;
 }
 
@@ -8881,6 +8774,10 @@ button:hover {
     white-space: nowrap;
 }
 
+.brent-vol-history-product-options > label.dash-radioitems-inline {
+    margin-right: 0;
+}
+
 .brent-vol-history-market-data-status .dashboard-source-status-chip {
     padding: 2px 4px;
     font-variant-numeric: tabular-nums;
@@ -8923,22 +8820,116 @@ button:hover {
 
 .brent-vol-history-common-legend {
     display: flex;
+    flex: 1 1 auto;
     min-width: 0;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     align-items: center;
     justify-content: flex-end;
-    gap: 4px 12px;
+    gap: 6px;
+    overflow: hidden;
 }
 
-.brent-vol-history-legend-item {
+.brent-vol-history-layer-options {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px;
+    scrollbar-width: thin;
+}
+
+.brent-vol-history-layer-options > label {
+    position: relative;
+    flex: 0 0 auto;
+    margin: 0 !important;
+    cursor: pointer;
+}
+
+.brent-vol-history-layer-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    opacity: 0;
+    clip-path: inset(50%);
+}
+
+.brent-vol-history-layer-label {
     display: inline-flex;
+    min-height: 28px;
     align-items: center;
     gap: 5px;
+    padding: 0 7px;
+    border: 1px solid #cbd5e1;
+    border-radius: 5px;
+    background: #ffffff;
     color: #475569;
-    font-size: 10px;
-    font-weight: 600;
+    font-size: 10.5px;
+    font-weight: 650;
     line-height: 1.2;
     white-space: nowrap;
+    box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04);
+    transition: border-color 120ms ease, background-color 120ms ease,
+        color 120ms ease, box-shadow 120ms ease;
+}
+
+.brent-vol-history-layer-group-start {
+    margin-left: 4px;
+}
+
+.brent-vol-history-layer-options > label:hover .brent-vol-history-layer-label {
+    border-color: #94a3b8;
+    background: #f8fafc;
+}
+
+.brent-vol-history-layer-options > label:has(input:not(:checked))
+    .brent-vol-history-layer-label {
+    border-color: #d8dee8;
+    background: #e9eef5;
+    color: #7b8798;
+    box-shadow: none;
+}
+
+.brent-vol-history-layer-options > label:has(input:not(:checked))
+    .brent-vol-history-legend-swatch {
+    opacity: 0.32;
+    filter: grayscale(0.5);
+}
+
+.brent-vol-history-layer-options > label:has(input:focus-visible)
+    .brent-vol-history-layer-label {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+.brent-vol-history-layer-reset {
+    min-width: 46px;
+    min-height: 28px;
+    flex: 0 0 auto;
+    padding: 0 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 5px;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 10.5px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.brent-vol-history-layer-reset:hover {
+    border-color: #94a3b8;
+    background: #ffffff;
+    color: #1e3a5f;
+}
+
+.brent-vol-history-layer-reset:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
 }
 
 .brent-vol-history-legend-swatch {
@@ -8952,8 +8943,10 @@ button:hover {
 
 .brent-vol-history-legend-calls::after,
 .brent-vol-history-legend-puts::after,
-.brent-vol-history-legend-settlement-reference::after,
-.brent-vol-history-legend-published::after {
+.brent-vol-history-legend-prior-settlement::after,
+.brent-vol-history-legend-published::after,
+.brent-vol-history-legend-calibrated::after,
+.brent-vol-history-legend-pricing-reference::after {
     position: absolute;
     top: 4px;
     right: 0;
@@ -8968,41 +8961,80 @@ button:hover {
     background: #0f766e;
 }
 
-.brent-vol-history-legend-settlement-reference::after {
-    top: 3px;
-    height: 4px;
-    border: 1px solid #475569;
-    background: #ffffff;
+.brent-vol-history-legend-prior-settlement::after {
+    height: 0;
+    border-top: 2px dashed #94a3b8;
+    background: transparent;
 }
 
 .brent-vol-history-legend-published::after {
     background: #ea580c;
 }
 
-.brent-vol-history-legend-executable-band {
-    border: 1px solid rgba(37, 99, 235, 0.5);
-    border-radius: 2px;
-    background: rgba(37, 99, 235, 0.14);
+.brent-vol-history-legend-calibrated::after {
+    height: 0;
+    border-top: 2px dashed #7c3aed;
+    background: transparent;
 }
 
-.brent-vol-history-legend-indicative-last::after {
+.brent-vol-history-legend-pricing-reference::after {
+    height: 0;
+    border-top: 2px dotted #111827;
+    background: transparent;
+}
+
+.brent-vol-history-legend-executable-band {
+    border: 1px solid rgba(51, 103, 148, 0.48);
+    border-radius: 2px;
+    background: linear-gradient(
+        90deg,
+        rgba(37, 99, 235, 0.16) 0 50%,
+        rgba(15, 118, 110, 0.16) 50% 100%
+    );
+}
+
+.brent-vol-history-legend-bloomberg-settlement::before {
     position: absolute;
     top: 4px;
-    right: 0;
-    left: 0;
-    height: 0;
-    border-top: 2px dotted #a16207;
+    right: 1px;
+    left: 1px;
+    height: 1px;
+    background: #475569;
     content: "";
 }
 
-.brent-vol-history-legend-trade {
-    width: 9px;
-    height: 9px;
-    margin: 0 3px;
-    flex-basis: 9px;
-    transform: rotate(45deg);
-    border: 1px solid #c2410c;
-    background: #f97316;
+.brent-vol-history-legend-bloomberg-settlement::after {
+    position: absolute;
+    top: 1px;
+    left: 5px;
+    width: 7px;
+    height: 7px;
+    border: 1px solid #475569;
+    border-radius: 50%;
+    background: #ffffff;
+    content: "";
+}
+
+.brent-vol-history-legend-trade::before,
+.brent-vol-history-legend-trade::after {
+    position: absolute;
+    top: 2px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    content: "";
+}
+
+.brent-vol-history-legend-trade::before {
+    left: 0;
+    border: 1px solid #2563eb;
+    background: #2563eb;
+}
+
+.brent-vol-history-legend-trade::after {
+    right: 0;
+    border: 1px solid #0f766e;
+    background: #ffffff;
 }
 
 .brent-vol-history-legend-eligible {
@@ -9025,21 +9057,37 @@ button:hover {
     content: "×";
 }
 
-.brent-vol-history-legend-volume,
-.brent-vol-history-legend-open-interest,
-.brent-vol-history-legend-new-volume {
-    border: 1px solid #2563eb;
+.brent-vol-history-legend-volume-calls,
+.brent-vol-history-legend-volume-calls-new,
+.brent-vol-history-legend-volume-puts,
+.brent-vol-history-legend-volume-puts-new,
+.brent-vol-history-legend-open-interest-calls,
+.brent-vol-history-legend-open-interest-puts {
+    border: 1px solid #336794;
     border-radius: 2px 2px 0 0;
-    background: rgba(37, 99, 235, 0.88);
+    background: #2563eb;
 }
 
-.brent-vol-history-legend-open-interest {
-    background: rgba(37, 99, 235, 0.24);
+.brent-vol-history-legend-volume-puts,
+.brent-vol-history-legend-volume-puts-new,
+.brent-vol-history-legend-open-interest-puts {
+    background:
+        repeating-linear-gradient(
+            135deg,
+            transparent 0 3px,
+            rgba(255, 255, 255, 0.55) 3px 4px
+        ),
+        #0f766e;
 }
 
-.brent-vol-history-legend-new-volume {
+.brent-vol-history-legend-open-interest-calls,
+.brent-vol-history-legend-open-interest-puts {
+    opacity: 0.42;
+}
+
+.brent-vol-history-legend-volume-calls-new,
+.brent-vol-history-legend-volume-puts-new {
     border: 2px solid #f97316;
-    background: rgba(37, 99, 235, 0.56);
 }
 
 .brent-vol-history-plot-grid {
@@ -9058,14 +9106,51 @@ button:hover {
     background: var(--color-bg-white);
 }
 
-.brent-vol-history-card-title {
-    margin: 0;
-    padding: 8px 10px;
+.brent-vol-history-card-header {
+    display: flex;
+    min-width: 0;
+    min-height: 34px;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
     border-bottom: 1px solid #d8dee8;
     background: #f8fafc;
+}
+
+.brent-vol-history-card-title {
+    flex: 0 0 auto;
+    margin: 0;
     color: #1f2937;
     font-size: 12px;
     font-weight: 800;
+    line-height: 1.2;
+}
+
+.brent-vol-history-card-quality {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+}
+
+.brent-vol-history-quality-badge {
+    flex: 0 0 auto;
+    font-size: 9px;
+    line-height: 1.1;
+}
+
+.brent-vol-history-quality-detail {
+    min-width: 0;
+    overflow: hidden;
+    color: #64748b;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .brent-vol-history-graph {
@@ -9359,16 +9444,308 @@ button:hover {
 
 .brent-vol-history-detail-header {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    gap: var(--spacing-lg);
-    margin-bottom: var(--spacing-md);
+    gap: 12px;
 }
 
-.brent-vol-history-grid {
-    border: 1px solid var(--color-border-light);
-    border-radius: var(--border-radius-sm);
-    background: var(--color-bg-white);
+.brent-vol-history-table-section {
+    width: calc(100% - 6px);
+    min-width: 0;
+    margin: 8px 3px 18px;
+    overflow: hidden;
+    box-sizing: border-box;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    background: #ffffff;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.9),
+        0 8px 20px rgba(15, 23, 42, 0.04);
+}
+
+.brent-vol-history-table-header {
+    display: flex;
+    min-height: 50px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0;
+    padding: 8px 12px;
+    box-sizing: border-box;
+    border-bottom: 1px solid #d9e2ec;
+    border-left: 4px solid #334155;
+    background: linear-gradient(180deg, #ffffff 0%, #f7fafc 100%);
+}
+
+.brent-vol-history-table-heading {
+    min-width: 0;
+}
+
+.brent-vol-history-detail-header .brent-vol-history-table-title,
+.brent-vol-history-table-title {
+    margin: 0;
+    color: #0f172a;
+    font-size: 14px;
+    font-weight: 800;
+    line-height: 1.2;
+    letter-spacing: 0;
+}
+
+.brent-vol-history-table-subtitle {
+    margin: 2px 0 0;
+    color: #64748b;
+    font-size: 10.5px;
+    font-weight: 500;
+    line-height: 1.35;
+}
+
+.brent-vol-history-table-context {
+    display: inline-flex;
+    min-height: 24px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border: 1px solid #d9e2ec;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #475569;
+    font-size: 10px;
+    font-weight: 750;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.brent-vol-history-table-context-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #f97316;
+    box-shadow: 0 0 0 3px #ffedd5;
+}
+
+.brent-vol-history-table-header .brent-vol-history-detail-control {
+    flex: 0 0 188px;
+    min-width: 188px;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid {
+    --ag-font-family: var(--font-family-primary);
+    --ag-font-size: 11.5px;
+    --ag-grid-size: 3px;
+    --ag-row-height: 30px;
+    --ag-header-height: 34px;
+    --ag-cell-horizontal-padding: 6px;
+    --ag-border-color: #d9e2ec;
+    --ag-row-border-color: #e8eef5;
+    --ag-odd-row-background-color: #f8fafc;
+    --ag-row-hover-color: #edf6ff;
+    --ag-selected-row-background-color: #e2effc;
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    border-radius: 0;
+    background: #ffffff;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-root-wrapper {
+    border: 0;
+    border-radius: 0;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header,
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-cell,
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-group-cell {
+    color: #172033 !important;
+    border-color: #d9e2ec !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-cell {
+    background: #edf2f7 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-cell-text,
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-group-text {
+    overflow: hidden !important;
+    color: #172033 !important;
+    font-size: 10.5px;
+    font-weight: 800;
+    line-height: 1.08;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-cell-label,
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-header-group-cell-label {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-cell.vol-trades-number-header
+    .ag-header-cell-label {
+    justify-content: flex-end;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-contract {
+    background: #e2e8f0 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-premium {
+    background: #e7f0fa !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-volatility {
+    background: #eeeafa !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-activity {
+    background: #fff3d9 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-future {
+    background: #e5f3f4 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-trade {
+    background: #ffede4 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-header-group-cell.vol-trades-group-quality {
+    background: #edf0f4 !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-cell {
+    display: flex !important;
+    align-items: center;
+    padding-right: 6px;
+    padding-left: 6px;
+    overflow: hidden !important;
+    color: #253247;
+    line-height: 1.05;
+    border-right-color: #e7edf4 !important;
+    border-bottom-color: #e8eef5 !important;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-cell-value {
+    display: block;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .vol-trades-number-cell {
+    justify-content: flex-end;
+    padding-right: 9px !important;
+    text-align: right !important;
+    font-variant-numeric: tabular-nums;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .vol-trades-security-cell {
+    color: #0f172a;
+    font-weight: 700;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .vol-trades-time-cell {
+    color: #334155;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-cell.vol-trades-call-cell {
+    justify-content: center;
+    background: #eff6ff !important;
+    color: #1d4ed8 !important;
+    font-weight: 850;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-cell.vol-trades-put-cell {
+    justify-content: center;
+    background: #f0fdfa !important;
+    color: #0f766e !important;
+    font-weight: 850;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-cell.vol-trades-status-ok {
+    background: #edf8f1 !important;
+    color: #166534 !important;
+    font-weight: 750;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-cell.vol-trades-status-warning {
+    background: #fff8e8 !important;
+    color: #92400e !important;
+    font-weight: 700;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-row-hover
+    .ag-cell {
+    background-color: #edf6ff !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-pinned-left-header,
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-pinned-left-cols-container {
+    border-right: 2px solid #b9c7d8;
+    box-shadow: 3px 0 8px rgba(15, 23, 42, 0.045);
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-overlay-no-rows-wrapper > span {
+    padding: 8px 12px;
+    border: 1px dashed #cbd5e1;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid .ag-paging-panel {
+    min-height: 38px;
+    padding: 4px 9px;
+    border-top-color: #d9e2ec;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-paging-button {
+    min-width: 24px;
+    min-height: 24px;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-body-horizontal-scroll {
+    min-height: 12px !important;
+}
+
+.ag-theme-alpine.mckinsey-ag-grid.brent-vol-history-table-grid
+    .ag-center-cols-viewport {
+    overscroll-behavior-x: contain;
 }
 
 .brent-vol-history-methodology-note {
@@ -9474,10 +9851,10 @@ button:hover {
     }
 }
 
-@media (min-width: 1281px) and (max-width: 1480px) {
+@media (min-width: 1281px) and (max-width: 1760px) {
     .brent-vol-history-toolbar {
         grid-template-columns:
-            132px
+            312px
             160px
             minmax(290px, 1fr)
             200px
@@ -9491,6 +9868,15 @@ button:hover {
     .brent-vol-history-trade-presets {
         grid-template-columns: 60px 38px 38px 42px 92px minmax(220px, 280px);
         justify-content: end;
+    }
+}
+
+@media (min-width: 951px) and (max-width: 1280px) {
+    .brent-vol-history-toolbar {
+        grid-template-columns:
+            312px
+            190px
+            minmax(0, 1fr);
     }
 }
 
@@ -9519,6 +9905,17 @@ button:hover {
     .brent-vol-history-detail-header {
         align-items: stretch;
         flex-direction: column;
+    }
+
+    .brent-vol-history-table-header {
+        align-items: flex-start;
+        padding: 9px 10px;
+    }
+
+    .brent-vol-history-table-header .brent-vol-history-detail-control {
+        width: 100%;
+        min-width: 0;
+        flex: 1 1 auto;
     }
 
     .brent-vol-history-detail-control {
@@ -9552,6 +9949,11 @@ button:hover {
     }
 
     .brent-vol-history-common-legend {
+        width: 100%;
+        justify-content: flex-start;
+    }
+
+    .brent-vol-history-layer-options {
         justify-content: flex-start;
     }
 

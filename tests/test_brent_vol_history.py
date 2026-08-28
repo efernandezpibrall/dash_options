@@ -23,6 +23,16 @@ def _walk(component):
             yield from _walk(child)
 
 
+def _column_leaves(column_defs):
+    leaves = []
+    for column in column_defs:
+        if "children" in column:
+            leaves.extend(_column_leaves(column["children"]))
+        else:
+            leaves.append(column)
+    return leaves
+
+
 def _chain_frame():
     rows = []
     for security, put_call, strike, settlement, volume, open_interest, iv in (
@@ -87,6 +97,39 @@ def _published_frame():
             "source_name": ["published", "published"],
         }
     )
+
+
+def _calibrated_frame():
+    frame = pd.DataFrame(
+        {
+            "contract_date": pd.to_datetime(["2026-12-01"] * 3),
+            "option_expiration_date": pd.to_datetime(["2026-10-27"] * 3),
+            "strike": [70.0, 80.0, 90.0],
+            "delta": [0.75, 0.50, 0.25],
+            "put_call": ["C", "C", "C"],
+            "volatility": [0.32, 0.30, 0.28],
+            "forward_value": [80.0, 80.0, 80.0],
+            "source_name": ["TTF PCHIP/Wing"] * 3,
+            "calibration_basis": ["observed"] * 3,
+            "created_at": pd.to_datetime(["2026-08-25T09:33:19Z"] * 3),
+            "publication_id": ["9572ae7f-90ca-4c8f-aecd-fbaff1ed081d"] * 3,
+            "run_id": ["1fb16e4f-d1c7-4bc9-9e32-6dc4899ebf9a"] * 3,
+            "commodity": ["TTF"] * 3,
+            "publication_cob_date": pd.to_datetime(["2026-08-24"] * 3),
+            "published_at": pd.to_datetime(["2026-08-25T09:33:19Z"] * 3),
+            "published_by": ["publisher"] * 3,
+        }
+    )
+    frame.attrs["publication_status"] = "available"
+    frame.attrs["publication_metadata"] = {
+        "publication_id": "9572ae7f-90ca-4c8f-aecd-fbaff1ed081d",
+        "run_id": "1fb16e4f-d1c7-4bc9-9e32-6dc4899ebf9a",
+        "commodity": "TTF",
+        "cob_date": pd.Timestamp("2026-08-24"),
+        "published_at": pd.Timestamp("2026-08-25T09:33:19Z"),
+        "published_by": "publisher",
+    }
+    return frame
 
 
 def _intraday_missing_quote_frame():
@@ -190,6 +233,18 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
         for item in items
         if getattr(item, "id", None) == "brent-vol-history-trade-start"
     )
+    trade_presets = [
+        item
+        for item in items
+        if getattr(item, "id", None)
+        in {
+            "brent-vol-history-trade-all",
+            "brent-vol-history-trade-4h",
+            "brent-vol-history-trade-1h",
+            "brent-vol-history-trade-15m",
+            "brent-vol-history-trade-latest",
+        }
+    ]
     worker_poll = next(
         item
         for item in items
@@ -199,6 +254,8 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
     assert headings[0].children == "Vol trades"
     assert headings[0].className == "brent-vol-history-visually-hidden-heading"
     assert trade_slider.allow_direct_input is False
+    assert len(trade_presets) == 5
+    assert all(button.disabled for button in trade_presets)
     assert worker_poll.interval == 10_000
     assert worker_poll.disabled is False
     assert "brent-vol-history-summary" not in ids
@@ -261,6 +318,108 @@ def test_refresh_buttons_have_primary_secondary_focus_and_mobile_contracts():
     assert ".brent-vol-history-refresh-button:focus-visible" in css
     assert ".brent-vol-history-refresh-button-secondary" in css
     assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+
+
+def test_product_selector_keeps_all_products_on_one_desktop_row():
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert ".brent-vol-history-product-options label" in css
+    assert "flex: 1 1 0;" in css
+    assert "white-space: nowrap;" in css
+    assert "margin-right: 0;" in css
+    assert "grid-template-columns:\n        312px\n        168px" in css
+    assert "@media (min-width: 1281px) and (max-width: 1760px)" in css
+
+
+def test_trade_and_chain_tables_use_grouped_trader_focused_format():
+    items = list(_walk(history.layout))
+    trade_grid = next(
+        item
+        for item in items
+        if getattr(item, "id", None) == "brent-vol-history-trade-grid"
+    )
+    chain_grid = next(
+        item
+        for item in items
+        if getattr(item, "id", None) == "brent-vol-history-grid"
+    )
+
+    assert [group["headerName"] for group in history.TRADE_TAPE_COLUMN_DEFS] == [
+        "Trade",
+        "Print",
+        "Matched future",
+        "Trade volatility",
+    ]
+    assert [group["headerName"] for group in history.DETAIL_COLUMN_DEFS] == [
+        "Contract",
+        "Option premium",
+        "Volatility (%)",
+        "Activity (contracts)",
+        "Pricing future",
+        "Last exact trade",
+        "Quality & source",
+    ]
+    assert all(group["marryChildren"] for group in history.DETAIL_COLUMN_DEFS)
+
+    detail_leaves = _column_leaves(history.DETAIL_COLUMN_DEFS)
+    detail_by_field = {column["field"]: column for column in detail_leaves}
+    trade_by_field = {
+        column["field"]: column
+        for column in _column_leaves(history.TRADE_TAPE_COLUMN_DEFS)
+    }
+    detail_row_fields = set(history._detail_rows(_chain_frame(), "2026-12-01")[0])
+    assert set(detail_by_field) == detail_row_fields
+    assert len(detail_leaves) == 59
+    assert detail_by_field["option_security"]["pinned"] == "left"
+    assert detail_by_field["put_call"]["pinned"] == "left"
+    assert detail_by_field["strike"]["pinned"] == "left"
+    assert detail_by_field["option_bid"]["columnGroupShow"] == "open"
+    assert detail_by_field["executable_iv_mid_pct"]["valueFormatter"][
+        "function"
+    ].endswith("toFixed(2)")
+    assert detail_by_field["volume"]["valueFormatter"] == history._GRID_INTEGER
+    assert trade_by_field["future_match_source"]["headerName"] == "Method"
+    assert trade_by_field["future_quote_ages"]["headerName"] == "Bid / ask age"
+    assert detail_by_field["last_trade_underlying_source"]["headerName"] == (
+        "Match method"
+    )
+    assert history._trade_match_source_label("TRADE") == "Future trade"
+
+    assert trade_grid.dashGridOptions["groupHeaderHeight"] == 28
+    assert chain_grid.dashGridOptions["groupHeaderHeight"] == 28
+    assert "No exact trades" in trade_grid.dashGridOptions[
+        "overlayNoRowsTemplate"
+    ]
+    assert "vol-trades-trade-grid" in trade_grid.className
+    assert "vol-trades-chain-grid" in chain_grid.className
+    assert "Bloomberg exact option trade tape" in trade_grid.eventListeners[
+        "modelUpdated"
+    ][0]
+    assert "Bloomberg option-chain detail" in chain_grid.eventListeners[
+        "firstDataRendered"
+    ][0]
+    assert trade_grid.defaultColDef["suppressHeaderFilterButton"] is True
+    assert chain_grid.defaultColDef["suppressHeaderFilterButton"] is True
+    assert trade_grid.style["height"] == chain_grid.style["height"] == "560px"
+
+    subtitles = [
+        item.children
+        for item in items
+        if getattr(item, "className", None)
+        == "brent-vol-history-table-subtitle"
+    ]
+    assert len(subtitles) == 2
+    assert any("selected expiry and trade window" in text for text in subtitles)
+    assert any("Expand grouped headers" in text for text in subtitles)
+
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert ".brent-vol-history-table-section" in css
+    assert ".vol-trades-group-premium" in css
+    assert ".vol-trades-call-cell" in css
+    assert ".vol-trades-trade-grid:has(.ag-overlay-no-rows-wrapper)" not in css
 
 
 def test_layout_includes_sourced_ice_open_interest_timing_note():
@@ -389,6 +548,57 @@ def test_trade_tape_loader_is_snapshot_and_product_scoped(monkeypatch):
     assert captured["params"]["snapshot_kind"] == "INTRADAY"
 
 
+def test_trade_tape_exposes_individual_future_quote_ages():
+    trade_at = pd.Timestamp("2026-08-10T08:00:00Z")
+    trade_tape = pd.DataFrame(
+        [
+            {
+                "business_date": pd.Timestamp("2026-08-10"),
+                "option_security": "COZ6C 80 Comdty",
+                "underlying_contract_month": pd.Timestamp("2026-12-01"),
+                "option_expiration_date": pd.Timestamp("2026-10-27"),
+                "put_call": "C",
+                "strike": 80.0,
+                "trade_at": trade_at,
+                "trade_price": 2.5,
+                "trade_size": 3.0,
+                "condition_codes": None,
+                "future_bid_at": trade_at - pd.Timedelta(seconds=141),
+                "future_ask_at": trade_at - pd.Timedelta(seconds=52),
+                "future_match_price": 78.0,
+                "future_match_source": "PREVAILING_MID",
+                "future_match_lag_ms": 52_000,
+                "trade_iv": 0.494023,
+                "trade_iv_status": "resolved",
+                "trade_iv_exclusion_reason": None,
+                "event_fingerprint": "a" * 64,
+                "occurrence_ordinal": 1,
+            }
+        ]
+    )
+
+    payload = history.trade_trace_payloads(
+        trade_tape, pd.Timestamp("2026-12-01"), "strike"
+    )["C"]
+    rows = history._trade_tape_rows(trade_tape, "2026-12-01", 0)
+    chain = _chain_frame()
+    chain["snapshot_kind"] = "INTRADAY"
+    figure = history.build_expiry_figure(
+        chain,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.Timestamp("2026-12-01"),
+        trade_tape=trade_tape,
+    )
+    trace = next(
+        item for item in figure.data if item.name == "Trade-time IV · Calls"
+    )
+
+    assert payload["customdata"][0][7] == "B 141.0s / A 52.0s"
+    assert rows[0]["future_quote_ages"] == "B 141.0s / A 52.0s"
+    assert "Quote ages %{customdata[7]}" in trace.hovertemplate
+
+
 def test_navigation_routes_to_history_page():
     assert index_options.display_page("/brent_vol_history", None) is history.layout
 
@@ -456,6 +666,106 @@ def test_tfo_published_overlay_queries_ttf_without_merging_products(monkeypatch)
     assert len(captured) == 1
 
 
+@pytest.mark.parametrize("product", ["ON", "LNE"])
+def test_henry_hub_published_overlay_queries_hh_without_merging_products(
+    monkeypatch, product
+):
+    captured = []
+
+    def fake_read_sql(query, engine, params):
+        captured.append((str(query), dict(params)))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    history.load_published_surface(
+        "2026-08-10", engine=object(), product=product, snapshot_kind="SETTLEMENT"
+    )
+    assert captured[0][1]["product"] == "HH"
+    assert captured[0][1]["snapshot_kind"] == "SETTLEMENT"
+
+
+def test_henry_hub_products_use_ng_units_and_governed_pipeline_iv():
+    for product in ("ON", "LNE"):
+        spec = history.PRODUCT_SPECS[product]
+        assert spec["price_unit"] == "USD/MMBtu"
+        assert spec["underlying_label"] == "NG"
+        chain = _chain_frame()
+        chain["product"] = product
+        assert history.prepare_market_observations(chain, product=product).empty
+
+
+def test_latest_calibrated_surface_uses_latest_active_publication(
+    monkeypatch,
+):
+    captured = []
+
+    def fake_read_sql(query, engine, params):
+        captured.append((str(query), dict(params)))
+        if len(captured) == 1:
+            return pd.DataFrame(
+                {
+                    "publication_id": ["9572ae7f-90ca-4c8f-aecd-fbaff1ed081d"],
+                    "run_id": ["1fb16e4f-d1c7-4bc9-9e32-6dc4899ebf9a"],
+                    "commodity": ["TTF"],
+                    "publication_cob_date": [date(2026, 8, 24)],
+                    "published_at": [pd.Timestamp("2026-08-25T09:33:19Z")],
+                    "published_by": ["publisher"],
+                }
+            )
+        return _calibrated_frame().drop(
+            columns=[
+                "publication_id",
+                "run_id",
+                "commodity",
+                "publication_cob_date",
+                "published_at",
+                "published_by",
+            ]
+        )
+
+    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
+    surface = history.load_latest_calibrated_surface(
+        "2026-08-26",
+        ["2026-12-01"],
+        engine=object(),
+        product="TFO",
+    )
+
+    assert "p.status = 'published'" in captured[0][0]
+    assert "p.is_active" in captured[0][0]
+    assert "p.cob_date <=" not in captured[0][0]
+    assert captured[0][1] == {"commodity": "TTF"}
+    assert "s.contract_date IN" in captured[1][0]
+    assert captured[1][1]["contract_dates"] == (date(2026, 12, 1),)
+    assert surface.attrs["publication_status"] == "available"
+    assert history.calibrated_publication_metadata(surface)["publication_id"] == (
+        "9572ae7f-90ca-4c8f-aecd-fbaff1ed081d"
+    )
+
+
+def test_missing_calibrated_publication_is_explicit(monkeypatch):
+    monkeypatch.setattr(
+        history.pd,
+        "read_sql",
+        lambda query, engine, params: pd.DataFrame(),
+    )
+    surface = history.load_latest_calibrated_surface(
+        "2026-08-26",
+        ["2026-12-01"],
+        engine=object(),
+        product="BRENT",
+    )
+    assert surface.attrs["publication_status"] == "no_publication"
+    cards = history.build_plot_cards(
+        _chain_frame(),
+        pd.DataFrame(),
+        product="BRENT",
+        calibrated=surface,
+    )
+    contract = history._expiry_legend_contract(cards)
+    assert "calibrated" not in contract["available_layers"]
+
+
 def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
     captured = []
 
@@ -506,8 +816,9 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
         pd.Timestamp("2026-12-01"),
     )
     trace_names = {trace.name for trace in figure.data}
-    assert "Settlement eligible" in trace_names
     assert "Bloomberg settlement IV" in trace_names
+    assert "Settlement eligible" not in trace_names
+    assert "Settlement excluded" not in trace_names
     assert "Published Brent exact COB" in trace_names
     assert "Volume · calls" in trace_names
     assert "Volume · puts" in trace_names
@@ -518,18 +829,32 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
     assert figure.layout.yaxis.title.text == "IV (%)"
     assert figure.layout.yaxis2.title.text == "Activity (contracts)"
     assert figure.layout.yaxis2.overlaying == "y"
+    assert figure.layout.margin.r == 44
     assert figure.layout.showlegend is False
     traces = {trace.name: trace for trace in figure.data}
     assert traces["Open interest · calls"].width > traces["Volume · calls"].width
     assert traces["Open interest · calls"].opacity < traces["Volume · calls"].opacity
     assert traces["Open interest · calls"].yaxis == "y2"
     assert traces["Volume · calls"].yaxis == "y2"
-    assert traces["Settlement eligible"].yaxis == "y"
+    assert traces["Volume · calls"].meta["legend_layer"] == "volume-calls"
+    assert traces["Volume · puts"].meta["legend_layer"] == "volume-puts"
+    assert (
+        traces["Open interest · calls"].meta["legend_layer"]
+        == "open-interest-calls"
+    )
+    assert (
+        traces["Open interest · puts"].meta["legend_layer"]
+        == "open-interest-puts"
+    )
+    assert (
+        traces["Bloomberg settlement IV"].meta["legend_layer"]
+        == "bloomberg-settlement"
+    )
+    assert figure.layout.shapes[0].name == "pricing-reference"
     for trace_name in (
         "Open interest · calls",
         "Volume · calls",
         "Bloomberg settlement IV",
-        "Settlement eligible",
     ):
         assert "Underlying" in traces[trace_name].hovertemplate
         assert "Volume / OI" in traces[trace_name].hovertemplate
@@ -539,27 +864,26 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
     assert figure.layout.hoverlabel.font.color == "#F8FAFC"
     assert set(traces["Open interest · calls"].customdata[:, 4]) == {80.0}
     assert list(traces["Bloomberg settlement IV"].customdata[:, 5]) == [80.0, 80.0]
-    assert list(traces["Settlement eligible"].customdata[:, 3]) == [80.0, 80.0]
-    assert list(traces["Settlement eligible"].customdata[:, 4]) == [
-        "COZ6P 70 Comdty",
-        "COZ6C 90 Comdty",
-    ]
-    assert list(traces["Settlement eligible"].customdata[:, 5]) == [
-        "1.2500",
-        "1.1000",
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 6]) == [
+        "Eligible · OI and moneyness gates passed",
+        "Eligible · OI and moneyness gates passed",
     ]
     assert (
         "Premium <b>%{customdata[2]:.4f} USD/bbl</b>"
         in traces["Bloomberg settlement IV"].hovertemplate
     )
-    assert (
-        "Premium <b>%{customdata[5]} USD/bbl</b>"
-        in traces["Settlement eligible"].hovertemplate
+    assert "<b>Settlement from Bloomberg</b>" in (
+        traces["Bloomberg settlement IV"].hovertemplate
+    )
+    assert "Calibration: <b>%{customdata[6]}</b>" in (
+        traces["Bloomberg settlement IV"].hovertemplate
     )
     assert list(traces["Published Brent exact COB"].customdata[:, 4]) == [80.0, 80.0]
     trace_order = [trace.name for trace in figure.data]
     assert trace_order.index("Open interest · calls") < trace_order.index("Volume · calls")
-    assert trace_order.index("Volume · calls") < trace_order.index("Settlement eligible")
+    assert trace_order.index("Volume · calls") < trace_order.index(
+        "Bloomberg settlement IV"
+    )
 
 
 def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
@@ -581,10 +905,18 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
         published,
         pd.Timestamp("2026-12-01"),
         product="TFO",
+        calibrated_nodes=_calibrated_frame(),
     )
     traces = {trace.name: trace for trace in figure.data}
     assert figure.layout.xaxis.title.text == "Strike (EUR/MWh)"
     assert "Published TTF exact COB" in traces
+    calibrated_name = "Calibrated TTF · COB 24 Aug 2026"
+    assert calibrated_name in traces
+    assert traces[calibrated_name].line.color == "#7C3AED"
+    assert traces[calibrated_name].line.dash == "dash"
+    assert "Revision 9572ae7f-90ca-4c8f-aecd-fbaff1ed081d" in (
+        traces[calibrated_name].hovertemplate
+    )
     assert "Bloomberg settlement IV" in traces
     assert "Settlement eligible" not in traces
     assert "TZT %{customdata[4]:.3f}" in traces["Published TTF exact COB"].hovertemplate
@@ -599,7 +931,7 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
     assert {row["pricing_future"] for row in detail} == {"TZTZ6 Comdty"}
 
 
-def test_tfo_settlement_axis_includes_full_exchange_strike_range_without_overlay():
+def test_tfo_settlement_axis_uses_exchange_range_not_calibrated_tail_extremes():
     chain = _chain_frame().copy()
     low_strike = chain.iloc[[0]].copy()
     low_strike["option_security"] = "FJSZ6P 5 Comdty"
@@ -623,12 +955,15 @@ def test_tfo_settlement_axis_includes_full_exchange_strike_range_without_overlay
     chain["currency"] = "EUR"
     chain["price_unit"] = "EUR/MWH"
 
+    calibrated = _calibrated_frame()
+    calibrated.loc[calibrated.index[-1], "strike"] = 500.0
     figure = history.build_expiry_figure(
         chain,
         history.prepare_market_observations(chain, product="TFO"),
         pd.DataFrame(),
         pd.Timestamp("2026-12-01"),
         product="TFO",
+        calibrated_nodes=calibrated,
     )
 
     settlement = next(
@@ -637,6 +972,7 @@ def test_tfo_settlement_axis_includes_full_exchange_strike_range_without_overlay
     assert list(settlement.customdata[:, 0]) == [5.0, 70.0, 90.0, 300.0]
     assert figure.layout.xaxis.range[0] <= 5.0
     assert figure.layout.xaxis.range[1] > 300.0
+    assert figure.layout.xaxis.range[1] < 500.0
 
 
 def test_settlement_smile_never_substitutes_intrinsic_itm_option_for_unresolved_otm():
@@ -720,31 +1056,212 @@ def test_expiry_section_uses_one_shared_chart_legend():
         for item in items
         if getattr(item, "className", None) == "brent-vol-history-common-legend"
     )
-    labels = [item.children[1].children for item in legend.children]
-    assert labels == [
-        "Calls IV",
-        "Puts IV",
-        "Executable band",
-        "Prior official settlement IV",
-        "Trade-time IV",
-        "Bloomberg settlement IV",
-        "Settlement eligible",
-        "Settlement excluded",
-        "Published Brent exact COB",
-        "Volume",
-        "Open interest · follows selected snapshot",
-        "New volume",
+    checklist, reset = legend.children
+    assert checklist.id == "brent-vol-history-expiry-layers"
+    assert checklist.options == []
+    assert checklist.value == []
+    assert reset.children == "Reset"
+    assert legend.role == "group"
+    options = history._expiry_legend_options(
+        [
+            "call-mid",
+            "put-mid",
+            "trades",
+            "prior-settlement",
+            "pricing-reference",
+            "volume-calls",
+            "volume-puts",
+            "open-interest-calls",
+            "open-interest-puts",
+        ],
+        new_volume_layers=["volume-puts"],
+    )
+    assert [option["value"] for option in options] == [
+        "call-mid",
+        "put-mid",
+        "trades",
+        "prior-settlement",
+        "pricing-reference",
+        "volume-calls",
+        "volume-puts",
+        "open-interest-calls",
+        "open-interest-puts",
     ]
-    intraday_labels = [
-        item.children[1].children
-        for item in history._expiry_legend_items("INTRADAY")
+    assert [option["label"].children[1].children for option in options] == [
+        "Call mid",
+        "Put mid",
+        "Trades",
+        "Prior settle",
+        "ATM / future",
+        "Volume calls",
+        "Volume puts · new edge",
+        "OI calls",
+        "OI puts",
     ]
-    settlement_labels = [
-        item.children[1].children
-        for item in history._expiry_legend_items("SETTLEMENT")
+
+
+def test_expiry_legend_contract_only_exposes_plotted_layers():
+    cards = history.build_plot_cards(
+        _chain_frame(),
+        pd.DataFrame(),
+        product="BRENT",
+    )
+    contract = history._expiry_legend_contract(cards)
+
+    assert contract["available_layers"] == [
+        "bloomberg-settlement",
+        "pricing-reference",
+        "volume-calls",
+        "volume-puts",
+        "open-interest-calls",
+        "open-interest-puts",
     ]
-    assert "Intraday OI · Bloomberg effective date" in intraday_labels
-    assert "Settlement OI · official close" in settlement_labels
+    assert contract["new_volume_layers"] == []
+    assert "trades" not in contract["available_layers"]
+    assert "prior-settlement" not in contract["available_layers"]
+    assert "published" not in contract["available_layers"]
+    assert contract["graphs"]["2026-12-01"]["shapes"] == [
+        {"index": 0, "layer": "pricing-reference"}
+    ]
+    assert all(
+        entry["layer"] in history.EXPIRY_LEGEND_LAYER_SPECS
+        for entry in contract["graphs"]["2026-12-01"]["traces"]
+    )
+
+
+def test_expiry_quality_summary_is_inside_the_contract_header():
+    cards = history.build_plot_cards(
+        _tfo_apr27_intraday_frame(),
+        pd.DataFrame(),
+        x_axis="delta",
+        prior_settlement_chain=_tfo_apr27_prior_settlement_frame(),
+        product="TFO",
+    )
+    card = cards[0]
+    header = card.children[0]
+
+    assert header.className == "brent-vol-history-card-header"
+    assert header.children[0].children == "Apr-27"
+    assert header.children[0].className == "brent-vol-history-card-title"
+    assert header.children[1].className == "brent-vol-history-card-quality"
+    assert header.children[1].role == "status"
+    assert header.children[1].children[0].children == "Prior settle · 17 Aug 2026"
+    assert header.children[1].children[1].className == (
+        "brent-vol-history-quality-detail"
+    )
+    assert header.children[1].title.startswith("No reliable current IV")
+    assert len(card.children) == 2
+
+
+def test_expiry_legend_tracks_new_volume_edge_by_option_side():
+    chain = _chain_frame()
+    chain["snapshot_kind"] = "INTRADAY"
+    chain["volume_delta"] = 0.0
+    chain.loc[chain["put_call"].eq("P"), "volume_delta"] = 5.0
+
+    contract = history._expiry_legend_contract(
+        history.build_plot_cards(chain, pd.DataFrame(), product="BRENT")
+    )
+
+    assert contract["new_volume_layers"] == ["volume-puts"]
+
+
+def test_bloomberg_settlement_legend_uses_plain_label_and_source_tooltip():
+    option = history._expiry_legend_options(["bloomberg-settlement"])[0]
+
+    assert option["label"].children[1].children == "Settlement"
+    assert option["label"].title == "Settlement from Bloomberg"
+
+
+def test_expiry_layer_selection_preserves_existing_and_enables_new_layers():
+    selected = history._selected_expiry_layers(
+        ["call-mid", "trades", "volume-calls"],
+        [{"value": "call-mid"}, {"value": "volume-calls"}],
+        ["call-mid"],
+    )
+    assert selected == ["call-mid", "trades"]
+
+
+def test_expiry_layer_defaults_hide_mids_but_preserve_manual_selection():
+    available = ["call-mid", "put-mid", "trades", "volume-calls"]
+
+    assert history._selected_expiry_layers(available, [], []) == [
+        "trades",
+        "volume-calls",
+    ]
+    assert history._selected_expiry_layers(
+        available,
+        [{"value": layer} for layer in available],
+        ["call-mid", "trades", "volume-calls"],
+    ) == ["call-mid", "trades", "volume-calls"]
+    assert history._selected_expiry_layers(
+        available,
+        [{"value": "trades"}, {"value": "volume-calls"}],
+        ["trades", "volume-calls"],
+    ) == ["trades", "volume-calls"]
+
+
+def test_expiry_layer_visibility_uses_small_visibility_only_patches():
+    manifest = {
+        "available_layers": [
+            "volume-calls",
+            "volume-puts",
+            "pricing-reference",
+        ],
+        "graphs": {
+            "2026-12-01": {
+                "traces": [
+                    {"index": 2, "layer": "volume-calls"},
+                    {"index": 3, "layer": "volume-puts"},
+                ],
+                "shapes": [{"index": 0, "layer": "pricing-reference"}],
+            }
+        },
+    }
+    updates = history.update_expiry_layer_visibility(
+        ["volume-puts", "pricing-reference"],
+        manifest,
+        [
+            {
+                "type": "brent-vol-history-expiry-graph",
+                "expiry": "2026-12-01",
+            }
+        ],
+    )
+    operations = updates[0].to_plotly_json()["operations"]
+    assert operations == [
+        {
+            "operation": "Assign",
+            "location": ["data", 2, "visible"],
+            "params": {"value": False},
+        },
+        {
+            "operation": "Assign",
+            "location": ["data", 3, "visible"],
+            "params": {"value": True},
+        },
+        {
+            "operation": "Assign",
+            "location": ["layout", "shapes", 0, "visible"],
+            "params": {"value": True},
+        },
+    ]
+    assert history.reset_expiry_layers(
+        1,
+        [
+            {"value": "call-mid"},
+            {"value": "put-mid"},
+            {"value": "volume-calls"},
+            {"value": "volume-puts"},
+            {"value": "open-interest-calls"},
+            {"value": "open-interest-puts"},
+        ],
+    ) == [
+        "volume-calls",
+        "volume-puts",
+        "open-interest-calls",
+        "open-interest-puts",
+    ]
 
 
 def test_settlement_iv_remains_visible_without_volume_or_open_interest():
@@ -767,20 +1284,19 @@ def test_settlement_iv_remains_visible_without_volume_or_open_interest():
     traces = {trace.name: trace for trace in figure.data}
 
     assert "Settlement eligible" not in traces
-    assert "Settlement excluded" in traces
+    assert "Settlement excluded" not in traces
     assert "Bloomberg settlement IV" in traces
     assert list(traces["Bloomberg settlement IV"].customdata[:, 0]) == [70.0, 90.0]
     assert list(traces["Bloomberg settlement IV"].customdata[:, 3]) == ["—", "—"]
     assert list(traces["Bloomberg settlement IV"].customdata[:, 4]) == ["—", "—"]
     assert list(traces["Bloomberg settlement IV"].customdata[:, 5]) == [80.0, 80.0]
-    assert (
-        "Premium <b>%{customdata[6]} USD/bbl</b>"
-        in traces["Settlement excluded"].hovertemplate
-    )
-    assert list(traces["Settlement excluded"].customdata[:, 6]) == [
-        "1.2500",
-        "1.1000",
+    assert list(traces["Bloomberg settlement IV"].customdata[:, 6]) == [
+        "Not assessed · OI unavailable",
+        "Not assessed · OI unavailable",
     ]
+    assert "Calibration: <b>%{customdata[6]}</b>" in (
+        traces["Bloomberg settlement IV"].hovertemplate
+    )
 
 
 def test_missing_bid_ask_never_turns_last_price_into_a_current_iv_curve():

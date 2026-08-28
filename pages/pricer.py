@@ -26,6 +26,15 @@ from dash import (
 )
 
 from options.options_library import asian_76, black_76
+from pricer_exchange_registry import (
+    DEFAULT_EXCHANGE_MAPPING_ID,
+    canonical_exchange_mapping_id,
+    exchange_mapping_capture_message,
+    exchange_mapping_for_asset_model,
+    exchange_mapping_options,
+    exchange_mapping_pricing_supported,
+    exchange_option_mapping,
+)
 from pricer_surface_reference import (
     REFERENCE_SCHEMA_VERSION,
     build_published_surface_reference,
@@ -41,6 +50,7 @@ from pricer_structure import (
     MODEL_LABELS,
     PREMIUM_CONVENTION_LABELS,
     SCHEMA_VERSION,
+    SINGLE_ASSET_MODELS,
     SUPPORTED_ASSETS,
     SUPPORTED_DELIVERY_SHAPES,
     SUPPORTED_PREMIUM_CONVENTIONS,
@@ -53,7 +63,6 @@ from pricer_structure import (
     count_business_days,
     default_contract_size,
     default_context,
-    default_draft,
     default_leg,
     default_model_for_asset,
     default_premium_convention,
@@ -99,7 +108,8 @@ PRICER_GRAPH_CONFIG = {
     "modeBarButtonsToRemove": ["lasso2d", "select2d"],
 }
 
-PRICER_WORKSPACE_SCHEMA_VERSION = 6
+PRICER_WORKSPACE_SCHEMA_VERSION = 9
+PRICER_CONTRACT_SIZE_MIGRATION_SCHEMA_VERSION = 7
 DEFAULT_STRUCTURE_ID = "structure-1"
 VOLATILITY_ADJUSTMENT_FIELDS = (
     "atm_vol_adjustment",
@@ -166,37 +176,71 @@ def _migrate_template_premium_convention(
     template,
     *,
     migrate_legacy_contract_size=False,
+    migrate_legacy_kirk_context=True,
+    migrate_governed_mapping=False,
 ):
     if not isinstance(template, dict):
         return template
+    mapping_id = canonical_exchange_mapping_id(template.get("mapping_id"))
+    if mapping_id is not None:
+        template["mapping_id"] = mapping_id
     template.pop("structure_type", None)
     context = template.get("context")
     if not isinstance(context, dict):
         return template
+    context_mapping_id = canonical_exchange_mapping_id(
+        context.get("exchange_mapping_id")
+    )
+    if context_mapping_id is not None:
+        context["exchange_mapping_id"] = context_mapping_id
     context.pop("structure_type", None)
+    mapping = exchange_option_mapping(mapping_id or context_mapping_id)
+    if mapping is not None:
+        template["mapping_id"] = mapping.mapping_id
+        template["model"] = mapping.model
+        template["asset"] = mapping.asset
+        context["exchange_mapping_id"] = mapping.mapping_id
+        context["premium_convention"] = mapping.premium_convention
     model = template.get("model")
     if model not in MODEL_LABELS:
         model = "black76"
-    asset = template.get("asset")
-    if asset not in SUPPORTED_ASSETS:
-        asset = DEFAULT_ASSET
+    legacy_asset = template.get("asset")
+    asset = legacy_asset if legacy_asset in SUPPORTED_ASSETS else DEFAULT_ASSET
+    if mapping is not None:
+        asset = mapping.asset
+    if model == "kirk" and migrate_legacy_kirk_context:
+        if context.get("asset_1_forward") is None and context.get("asset_1") is not None:
+            context["asset_1_forward"] = context["asset_1"]
+        if context.get("asset_2_forward") is None and context.get("asset_2") is not None:
+            context["asset_2_forward"] = context["asset_2"]
+        if not context.get("asset_1_code") and legacy_asset in SUPPORTED_ASSETS:
+            context["asset_1_code"] = legacy_asset
+        common_reference_expiry = context.get("contract_expiration_date")
+        if not context.get("asset_1_reference_expiry") and common_reference_expiry:
+            context["asset_1_reference_expiry"] = common_reference_expiry
+        if not context.get("asset_2_reference_expiry") and common_reference_expiry:
+            context["asset_2_reference_expiry"] = common_reference_expiry
+        if not context.get("contractual_expiry") and context.get("expiration_date"):
+            context["contractual_expiry"] = context["expiration_date"]
+        context.pop("asset_1", None)
+        context.pop("asset_2", None)
     premium_convention = context.get("premium_convention")
     if premium_convention in (None, "", "product_default") or (
         model == "kirk" and premium_convention == "upfront"
     ):
         context["premium_convention"] = default_premium_convention(asset, model)
     if (
-        model in {"black76", "asian76"}
+        model in SINGLE_ASSET_MODELS
         and context.get("premium_convention") == "futures_style"
     ):
         context["rate"] = 0.0
     context.setdefault("delivery_shape", "MONTH")
-    if migrate_legacy_contract_size:
+    if (migrate_legacy_contract_size or migrate_governed_mapping) and model != "kirk":
         try:
             legacy_size = float(template.get("contract_multiplier", 1))
         except (TypeError, ValueError, OverflowError):
             legacy_size = None
-        if legacy_size == 1.0:
+        if legacy_size == 1.0 or (migrate_governed_mapping and mapping is not None):
             valuation_date = parse_date(
                 template.get("valuation_date"),
                 date.today(),
@@ -240,23 +284,49 @@ def _is_valid_calculation_snapshot(snapshot):
         "expiration_date",
         "contract_expiration_date",
         "time_to_expiry",
-        "vol_adjustment_factor",
-        "variance_calendar_code",
         "day_count_basis",
     }
-    model_context = (
-        {"forward", "rate"}
-        if snapshot["model"] in {"black76", "asian76"}
-        else {"asset_1", "asset_2", "correlation"}
-    )
+    if snapshot["model"] in SINGLE_ASSET_MODELS:
+        model_context = {
+            "forward",
+            "rate",
+            "vol_adjustment_factor",
+            "variance_calendar_code",
+        }
+    else:
+        model_context = {
+            "asset_1_code",
+            "asset_2_code",
+            "asset_1_forward",
+            "asset_2_forward",
+            "asset_1_price_unit",
+            "asset_2_price_unit",
+            "asset_1_calendar_code",
+            "asset_2_calendar_code",
+            "asset_1_contractual_business_days",
+            "asset_2_contractual_business_days",
+            "asset_1_reference_business_days",
+            "asset_2_reference_business_days",
+            "asset_1_vol_adjustment_factor",
+            "asset_2_vol_adjustment_factor",
+            "asset_1_reference_expiry",
+            "asset_2_reference_expiry",
+            "contractual_expiry",
+            "correlation",
+            "discount_factor",
+        }
     if snapshot["model"] == "asian76":
         model_context |= {"averaging_start_date", "time_to_averaging_start"}
     if not common_context.issubset(context) or not model_context.issubset(context):
         return False
-    if not context.get("delivery_components") and not {
+    if (
+        snapshot["model"] != "kirk"
+        and not context.get("delivery_components")
+        and not {
         "option_business_days",
         "contract_business_days",
-    }.issubset(context):
+        }.issubset(context)
+    ):
         return False
     totals = snapshot["totals"]
     if not {
@@ -291,8 +361,13 @@ def _is_valid_calculation_snapshot(snapshot):
             return False
         quote_fields = (
             {"quote_basis", "entered_premium", "raw_volatility", "volatility_used"}
-            if snapshot["model"] in {"black76", "asian76"}
-            else {"raw_volatility_asset_1", "raw_volatility_asset_2"}
+            if snapshot["model"] in SINGLE_ASSET_MODELS
+            else {
+                "raw_volatility_asset_1",
+                "raw_volatility_asset_2",
+                "volatility_asset_1_used",
+                "volatility_asset_2_used",
+            }
         )
         if not quote_fields.issubset(leg):
             return False
@@ -306,12 +381,19 @@ def _normalize_workspace(workspace):
     if not isinstance(raw_structures, list):
         return _default_workspace()
     try:
+        workspace_schema_version = int(workspace.get("schema_version", 0))
         migrate_legacy_contract_size = (
-            int(workspace.get("schema_version", 0))
-            < PRICER_WORKSPACE_SCHEMA_VERSION
+            workspace_schema_version
+            < PRICER_CONTRACT_SIZE_MIGRATION_SCHEMA_VERSION
+        )
+        migrate_legacy_kirk_context = migrate_legacy_contract_size
+        migrate_governed_mapping = (
+            workspace_schema_version < PRICER_WORKSPACE_SCHEMA_VERSION
         )
     except (TypeError, ValueError, OverflowError):
         migrate_legacy_contract_size = True
+        migrate_legacy_kirk_context = True
+        migrate_governed_mapping = True
     structures = []
     seen = set()
     for index, raw_structure in enumerate(raw_structures, start=1):
@@ -330,6 +412,8 @@ def _normalize_workspace(workspace):
             _migrate_template_premium_convention(
                 template,
                 migrate_legacy_contract_size=migrate_legacy_contract_size,
+                migrate_legacy_kirk_context=migrate_legacy_kirk_context,
+                migrate_governed_mapping=migrate_governed_mapping,
             )
         structures.append(
             {
@@ -368,6 +452,8 @@ def _normalize_workspace(workspace):
         _migrate_template_premium_convention(
             template,
             migrate_legacy_contract_size=migrate_legacy_contract_size,
+            migrate_legacy_kirk_context=migrate_legacy_kirk_context,
+            migrate_governed_mapping=migrate_governed_mapping,
         )
     return {
         "schema_version": PRICER_WORKSPACE_SCHEMA_VERSION,
@@ -673,13 +759,18 @@ def _build_delivery_shape_field(
     )
 
 
-def _delivery_month_options(asset, model, as_of):
+def _delivery_month_options(asset, model, as_of, mapping_id=None):
     return [
         {
             "label": delivery_month.strftime("%b-%y"),
             "value": delivery_month.isoformat(),
         }
-        for delivery_month in available_delivery_months(asset, model, as_of)
+        for delivery_month in available_delivery_months(
+            asset,
+            model,
+            as_of,
+            mapping_id=mapping_id,
+        )
     ]
 
 
@@ -704,12 +795,13 @@ def _build_delivery_month_field(
     asset=DEFAULT_ASSET,
     delivery_shape="MONTH",
     as_of=None,
+    mapping_id=None,
 ):
     as_of = parse_date(as_of, date.today())
     is_governed_month = (
         str(delivery_shape or "MONTH").strip().upper() == "MONTH"
     )
-    options = _delivery_month_options(asset, model, as_of)
+    options = _delivery_month_options(asset, model, as_of, mapping_id)
     resolved_value = _resolved_delivery_month(value, options)
     return _build_pricer_field(
         "Delivery",
@@ -1132,6 +1224,47 @@ def _context_id(model, param, is_date=False, structure_id=DEFAULT_STRUCTURE_ID):
     }
 
 
+def _migrated_kirk_context_values(values, legacy_asset=None):
+    migrated = copy.deepcopy(values) if isinstance(values, dict) else {}
+    if migrated.get("asset_1_forward") is None and migrated.get("asset_1") is not None:
+        migrated["asset_1_forward"] = migrated["asset_1"]
+    if migrated.get("asset_2_forward") is None and migrated.get("asset_2") is not None:
+        migrated["asset_2_forward"] = migrated["asset_2"]
+    if not migrated.get("asset_1_code") and legacy_asset in SUPPORTED_ASSETS:
+        migrated["asset_1_code"] = legacy_asset
+    common_reference_expiry = migrated.get("contract_expiration_date")
+    if not migrated.get("asset_1_reference_expiry") and common_reference_expiry:
+        migrated["asset_1_reference_expiry"] = common_reference_expiry
+    if not migrated.get("asset_2_reference_expiry") and common_reference_expiry:
+        migrated["asset_2_reference_expiry"] = common_reference_expiry
+    if not migrated.get("contractual_expiry") and migrated.get("expiration_date"):
+        migrated["contractual_expiry"] = migrated["expiration_date"]
+    migrated.pop("asset_1", None)
+    migrated.pop("asset_2", None)
+    return migrated
+
+
+def _surface_proxy_note(
+    mapping_id,
+    *,
+    asset=None,
+    model=None,
+    show_jkm_vanilla_surface_note=False,
+):
+    base_class = "pricer-surface-proxy-note"
+    if mapping_id == "ICE-JKM-JKZ" or (
+        show_jkm_vanilla_surface_note
+        and asset == "JKM"
+        and model == "black76"
+        and mapping_id is None
+    ):
+        return (
+            "JKM APO surface, expiry-adjusted to JKZ.",
+            f"{base_class} pricer-jkm-vanilla-surface-note",
+        )
+    return "", base_class
+
+
 def _build_context_form(
     model,
     structure_id=DEFAULT_STRUCTURE_ID,
@@ -1139,11 +1272,18 @@ def _build_context_form(
     *,
     include_delivery_shape=True,
     asset=DEFAULT_ASSET,
+    show_jkm_vanilla_surface_note=False,
+    mapping_id=None,
 ):
     defaults = default_context(model, date.today())
+    mapping = exchange_option_mapping(mapping_id)
+    if model == "kirk":
+        values = _migrated_kirk_context_values(values)
     if isinstance(values, dict):
         defaults.update(values)
-    if not isinstance(values, dict) or values.get("premium_convention") in (
+    if mapping is not None:
+        defaults["premium_convention"] = mapping.premium_convention
+    elif not isinstance(values, dict) or values.get("premium_convention") in (
         None,
         "",
         "product_default",
@@ -1151,8 +1291,17 @@ def _build_context_form(
         defaults["premium_convention"] = default_premium_convention(asset, model)
     governed_delivery_month = None
     governed_jkm_apo = False
-    if str(defaults.get("delivery_shape") or "MONTH").strip().upper() == "MONTH":
-        delivery_options = _delivery_month_options(asset, model, date.today())
+    if (
+        model != "kirk"
+        and str(defaults.get("delivery_shape") or "MONTH").strip().upper()
+        == "MONTH"
+    ):
+        delivery_options = _delivery_month_options(
+            asset,
+            model,
+            date.today(),
+            mapping_id,
+        )
         requested_delivery_month = defaults.get("delivery_month")
         governed_delivery_month = _resolved_delivery_month(
             requested_delivery_month,
@@ -1166,6 +1315,7 @@ def _build_context_form(
                 governed_delivery_month,
                 date.today(),
                 defaults.get("forward", 1.0),
+                mapping_id=mapping_id,
             )
             defaults["contract_expiration_date"] = component[
                 "contract_expiration_date"
@@ -1180,14 +1330,26 @@ def _build_context_form(
                 defaults["averaging_start_date"] = component[
                     "averaging_start_date"
                 ]
-            if governed_jkm_apo or selection_changed:
+            if governed_jkm_apo or selection_changed or mapping is not None:
                 defaults["expiration_date"] = component[
                     "option_expiration_date"
                 ]
     is_futures_style = defaults.get("premium_convention") == "futures_style"
     persistence_prefix = f"pricer-{structure_id}-{model}"
+    surface_proxy_note, surface_proxy_note_class = _surface_proxy_note(
+        mapping_id,
+        asset=asset,
+        model=model,
+        show_jkm_vanilla_surface_note=show_jkm_vanilla_surface_note,
+    )
+    surface_proxy_note_component = html.Span(
+        surface_proxy_note,
+        id=_instance_id("pricer-surface-proxy-note", structure_id),
+        className=surface_proxy_note_class,
+        role="note",
+    )
     fields = []
-    if model == "black76":
+    if model in {"black76", "american_futures"}:
         if include_delivery_shape:
             fields.append(
                 _build_delivery_shape_field(
@@ -1232,6 +1394,7 @@ def _build_context_form(
                     ),
                     class_name="pricer-number-field pricer-forward-field",
                 ),
+                surface_proxy_note_component,
                 _build_pricer_field(
                     "Option exp",
                     _build_pricer_date_picker(
@@ -1239,6 +1402,7 @@ def _build_context_form(
                         defaults["expiration_date"],
                         allow_past=True,
                         persistence_key=f"{persistence_prefix}-expiration",
+                        disabled=bool(mapping_id and governed_delivery_month),
                     ),
                     class_name="pricer-date-field",
                     hint="Used for Month only; strips derive each monthly expiry.",
@@ -1259,7 +1423,7 @@ def _build_context_form(
                         defaults["contract_expiration_date"],
                         allow_past=True,
                         persistence_key=f"{persistence_prefix}-contract-expiration",
-                        disabled=bool(governed_delivery_month),
+                        disabled=bool(mapping_id and governed_delivery_month),
                     ),
                     class_name="pricer-date-field",
                     hint="Used for Month only.",
@@ -1341,7 +1505,7 @@ def _build_context_form(
                         defaults["averaging_start_date"],
                         allow_past=True,
                         persistence_key=f"{persistence_prefix}-averaging-start",
-                        disabled=governed_jkm_apo,
+                        disabled=bool(mapping_id and governed_jkm_apo),
                     ),
                     class_name="pricer-date-field",
                     hint="Used for Month only; strips derive each monthly start.",
@@ -1357,7 +1521,7 @@ def _build_context_form(
                         defaults["expiration_date"],
                         allow_past=True,
                         persistence_key=f"{persistence_prefix}-expiration",
-                        disabled=governed_jkm_apo,
+                        disabled=bool(mapping_id and governed_jkm_apo),
                     ),
                     class_name="pricer-date-field",
                     hint="Used for Month only; strips derive each monthly expiry.",
@@ -1378,7 +1542,7 @@ def _build_context_form(
                         defaults["contract_expiration_date"],
                         allow_past=True,
                         persistence_key=f"{persistence_prefix}-contract-expiration",
-                        disabled=bool(governed_delivery_month),
+                        disabled=bool(mapping_id and governed_delivery_month),
                     ),
                     class_name="pricer-date-field",
                     hint="Used for Month only.",
@@ -1408,6 +1572,7 @@ def _build_context_form(
                 ),
             ]
         )
+        fields.append(surface_proxy_note_component)
     elif model == "kirk":
         fields.extend(
             [
@@ -1417,48 +1582,81 @@ def _build_context_form(
                     style={"display": "none"},
                 ),
                 _build_pricer_field(
-                    "Asset 1",
+                    "Asset 1 forward",
                     _build_pricer_number_input(
-                        _context_id(model, "asset_1", structure_id=structure_id),
-                        defaults["asset_1"],
+                        _context_id(
+                            model,
+                            "asset_1_forward",
+                            structure_id=structure_id,
+                        ),
+                        defaults["asset_1_forward"],
                         minimum=0.01,
-                        persistence_key=f"{persistence_prefix}-asset-1",
+                        persistence_key=f"{persistence_prefix}-asset-1-forward-v1",
                     ),
                     class_name="pricer-number-field",
                 ),
                 _build_pricer_field(
-                    "Asset 2",
+                    "Asset 2 forward",
                     _build_pricer_number_input(
-                        _context_id(model, "asset_2", structure_id=structure_id),
-                        defaults["asset_2"],
+                        _context_id(
+                            model,
+                            "asset_2_forward",
+                            structure_id=structure_id,
+                        ),
+                        defaults["asset_2_forward"],
                         minimum=0.01,
-                        persistence_key=f"{persistence_prefix}-asset-2",
+                        persistence_key=f"{persistence_prefix}-asset-2-forward-v1",
                     ),
                     class_name="pricer-number-field",
                 ),
                 _build_pricer_field(
-                    "Option exp",
+                    "Asset 1 vol reference exp",
                     _build_pricer_date_picker(
-                        _context_id(model, "expiration_date", True, structure_id),
-                        defaults["expiration_date"],
+                        _context_id(
+                            model,
+                            "asset_1_reference_expiry",
+                            True,
+                            structure_id,
+                        ),
+                        defaults["asset_1_reference_expiry"],
                         allow_past=True,
-                        persistence_key=f"{persistence_prefix}-expiration",
+                        persistence_key=(
+                            f"{persistence_prefix}-asset-1-reference-expiry-v1"
+                        ),
                     ),
                     class_name="pricer-date-field",
                 ),
                 _build_pricer_field(
-                    "Exchange exp",
+                    "Asset 2 vol reference exp",
                     _build_pricer_date_picker(
                         _context_id(
                             model,
-                            "contract_expiration_date",
+                            "asset_2_reference_expiry",
                             True,
                             structure_id,
                         ),
-                        defaults["contract_expiration_date"],
+                        defaults["asset_2_reference_expiry"],
                         allow_past=True,
-                        persistence_key=f"{persistence_prefix}-contract-expiration",
-                        disabled=bool(governed_delivery_month),
+                        persistence_key=(
+                            f"{persistence_prefix}-asset-2-reference-expiry-v1"
+                        ),
+                    ),
+                    class_name="pricer-date-field",
+                ),
+                _build_pricer_field(
+                    "Contractual option expiry",
+                    _build_pricer_date_picker(
+                        _context_id(
+                            model,
+                            "contractual_expiry",
+                            True,
+                            structure_id,
+                        ),
+                        defaults["contractual_expiry"],
+                        allow_past=True,
+                        persistence_key=(
+                            f"{persistence_prefix}-contractual-expiry-v1"
+                        ),
                     ),
                     class_name="pricer-date-field",
                 ),
@@ -1483,6 +1681,7 @@ def _build_context_form(
                 ),
             ]
         )
+        fields.append(surface_proxy_note_component)
     return html.Div(fields, className="pricer-context-grid")
 
 
@@ -1853,7 +2052,7 @@ def _unified_result_columns(model, *, use_published_surface=False):
         "corr_sensitivity": 88,
         "vega_equiv": 92,
     }
-    if model in {"black76", "asian76"} and use_published_surface:
+    if model in SINGLE_ASSET_MODELS and use_published_surface:
         columns.extend(
             [
                 _published_pricer_volatility_columns(),
@@ -1861,7 +2060,7 @@ def _unified_result_columns(model, *, use_published_surface=False):
                 _published_pricer_pricing_volatility_columns(),
             ]
         )
-    elif model in {"black76", "asian76"}:
+    elif model in SINGLE_ASSET_MODELS:
         columns.append(
             {
                 "headerName": "Volatility",
@@ -1894,7 +2093,7 @@ def _unified_result_columns(model, *, use_published_surface=False):
             }
         )
     greek_fields = GREEK_FIELDS[model]
-    if use_published_surface and model in {"black76", "asian76"}:
+    if use_published_surface and model in SINGLE_ASSET_MODELS:
         columns.extend(
             [
                 {
@@ -2284,7 +2483,7 @@ def _leg_column_defs(
             },
         ]
     )
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
         if not use_published_surface:
             columns.extend(
                 [
@@ -2349,7 +2548,7 @@ def _leg_column_defs(
         use_published_surface=use_published_surface,
     )
     output.extend(result_columns[:1])
-    if model in {"black76", "asian76"} and not use_published_surface:
+    if model in SINGLE_ASSET_MODELS and not use_published_surface:
         output.append(_published_surface_columns())
     output.extend(result_columns[1:])
     if use_published_surface:
@@ -2365,7 +2564,7 @@ def _quote_ready_rows(model, rows, *, signed_lots=None):
         if not isinstance(raw_row, dict):
             continue
         row = dict(raw_row)
-        if model in {"black76", "asian76"}:
+        if model in SINGLE_ASSET_MODELS:
             if "quote_basis" not in row:
                 row["quote_basis"] = "VOL"
                 row["quote_value"] = row.get("volatility")
@@ -2389,7 +2588,7 @@ def _quote_ready_rows(model, rows, *, signed_lots=None):
 
 def _rows_with_volatility_adjustments(model, rows, *, signed_lots=None):
     normalized = _quote_ready_rows(model, rows, signed_lots=signed_lots)
-    if model not in {"black76", "asian76"}:
+    if model not in SINGLE_ASSET_MODELS:
         return normalized
     for row in normalized:
         for field in VOLATILITY_ADJUSTMENT_FIELDS:
@@ -2613,7 +2812,7 @@ def _combined_result_columns(snapshot):
             sign_coloring=False,
         ),
     ]
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
         columns.extend(
             [
                 {
@@ -2656,6 +2855,18 @@ def _combined_result_columns(snapshot):
                     "raw_volatility_asset_2",
                     "Asset 2 vol",
                     min_width=86,
+                    sign_coloring=False,
+                ),
+                _result_numeric_column(
+                    "volatility_asset_1_used",
+                    "Asset 1 pricing vol",
+                    min_width=104,
+                    sign_coloring=False,
+                ),
+                _result_numeric_column(
+                    "volatility_asset_2_used",
+                    "Asset 2 pricing vol",
+                    min_width=104,
                     sign_coloring=False,
                 ),
             ]
@@ -2738,7 +2949,7 @@ def _combined_result_rows(snapshot):
             "_vega_tooltip": vega_tooltip,
             "_rho_tooltip": "1 rate point",
         }
-        if snapshot["model"] in {"black76", "asian76"}:
+        if snapshot["model"] in SINGLE_ASSET_MODELS:
             row["quote_basis"] = leg["quote_basis"].title()
             row["entered_premium"] = leg["entered_premium"]
             row["raw_volatility"] = leg["raw_volatility"]
@@ -2753,6 +2964,8 @@ def _combined_result_rows(snapshot):
         else:
             row["raw_volatility_asset_1"] = leg["raw_volatility_asset_1"]
             row["raw_volatility_asset_2"] = leg["raw_volatility_asset_2"]
+            row["volatility_asset_1_used"] = leg["volatility_asset_1_used"]
+            row["volatility_asset_2_used"] = leg["volatility_asset_2_used"]
         rows.append(row)
     total = {
         "leg_id": "__total__",
@@ -2993,7 +3206,15 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
 def _build_pricing_model_field(
     structure_id=DEFAULT_STRUCTURE_ID,
     value="black76",
+    *,
+    workflow="legacy",
 ):
+    exchange_workflow = workflow == "exchange"
+    model_options = (
+        [{"label": MODEL_LABELS[value], "value": value}]
+        if exchange_workflow
+        else option_types
+    )
     return _build_pricer_field(
         html.Span(
             [
@@ -3006,9 +3227,10 @@ def _build_pricing_model_field(
         ),
         dcc.Dropdown(
             id=_instance_id("pricer-option-type", structure_id),
-            options=option_types,
+            options=model_options,
             value=value,
             clearable=False,
+            disabled=exchange_workflow,
             persistence=_instance_persistence(structure_id, "model"),
             persistence_type="session",
             className="pricer-filter-dropdown pricer-option-type-dropdown",
@@ -3028,6 +3250,8 @@ def _build_pricing_model_field(
 def _build_asset_field(
     structure_id=DEFAULT_STRUCTURE_ID,
     value=DEFAULT_ASSET,
+    *,
+    style=None,
 ):
     return _build_pricer_field(
         "Asset",
@@ -3041,19 +3265,45 @@ def _build_asset_field(
             className="pricer-filter-dropdown pricer-asset-dropdown",
         ),
         class_name="pricer-asset-field",
-        hint=(
-            "Selects the governed variance calendar. Kirk applies this one "
-            "calendar to both volatility inputs."
+        field_id=_instance_id("pricer-asset-field", structure_id),
+        style=style,
+        hint="Selects the governed variance calendar for this asset.",
+    )
+
+
+def _build_mapping_id_field(
+    structure_id=DEFAULT_STRUCTURE_ID,
+    value=None,
+    *,
+    style=None,
+):
+    return _build_pricer_field(
+        "Mapping ID",
+        dcc.Dropdown(
+            id=_instance_id("pricer-mapping-id", structure_id),
+            options=exchange_mapping_options(),
+            value=value,
+            clearable=False,
+            persistence=_instance_persistence(structure_id, "mapping-id-v2"),
+            persistence_type="session",
+            className="pricer-filter-dropdown pricer-mapping-id-dropdown",
         ),
+        class_name="pricer-mapping-id-field",
+        field_id=_instance_id("pricer-mapping-id-field", structure_id),
+        style=style,
+        hint="Canonical exchange-option identifier from the Product Registry.",
     )
 
 
 def _build_price_unit_field(
     structure_id=DEFAULT_STRUCTURE_ID,
     asset=DEFAULT_ASSET,
+    *,
+    mapping_id=None,
+    style=None,
 ):
     try:
-        spec = asset_price_spec(asset)
+        spec = asset_price_spec(asset, mapping_id)
         value = spec["price_unit_label"]
         description = spec["description"]
     except StructureValidationError:
@@ -3070,9 +3320,84 @@ def _build_price_unit_field(
                 **{"aria-live": "polite"},
             ),
         ],
+        id=_instance_id("pricer-price-unit-field", structure_id),
         className="pricer-field pricer-price-unit-field",
         title="Selected asset price currency and unit.",
+        style=style,
     )
+
+
+def _build_kirk_asset_identity_fields(
+    structure_id,
+    values,
+):
+    defaults = default_context("kirk", date.today())
+    if isinstance(values, dict):
+        defaults.update(values)
+    fields = []
+    for asset_number in (1, 2):
+        code_key = f"asset_{asset_number}_code"
+        selected_asset = defaults.get(code_key)
+        try:
+            if selected_asset not in SUPPORTED_ASSETS:
+                raise StructureValidationError("Asset selection is required.")
+            spec = asset_price_spec(selected_asset)
+            unit_value = spec["price_unit_label"]
+            unit_description = spec["description"]
+        except StructureValidationError:
+            unit_value = "—"
+            unit_description = "Select an asset to show its price unit."
+        fields.extend(
+            [
+                _build_pricer_field(
+                    f"Asset {asset_number}",
+                    dcc.Dropdown(
+                        id=_context_id(
+                            "kirk",
+                            code_key,
+                            structure_id=structure_id,
+                        ),
+                        options=asset_options,
+                        value=selected_asset,
+                        clearable=True,
+                        placeholder="Select",
+                        persistence=_instance_persistence(
+                            structure_id,
+                            f"kirk-{code_key}-v1",
+                        ),
+                        persistence_type="session",
+                        className="pricer-filter-dropdown pricer-asset-dropdown",
+                    ),
+                    class_name="pricer-asset-field pricer-kirk-asset-field",
+                    hint=(
+                        f"Select Asset {asset_number} explicitly; its governed "
+                        "variance calendar is used only for that asset's volatility."
+                    ),
+                ),
+                html.Div(
+                    [
+                        html.Span("Price unit", className="pricer-field-label"),
+                        html.Div(
+                            unit_value,
+                            id={
+                                "type": "pricer-kirk-price-unit",
+                                "structure_id": structure_id,
+                                "asset_number": asset_number,
+                            },
+                            className="pricer-price-unit-value",
+                            title=unit_description,
+                            **{"aria-live": "polite"},
+                        ),
+                    ],
+                    className=(
+                        "pricer-field pricer-price-unit-field "
+                        "pricer-kirk-price-unit-field"
+                    ),
+                    title=f"Asset {asset_number} price currency and unit.",
+                ),
+            ]
+        )
+    return fields
 
 
 def _build_premium_convention_field(
@@ -3114,27 +3439,40 @@ def _build_structure_header_context(
     structure_id=DEFAULT_STRUCTURE_ID,
     values=None,
     asset=DEFAULT_ASSET,
+    mapping_id=None,
 ):
+    if model == "kirk":
+        values = _migrated_kirk_context_values(values)
     defaults = default_context(model, date.today())
     defaults["premium_convention"] = default_premium_convention(asset, model)
     if isinstance(values, dict):
         defaults.update(values)
-    if defaults.get("premium_convention") in (None, "", "product_default"):
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is not None:
+        defaults["premium_convention"] = mapping.premium_convention
+    elif defaults.get("premium_convention") in (None, "", "product_default"):
         defaults["premium_convention"] = default_premium_convention(asset, model)
-    fields = [
+    fields = []
+    if model == "kirk":
+        fields.extend(_build_kirk_asset_identity_fields(structure_id, defaults))
+    fields.append(
         _build_premium_convention_field(
             model,
             structure_id,
             defaults["premium_convention"],
             asset,
-        ),
+        )
+    )
+    if model == "kirk":
+        return fields
+    fields.append(
         _build_delivery_shape_field(
             model,
             structure_id,
             defaults["delivery_shape"],
             asset,
-        ),
-    ]
+        )
+    )
     fields.append(
         _build_delivery_month_field(
             model,
@@ -3142,6 +3480,7 @@ def _build_structure_header_context(
             defaults.get("delivery_month"),
             asset=asset,
             delivery_shape=defaults["delivery_shape"],
+            mapping_id=mapping_id,
         )
     )
     return fields
@@ -3153,6 +3492,8 @@ def _resolved_contract_size_default(
     context_values=None,
     valuation_date_value=None,
 ):
+    if model == "kirk":
+        return 1.0
     valuation_date = parse_date(valuation_date_value, date.today())
     resolved_context = default_context(model, valuation_date)
     if isinstance(context_values, dict):
@@ -3165,9 +3506,32 @@ def _resolved_contract_size_default(
     )
 
 
+def _resolved_mapping_contract_size_default(
+    mapping,
+    context_values=None,
+    valuation_date_value=None,
+):
+    if mapping is None:
+        raise StructureValidationError("Exchange mapping is required.")
+    if mapping.sizing_mode == "fixed":
+        return mapping.contract_size
+    resolved_context = (
+        copy.deepcopy(context_values) if isinstance(context_values, dict) else {}
+    )
+    resolved_context["exchange_mapping_id"] = mapping.mapping_id
+    return _resolved_contract_size_default(
+        mapping.asset,
+        mapping.model,
+        resolved_context,
+        valuation_date_value,
+    )
+
+
 def _contract_size_hint():
     return (
-        "Editable quantity in the denominator unit shown under Price unit. "
+        "For Kirk this is the editable notional and defaults to one unit. "
+        "For single-asset models it is the editable quantity in the denominator "
+        "unit shown under Price unit. "
         "TTF defaults to one ICE lot (1 MW across the exact delivery hours); "
         "JKM to 10,000 MMBtu/month; Brent to 1,000 bbl; Henry Hub to 2,500 "
         "MMBtu; and NBP to 1,000 therm/day across the delivery month. Enter "
@@ -3189,22 +3553,44 @@ def _build_structure_panel(
 ):
     structure_id = structure["structure_id"]
     template = structure.get("template") or {}
-    model = template.get("model")
-    if model not in MODEL_LABELS:
-        model = "black76"
-    asset = template.get("asset", DEFAULT_ASSET)
+    requested_model = template.get("model")
+    if requested_model not in MODEL_LABELS:
+        requested_model = "black76"
+    mapping_id = template.get("mapping_id") if workflow == "exchange" else None
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is not None:
+        mapping_id = mapping.mapping_id
+    if workflow == "exchange" and mapping is None:
+        mapping = exchange_mapping_for_asset_model(
+            template.get("asset"),
+            requested_model,
+        )
+        if mapping is None:
+            mapping = exchange_option_mapping(DEFAULT_EXCHANGE_MAPPING_ID)
+        mapping_id = mapping.mapping_id
+    model = mapping.model if mapping is not None else requested_model
+    template_asset = mapping.asset if mapping is not None else template.get("asset")
+    asset = template_asset if template_asset in SUPPORTED_ASSETS else DEFAULT_ASSET
     valuation_date = (
         parse_date(valuation_date_override, date.today()).isoformat()
         if valuation_date_override is not None
         else template.get("valuation_date", date.today().isoformat())
     )
     context_values = template.get("context")
+    if model == "kirk":
+        context_values = _migrated_kirk_context_values(context_values)
     exchange_contract_size = _resolved_contract_size_default(
         asset,
         model,
         context_values,
         valuation_date,
     )
+    if mapping is not None:
+        exchange_contract_size = _resolved_mapping_contract_size_default(
+            mapping,
+            context_values,
+            valuation_date,
+        )
     contract_multiplier = _coerce_pricer_float(
         template.get("contract_multiplier"),
         exchange_contract_size,
@@ -3246,12 +3632,15 @@ def _build_structure_panel(
         "legs": copy.deepcopy(rows),
         "next_leg_sequence": next_leg_sequence,
     }
+    if mapping_id is not None:
+        draft["mapping_id"] = mapping_id
     supplied_calculation_snapshot = calculation_snapshot
     if not _is_valid_calculation_snapshot(calculation_snapshot) or not (
         _snapshot_matches_template(
             calculation_snapshot,
             {
                 "asset": asset,
+                "mapping_id": mapping_id,
                 "model": model,
                 "contract_multiplier": contract_multiplier,
                 "valuation_date": valuation_date,
@@ -3297,7 +3686,13 @@ def _build_structure_panel(
                 class_name="pricer-date-field pricer-valuation-date-field",
             ),
             _build_pricer_field(
-                "Contract size",
+                html.Span(
+                    "Notional" if model == "kirk" else "Contract size",
+                    id=_instance_id(
+                        "pricer-contract-multiplier-label",
+                        structure_id,
+                    ),
+                ),
                 _build_pricer_number_input(
                     _instance_id("pricer-contract-multiplier", structure_id),
                     contract_multiplier,
@@ -3318,6 +3713,8 @@ def _build_structure_panel(
                     context_values,
                     include_delivery_shape=False,
                     asset=asset,
+                    show_jkm_vanilla_surface_note=workflow == "exchange",
+                    mapping_id=mapping_id,
                 ).children,
                 id=_instance_id("pricer-shared-context", structure_id),
                 className="pricer-shared-context",
@@ -3325,8 +3722,87 @@ def _build_structure_panel(
         ],
         className="pricer-context-with-valuation pricer-market-strip",
     )
+    hide_single_asset = workflow == "exchange" or (
+        workflow == "otc" and model == "kirk"
+    )
+    single_asset_style = {"display": "none"} if hide_single_asset else None
+    mapping_control = (
+        _build_mapping_id_field(structure_id, mapping_id)
+        if workflow == "exchange"
+        else None
+    )
+    asset_control = _build_asset_field(
+        structure_id,
+        asset,
+        style=single_asset_style,
+    )
+    price_unit_control = _build_price_unit_field(
+        structure_id,
+        asset,
+        mapping_id=mapping_id,
+        style=single_asset_style,
+    )
+    model_control = _build_pricing_model_field(
+        structure_id,
+        model,
+        workflow=workflow,
+    )
+    header_context_control = html.Div(
+        _build_structure_header_context(
+            model,
+            structure_id,
+            context_values,
+            asset,
+            mapping_id,
+        ),
+        id=_instance_id(
+            "pricer-header-context",
+            structure_id,
+        ),
+        className="pricer-header-context",
+    )
+    ordered_header_controls = (
+        [
+            model_control,
+            asset_control,
+            price_unit_control,
+            header_context_control,
+            market_strip,
+        ]
+        if workflow == "otc"
+        else (
+            [
+                mapping_control,
+                asset_control,
+                price_unit_control,
+                model_control,
+                header_context_control,
+                market_strip,
+            ]
+            if workflow == "exchange"
+            else [
+                asset_control,
+                price_unit_control,
+                model_control,
+                header_context_control,
+                market_strip,
+            ]
+        )
+    )
     return html.Section(
         [
+            *(
+                []
+                if workflow == "exchange"
+                else [
+                    dcc.Input(
+                        id=_instance_id("pricer-mapping-id", structure_id),
+                        value=None,
+                        type="hidden",
+                        style={"display": "none"},
+                    )
+                ]
+            ),
             dcc.Store(
                 id=_instance_id("pricer-structure-workflow", structure_id),
                 data=workflow,
@@ -3334,7 +3810,15 @@ def _build_structure_panel(
             ),
             dcc.Store(
                 id=_instance_id("pricer-contract-size-default", structure_id),
-                data={"asset": asset, "value": exchange_contract_size},
+                data={
+                    "asset": asset,
+                    "value": exchange_contract_size,
+                    **(
+                        {"mapping_id": mapping_id}
+                        if mapping_id is not None
+                        else {}
+                    ),
+                },
                 storage_type="memory",
             ),
             dcc.Store(
@@ -3379,25 +3863,7 @@ def _build_structure_panel(
                 structure["label"],
                 actions=[
                     html.Div(
-                        [
-                            _build_asset_field(structure_id, asset),
-                            _build_price_unit_field(structure_id, asset),
-                            _build_pricing_model_field(structure_id, model),
-                            html.Div(
-                                _build_structure_header_context(
-                                    model,
-                                    structure_id,
-                                    context_values,
-                                    asset,
-                                ),
-                                id=_instance_id(
-                                    "pricer-header-context",
-                                    structure_id,
-                                ),
-                                className="pricer-header-context",
-                            ),
-                            market_strip,
-                        ],
+                        ordered_header_controls,
                         className="pricer-structure-header-controls",
                     ),
                     html.Div(
@@ -3839,6 +4305,8 @@ def _capture_structure_template(
     param_ids,
     date_values,
     date_ids,
+    mapping_values=None,
+    mapping_ids=None,
 ):
     model = _state_for_structure(
         model_values, model_ids, structure_id, "black76"
@@ -3872,7 +4340,7 @@ def _capture_structure_template(
     )
     draft = _state_for_structure(draft_values, draft_ids, structure_id, {}) or {}
     rows = _state_for_structure(row_values, row_ids, structure_id, []) or []
-    return {
+    template = {
         "asset": _state_for_structure(
             asset_values, asset_ids, structure_id, DEFAULT_ASSET
         ),
@@ -3890,6 +4358,15 @@ def _capture_structure_template(
         "legs": copy.deepcopy(rows),
         "next_leg_sequence": draft.get("next_leg_sequence", len(rows) + 1),
     }
+    mapping_id = _state_for_structure(
+        mapping_values,
+        mapping_ids,
+        structure_id,
+        None,
+    )
+    if mapping_id is not None:
+        template["mapping_id"] = mapping_id
+    return template
 
 
 @callback(
@@ -4189,6 +4666,7 @@ def sync_pricer_global_valuation_date(
 @callback(
     Output("pricer-draft-autosave-trigger", "data"),
     [
+        Input({"type": "pricer-mapping-id", "structure_id": ALL}, "value"),
         Input({"type": "pricer-asset", "structure_id": ALL}, "value"),
         Input({"type": "pricer-option-type", "structure_id": ALL}, "value"),
         Input(
@@ -4237,16 +4715,72 @@ def signal_pricer_draft_autosave(*values_and_current_tick):
         },
         "value",
     ),
-    Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
-    State({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+    [
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+    ],
+    [
+        State({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        State(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
+    ],
     prevent_initial_call=True,
 )
-def select_asset_default_premium_convention(asset, model):
+def _select_asset_default_premium_convention_dash_callback(
+    asset,
+    mapping_id,
+    model,
+    workflow,
+):
+    return select_asset_default_premium_convention(
+        asset,
+        model,
+        mapping_id=mapping_id,
+        workflow=workflow,
+    )
+
+
+def select_asset_default_premium_convention(
+    asset,
+    model,
+    *,
+    mapping_id=None,
+    workflow="legacy",
+):
     try:
-        selected = default_premium_convention(asset, model)
+        mapping = (
+            exchange_option_mapping(mapping_id)
+            if workflow == "exchange"
+            else None
+        )
+        selected = (
+            mapping.premium_convention
+            if mapping is not None
+            else default_premium_convention(asset, model)
+        )
     except StructureValidationError:
         return no_update
     return [selected]
+
+
+@callback(
+    [
+        Output(
+            {"type": "pricer-surface-proxy-note", "structure_id": MATCH},
+            "children",
+        ),
+        Output(
+            {"type": "pricer-surface-proxy-note", "structure_id": MATCH},
+            "className",
+        ),
+    ],
+    Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+)
+def sync_exchange_surface_proxy_note(mapping_id):
+    """Keep proxy disclosure in sync when two mappings share asset/model."""
+    return _surface_proxy_note(mapping_id)
 
 
 @callback(
@@ -4260,14 +4794,84 @@ def select_asset_default_premium_convention(asset, model):
             "title",
         ),
     ],
-    Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+    [
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+    ],
 )
-def display_asset_price_unit(asset):
+def display_asset_price_unit(asset, mapping_id=None):
     try:
-        spec = asset_price_spec(asset)
+        spec = asset_price_spec(asset, mapping_id)
         return spec["price_unit_label"], spec["description"]
     except StructureValidationError:
         return "—", "Price currency and unit are unavailable."
+
+
+@callback(
+    [
+        Output(
+            {
+                "type": "pricer-kirk-price-unit",
+                "structure_id": MATCH,
+                "asset_number": ALL,
+            },
+            "children",
+        ),
+        Output(
+            {
+                "type": "pricer-kirk-price-unit",
+                "structure_id": MATCH,
+                "asset_number": ALL,
+            },
+            "title",
+        ),
+    ],
+    Input(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": "kirk",
+            "param": ALL,
+        },
+        "value",
+    ),
+    [
+        State(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": "kirk",
+                "param": ALL,
+            },
+            "id",
+        ),
+        State(
+            {
+                "type": "pricer-kirk-price-unit",
+                "structure_id": MATCH,
+                "asset_number": ALL,
+            },
+            "id",
+        ),
+    ],
+)
+def display_kirk_asset_price_units(param_values, param_ids, unit_ids):
+    context = _context_from_states("kirk", param_values, param_ids, [], [])
+    labels = []
+    descriptions = []
+    for unit_id in unit_ids or []:
+        asset_number = unit_id.get("asset_number") if isinstance(unit_id, dict) else None
+        asset = context.get(f"asset_{asset_number}_code")
+        try:
+            if asset not in SUPPORTED_ASSETS:
+                raise StructureValidationError("Asset selection is required.")
+            spec = asset_price_spec(asset)
+            labels.append(spec["price_unit_label"])
+            descriptions.append(spec["description"])
+        except StructureValidationError:
+            labels.append("—")
+            descriptions.append("Select an asset to show its price unit.")
+    return labels, descriptions
 
 
 @callback(
@@ -4306,6 +4910,7 @@ def display_asset_price_unit(asset):
             {"type": "pricer-valuation-date", "structure_id": MATCH},
             "date",
         ),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
     ],
     [
         State(
@@ -4334,9 +4939,41 @@ def display_asset_price_unit(asset):
             {"type": "pricer-contract-size-default", "structure_id": MATCH},
             "data",
         ),
+        State(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
     ],
     prevent_initial_call=True,
 )
+def _sync_exchange_contract_size_dash_callback(
+    asset,
+    model,
+    param_values,
+    date_values,
+    valuation_date_value,
+    mapping_id,
+    param_ids,
+    date_ids,
+    current_contract_size,
+    previous_default_state,
+    workflow,
+):
+    return sync_exchange_contract_size(
+        asset,
+        model,
+        param_values,
+        date_values,
+        valuation_date_value,
+        param_ids,
+        date_ids,
+        current_contract_size,
+        previous_default_state,
+        mapping_id=mapping_id,
+        workflow=workflow,
+    )
+
+
 def sync_exchange_contract_size(
     asset,
     model,
@@ -4347,6 +4984,9 @@ def sync_exchange_contract_size(
     date_ids,
     current_contract_size,
     previous_default_state,
+    *,
+    mapping_id=None,
+    workflow="legacy",
 ):
     if model not in MODEL_LABELS:
         return no_update, no_update
@@ -4357,13 +4997,25 @@ def sync_exchange_contract_size(
         date_values,
         date_ids,
     )
+    mapping = (
+        exchange_option_mapping(mapping_id) if workflow == "exchange" else None
+    )
+    if mapping is not None:
+        mapping_id = mapping.mapping_id
     try:
-        exchange_default = _resolved_contract_size_default(
-            asset,
-            model,
-            context,
-            valuation_date_value,
-        )
+        if mapping is not None:
+            exchange_default = _resolved_mapping_contract_size_default(
+                mapping,
+                context,
+                valuation_date_value,
+            )
+        else:
+            exchange_default = _resolved_contract_size_default(
+                asset,
+                model,
+                context,
+                valuation_date_value,
+            )
     except StructureValidationError:
         return no_update, no_update
 
@@ -4377,7 +5029,7 @@ def sync_exchange_contract_size(
     triggered = _get_pricer_triggered_id()
     asset_triggered = (
         isinstance(triggered, dict)
-        and triggered.get("type") == "pricer-asset"
+        and triggered.get("type") in {"pricer-asset", "pricer-mapping-id"}
     )
     uses_previous_default = (
         current_size is not None
@@ -4392,6 +5044,7 @@ def sync_exchange_contract_size(
     should_apply_default = (
         asset_triggered
         or previous_default_state.get("asset") != asset
+        or previous_default_state.get("mapping_id") != mapping_id
         or current_size is None
         or previous_default is None
         or uses_previous_default
@@ -4410,7 +5063,21 @@ def sync_exchange_contract_size(
         )
         else no_update
     )
-    return value_update, {"asset": asset, "value": exchange_default}
+    default_state = {"asset": asset, "value": exchange_default}
+    if mapping_id is not None:
+        default_state["mapping_id"] = mapping_id
+    return value_update, default_state
+
+
+@callback(
+    Output(
+        {"type": "pricer-contract-multiplier-label", "structure_id": MATCH},
+        "children",
+    ),
+    Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+)
+def display_contract_multiplier_label(model):
+    return "Notional" if model == "kirk" else "Contract size"
 
 
 @callback(
@@ -4434,18 +5101,39 @@ def sync_exchange_contract_size(
             "disabled",
         ),
     ],
-    Input(
-        {
-            "type": "pricer-context-param",
-            "structure_id": MATCH,
-            "model": MATCH,
-            "param": "premium_convention",
-        },
-        "value",
+    [
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": MATCH,
+                "param": "premium_convention",
+            },
+            "value",
+        ),
+        Input(
+            {"type": "pricer-mapping-id", "structure_id": MATCH},
+            "value",
+        ),
+    ],
+    State(
+        {"type": "pricer-structure-workflow", "structure_id": MATCH},
+        "data",
     ),
 )
-def sync_risk_free_rate_control(premium_convention):
+def sync_risk_free_rate_control(
+    premium_convention,
+    mapping_id=None,
+    workflow="legacy",
+):
     """Keep the visible rate consistent with the selected premium convention."""
+    mapping = (
+        exchange_option_mapping(mapping_id)
+        if workflow == "exchange"
+        else None
+    )
+    if mapping is not None:
+        premium_convention = mapping.premium_convention
     if premium_convention == "futures_style":
         return 0.0, True
     if premium_convention == "upfront":
@@ -4455,14 +5143,77 @@ def sync_risk_free_rate_control(premium_convention):
 
 @callback(
     Output(
+        {"type": "pricer-rate-field", "structure_id": MATCH},
+        "style",
+    ),
+    Input(
+        {
+            "type": "pricer-context-param",
+            "structure_id": MATCH,
+            "model": ALL,
+            "param": "premium_convention",
+        },
+        "value",
+    ),
+    State(
+        {"type": "pricer-structure-workflow", "structure_id": MATCH},
+        "data",
+    ),
+)
+def sync_exchange_rate_visibility(premium_convention, workflow):
+    """Expose Rate only for exchange mappings whose premium is upfront."""
+    if isinstance(premium_convention, list):
+        premium_convention = (
+            premium_convention[0] if premium_convention else None
+        )
+    if workflow != "exchange":
+        return {}
+    return {"display": "flex" if premium_convention == "upfront" else "none"}
+
+
+@callback(
+    Output(
+        {"type": "pricer-asset", "structure_id": MATCH},
+        "value",
+    ),
+    Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+    State(
+        {"type": "pricer-structure-workflow", "structure_id": MATCH},
+        "data",
+    ),
+    prevent_initial_call=True,
+)
+def select_exchange_mapping_asset(mapping_id, workflow=None):
+    """Keep the hidden asset identity governed by the selected Mapping ID."""
+    if workflow != "exchange":
+        return no_update
+    mapping = exchange_option_mapping(mapping_id)
+    return mapping.asset if mapping is not None else no_update
+
+
+@callback(
+    Output(
         {"type": "pricer-option-type", "structure_id": MATCH},
         "value",
     ),
-    Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+    [
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+    ],
+    [
+        State(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
+    ],
     prevent_initial_call=True,
 )
-def select_asset_default_model(asset):
-    """JKM opens on its primary exchange APO; Black-76 remains an explicit choice."""
+def select_asset_default_model(asset, mapping_id=None, workflow=None):
+    """Keep the legacy JKM default while exchange mappings remain authoritative."""
+    if workflow == "exchange":
+        mapping = exchange_option_mapping(mapping_id)
+        if mapping is not None:
+            return mapping.model
     if asset != "JKM":
         return no_update
     try:
@@ -4523,6 +5274,11 @@ def update_parameters(option_type, structure_id=DEFAULT_STRUCTURE_ID):
         State({"type": "pricer-option-type", "structure_id": MATCH}, "id"),
         State({"type": "pricer-asset", "structure_id": MATCH}, "value"),
         State("url", "pathname"),
+        State(
+            {"type": "pricer-structure-workflow", "structure_id": MATCH},
+            "data",
+        ),
+        State({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
     ],
 )
 def manage_structure_legs(
@@ -4537,7 +5293,11 @@ def manage_structure_legs(
     model_component_id=None,
     asset=DEFAULT_ASSET,
     pathname=None,
+    workflow="legacy",
+    mapping_id=None,
 ):
+    if model not in MODEL_LABELS:
+        return (no_update,) * 8
     triggered = _get_pricer_triggered_id()
     triggered_is_pattern = isinstance(triggered, dict)
     triggered_type = triggered.get("type") if isinstance(triggered, dict) else triggered
@@ -4610,18 +5370,35 @@ def manage_structure_legs(
                 )
             ]
             next_sequence = 2
+        saved_context = (
+            copy.deepcopy(draft.get("context"))
+            if draft.get("model") == model
+            and isinstance(draft.get("context"), dict)
+            else None
+        )
+        if model == "kirk" and draft.get("model") == model:
+            saved_context = _migrated_kirk_context_values(saved_context)
+        mapping = (
+            exchange_option_mapping(mapping_id)
+            if workflow == "exchange"
+            else None
+        )
+        if mapping is not None:
+            saved_context = (
+                copy.deepcopy(saved_context)
+                if isinstance(saved_context, dict)
+                else {}
+            )
+            saved_context["premium_convention"] = mapping.premium_convention
         new_draft = {
             "schema_version": 1,
             "model": model,
-            "context": (
-                copy.deepcopy(draft.get("context"))
-                if draft.get("model") == model
-                and isinstance(draft.get("context"), dict)
-                else None
-            ),
+            "context": saved_context,
             "legs": rows,
             "next_leg_sequence": next_sequence,
         }
+        if mapping_id is not None:
+            new_draft["mapping_id"] = mapping_id
         return (
             _build_context_form(
                 model,
@@ -4629,6 +5406,8 @@ def manage_structure_legs(
                 new_draft.get("context"),
                 include_delivery_shape=False,
                 asset=asset,
+                show_jkm_vanilla_surface_note=workflow == "exchange",
+                mapping_id=mapping_id,
             ).children,
             _leg_column_defs(
                 model,
@@ -4648,6 +5427,7 @@ def manage_structure_legs(
                 structure_id,
                 new_draft.get("context"),
                 asset,
+                mapping_id,
             ),
             True,
         )
@@ -4899,6 +5679,10 @@ def toggle_month_only_fields(delivery_shape, field_ids):
             {"type": "pricer-valuation-date", "structure_id": MATCH},
             "date",
         ),
+        Input(
+            {"type": "pricer-mapping-id", "structure_id": MATCH},
+            "value",
+        ),
     ],
     State(
         {
@@ -4915,8 +5699,11 @@ def sync_delivery_month_control(
     model,
     delivery_shape,
     valuation_date_value,
+    mapping_id,
     current_delivery_month,
 ):
+    if model not in MODEL_LABELS or asset not in SUPPORTED_ASSETS:
+        return [no_update], [no_update], [no_update], no_update
     if isinstance(delivery_shape, list):
         delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
     if isinstance(current_delivery_month, list):
@@ -4926,7 +5713,8 @@ def sync_delivery_month_control(
     options = _delivery_month_options(
         asset,
         model,
-        parse_date(valuation_date_value, date.today())
+        parse_date(valuation_date_value, date.today()),
+        mapping_id,
     )
     selected = _resolved_delivery_month(current_delivery_month, options)
     is_month = str(delivery_shape or "MONTH").strip().upper() == "MONTH"
@@ -4955,6 +5743,7 @@ def _governed_delivery_component(
     delivery_shape,
     delivery_month,
     valuation_date_value,
+    mapping_id=None,
 ):
     if isinstance(delivery_shape, list):
         delivery_shape = delivery_shape[0] if delivery_shape else "MONTH"
@@ -4968,6 +5757,7 @@ def _governed_delivery_component(
         model,
         delivery_month,
         parse_date(valuation_date_value, date.today()),
+        mapping_id=mapping_id,
     )
 
 
@@ -4979,6 +5769,7 @@ def _exchange_expiration_should_reset():
         return False
     return triggered.get("type") in {
         "pricer-asset",
+        "pricer-mapping-id",
         "pricer-valuation-date",
     } or triggered.get("param") == "delivery_month"
 
@@ -4991,6 +5782,7 @@ def _sync_governed_month_contract_dates(
     delivery_shape,
     delivery_month,
     valuation_date_value,
+    mapping_id=None,
 ):
     try:
         component = _governed_delivery_component(
@@ -4999,16 +5791,21 @@ def _sync_governed_month_contract_dates(
             delivery_shape,
             delivery_month,
             valuation_date_value,
+            mapping_id,
         )
     except StructureValidationError:
         return (no_update,) * 4 + (True,)
-    if component:
+    if component and mapping_id:
         exchange_expiration = component["contract_expiration_date"]
         exchange_date = parse_date(exchange_expiration)
         expiration = parse_date(expiration_value, exchange_date)
         expiration_update = (
             exchange_expiration
-            if _exchange_expiration_should_reset() or expiration > exchange_date
+            if (
+                mapping_id is not None
+                or _exchange_expiration_should_reset()
+                or expiration > exchange_date
+            )
             else no_update
         )
         return (
@@ -5093,6 +5890,7 @@ def _sync_governed_month_contract_dates(
             "date",
         ),
         Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input(
             {
                 "type": "pricer-context-param",
@@ -5122,6 +5920,7 @@ def sync_black76_contract_expiration_date(
     expiration_value,
     contract_value,
     asset,
+    mapping_id,
     delivery_shape,
     delivery_month,
     valuation_date_value,
@@ -5134,6 +5933,122 @@ def sync_black76_contract_expiration_date(
         delivery_shape,
         delivery_month,
         valuation_date_value,
+        mapping_id,
+    )
+
+
+@callback(
+    [
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "expiration_date",
+            },
+            "date",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "expiration_date",
+            },
+            "max_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "contract_expiration_date",
+            },
+            "date",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "contract_expiration_date",
+            },
+            "min_date_allowed",
+        ),
+        Output(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "contract_expiration_date",
+            },
+            "disabled",
+        ),
+    ],
+    [
+        Input(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "expiration_date",
+            },
+            "date",
+        ),
+        Input(
+            {
+                "type": "pricer-context-date",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "contract_expiration_date",
+            },
+            "date",
+        ),
+        Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": ALL,
+                "param": "delivery_shape",
+            },
+            "value",
+        ),
+        Input(
+            {
+                "type": "pricer-context-param",
+                "structure_id": MATCH,
+                "model": "american_futures",
+                "param": "delivery_month",
+            },
+            "value",
+        ),
+        Input(
+            {"type": "pricer-valuation-date", "structure_id": MATCH},
+            "date",
+        ),
+    ],
+    prevent_initial_call=True,
+)
+def sync_american_futures_contract_expiration_date(
+    expiration_value,
+    contract_value,
+    asset,
+    mapping_id,
+    delivery_shape,
+    delivery_month,
+    valuation_date_value,
+):
+    return _sync_governed_month_contract_dates(
+        "american_futures",
+        expiration_value,
+        contract_value,
+        asset,
+        delivery_shape,
+        delivery_month,
+        valuation_date_value,
+        mapping_id,
     )
 
 
@@ -5259,6 +6174,7 @@ def sync_black76_contract_expiration_date(
             "date",
         ),
         Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input(
             {
                 "type": "pricer-context-param",
@@ -5289,6 +6205,7 @@ def sync_asian76_dates(
     expiration_value,
     contract_value,
     asset,
+    mapping_id,
     delivery_shape,
     delivery_month,
     valuation_date_value,
@@ -5302,10 +6219,11 @@ def sync_asian76_dates(
             delivery_shape,
             delivery_month,
             valuation_date_value,
+            mapping_id,
         )
     except StructureValidationError:
         return (no_update,) * 7 + (False, False, True)
-    if component and asset == "JKM":
+    if component and mapping_id and asset == "JKM":
         averaging_start = component["averaging_start_date"]
         averaging_end = component["averaging_end_date"]
         contract_expiration = component["contract_expiration_date"]
@@ -5321,7 +6239,7 @@ def sync_asian76_dates(
             True,
             True,
         )
-    if component:
+    if component and mapping_id:
         exchange_expiration = component["contract_expiration_date"]
         exchange_date = parse_date(exchange_expiration)
         averaging_start = parse_date(averaging_start_value, exchange_date)
@@ -5559,6 +6477,7 @@ def _surface_reference_input_signature(
         Input("refresh-options-data", "n_clicks"),
         Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-legs-grid", "structure_id": MATCH}, "rowData"),
         Input(
             {
@@ -5608,6 +6527,7 @@ def update_published_surface_reference(
     _refresh_clicks,
     asset,
     model,
+    mapping_id,
     rows,
     param_values,
     date_values,
@@ -5622,6 +6542,8 @@ def update_published_surface_reference(
         date_values,
         date_ids,
     )
+    if mapping_id is not None:
+        context["exchange_mapping_id"] = mapping_id
     normalized_rows = _quote_ready_rows(model, rows)
     payload = build_published_surface_reference(
         asset,
@@ -5708,7 +6630,7 @@ def _published_surface_calculation_rows(
 ):
     """Replace legacy quote fields with governed per-leg contract vols."""
     normalized_rows = _rows_with_volatility_adjustments(model, rows or [])
-    if model not in {"black76", "asian76"}:
+    if model not in SINGLE_ASSET_MODELS:
         return normalized_rows, None
     if (
         not isinstance(surface_reference, dict)
@@ -5731,8 +6653,16 @@ def _published_surface_calculation_rows(
             "Published surface volatility is still refreshing for the current inputs. "
             "Wait for it to load and calculate again."
         )
-    publication_fields = ("publication_id", "publication_cob", "published_at")
-    if any(surface_reference.get(field) in (None, "") for field in publication_fields):
+    source_kind = str(surface_reference.get("source_kind") or "governed")
+    publication_fields = (
+        ("publication_id", "publication_cob", "published_at")
+        if source_kind == "governed"
+        else ("source_revision", "publication_cob", "source_kind", "source")
+    )
+    if any(
+        surface_reference.get(field) in (None, "")
+        for field in publication_fields
+    ):
         raise StructureValidationError(
             "No published surface revision is available for the selected inputs."
         )
@@ -5842,6 +6772,9 @@ def _published_surface_calculation_rows(
                 **adjustment_values,
                 "effective_input_vol": effective_input_volatility,
                 "effective_pricing_vol": effective_pricing_volatility,
+                "surface_expiry_adjustments": copy.deepcopy(
+                    surface_row.get("surface_expiry_adjustments") or []
+                ),
             }
         )
     return resolved_rows, {
@@ -5860,7 +6793,7 @@ def _signature_leg_rows(model, rows):
     )
     model_fields = (
         ("quote_basis", "quote_value")
-        if model in {"black76", "asian76"}
+        if model in SINGLE_ASSET_MODELS
         else ("volatility_asset_1", "volatility_asset_2")
     )
     fields = (*common_fields, *model_fields)
@@ -5883,7 +6816,7 @@ def _input_signature_from_context(
         "premium_convention", default_premium_convention(asset, model)
     )
     is_futures_style = premium_convention == "futures_style"
-    if is_futures_style and model in {"black76", "asian76"}:
+    if is_futures_style and model in SINGLE_ASSET_MODELS:
         normalized_context["rate"] = 0.0
     return {
         "asset": asset,
@@ -5910,6 +6843,7 @@ def _calculation_input_signature(
     date_ids,
     surface_reference=None,
     use_published_surface=False,
+    mapping_id=None,
 ):
     context = _context_from_states(
         model,
@@ -5918,6 +6852,8 @@ def _calculation_input_signature(
         date_values,
         date_ids,
     )
+    if mapping_id is not None:
+        context["exchange_mapping_id"] = mapping_id
     calculation_rows = rows
     surface_signature = None
     if use_published_surface:
@@ -5945,6 +6881,8 @@ def _calculation_input_signature(
     )
     if surface_signature is not None:
         input_signature["published_surface"] = surface_signature
+    if mapping_id is not None:
+        input_signature["mapping_id"] = mapping_id
     return input_signature
 
 
@@ -5957,7 +6895,9 @@ def _template_input_signature(template):
     resolved_context = default_context(model, date.today())
     if isinstance(template.get("context"), dict):
         resolved_context.update(template["context"])
-    return _input_signature_from_context(
+    if template.get("mapping_id") is not None:
+        resolved_context["exchange_mapping_id"] = template["mapping_id"]
+    signature = _input_signature_from_context(
         template.get("asset", DEFAULT_ASSET),
         model,
         template.get("contract_multiplier", 1),
@@ -5965,6 +6905,9 @@ def _template_input_signature(template):
         resolved_context,
         template.get("valuation_date", date.today().isoformat()),
     )
+    if template.get("mapping_id") is not None:
+        signature["mapping_id"] = template["mapping_id"]
+    return signature
 
 
 def _snapshot_matches_template(snapshot, template):
@@ -5991,6 +6934,7 @@ def calculate_structure_callback(
     has_snapshot=None,
     surface_reference=None,
     use_published_surface=False,
+    mapping_id=None,
 ):
     triggered = (
         triggered_override
@@ -6036,6 +6980,8 @@ def calculate_structure_callback(
         date_values,
         date_ids,
     )
+    if mapping_id is not None:
+        context["exchange_mapping_id"] = mapping_id
     calculation_rows = rows or []
     surface_signature = None
     try:
@@ -6068,6 +7014,8 @@ def calculate_structure_callback(
         return None, _build_pricer_message(str(exc), tone="danger")
     if surface_signature is not None:
         input_signature["published_surface"] = surface_signature
+    if mapping_id is not None:
+        input_signature["mapping_id"] = mapping_id
     context = copy.deepcopy(input_signature["context"])
     context["asset"] = asset
     sizing = {
@@ -6091,6 +7039,10 @@ def calculate_structure_callback(
             tone="danger",
         )
     if surface_signature is not None:
+        snapshot["surface_expiry_adjustments"] = {
+            row["leg_id"]: copy.deepcopy(row["surface_expiry_adjustments"])
+            for row in surface_signature["rows"]
+        }
         effective_pricing_vols = {
             row["leg_id"]: row["effective_pricing_vol"]
             for row in surface_signature["rows"]
@@ -6154,6 +7106,7 @@ def calculate_structure_callback(
         ),
         Input("pricer-calculate-all", "n_clicks"),
         Input("pricer-exchange-calculate-all", "n_clicks"),
+        Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-asset", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
         Input(
@@ -6232,6 +7185,7 @@ def _calculate_structure_instance_dash_callback(
     local_clicks,
     calculate_all_clicks,
     exchange_calculate_all_clicks,
+    mapping_id,
     asset,
     model,
     contract_multiplier,
@@ -6252,6 +7206,8 @@ def _calculate_structure_instance_dash_callback(
     triggered_type = triggered.get("type") if isinstance(triggered, dict) else triggered
     use_published_surface = pathname == "/pricer"
     is_exchange_workflow = workflow == "exchange"
+    if is_exchange_workflow and mapping_id is None:
+        mapping_id = DEFAULT_EXCHANGE_MAPPING_ID
     active_calculate_all_clicks = (
         exchange_calculate_all_clicks
         if is_exchange_workflow
@@ -6277,6 +7233,20 @@ def _calculate_structure_instance_dash_callback(
         "pricer-exchange-calculate-all",
     } and not is_calculate_all:
         return no_update, no_update, no_update, no_update
+    if (
+        is_exchange_workflow
+        and (is_calculate_all or is_local_calculate)
+        and not exchange_mapping_pricing_supported(mapping_id)
+    ):
+        return (
+            None,
+            _build_pricer_message(
+                exchange_mapping_capture_message(mapping_id),
+                tone="danger",
+            ),
+            _leg_grid_options(compact=use_published_surface),
+            current_all_count if is_calculate_all else no_update,
+        )
     if not is_calculate_all and not is_local_calculate and current_snapshot is None:
         return no_update, no_update, no_update, no_update
     latest_cell_event = (
@@ -6315,6 +7285,7 @@ def _calculate_structure_instance_dash_callback(
                 date_ids,
                 surface_reference=surface_reference,
                 use_published_surface=use_published_surface,
+                mapping_id=mapping_id,
             )
         except StructureValidationError as exc:
             return (
@@ -6343,6 +7314,7 @@ def _calculate_structure_instance_dash_callback(
         has_snapshot=current_snapshot is not None,
         surface_reference=surface_reference,
         use_published_surface=use_published_surface,
+        mapping_id=mapping_id,
     )
     return (
         snapshot,
@@ -6371,12 +7343,14 @@ def calculate_structure_instance_callback(
     pathname=None,
     exchange_calculate_all_clicks=0,
     workflow="legacy",
+    mapping_id=None,
 ):
     """Compatibility entry point for direct tests and non-Dash callers."""
     return _calculate_structure_instance_dash_callback(
         local_clicks,
         calculate_all_clicks,
         exchange_calculate_all_clicks,
+        mapping_id,
         asset,
         model,
         contract_multiplier,
@@ -6436,6 +7410,7 @@ def calculate_structure_instance(
     date_ids,
     current_snapshot,
     calculate_all_baseline=0,
+    mapping_id=None,
 ):
     """Compatibility helper for direct tests and non-Dash callers."""
     snapshot, status, _grid_options, _baseline = calculate_structure_instance_callback(
@@ -6453,6 +7428,7 @@ def calculate_structure_instance(
         date_ids,
         current_snapshot,
         calculate_all_baseline,
+        mapping_id=mapping_id,
     )
     return snapshot, status
 
@@ -6460,10 +7436,29 @@ def calculate_structure_instance(
 def _model_inputs_summary(snapshot):
     context = snapshot["context"]
     cards = [
-        _build_pricer_result_card(
-            "Asset",
-            context["asset"],
-            tone="market",
+        *(
+            [
+                _build_pricer_result_card(
+                    "Asset 1",
+                    context["asset_1_code"],
+                    context["asset_1_price_unit"],
+                    tone="market",
+                ),
+                _build_pricer_result_card(
+                    "Asset 2",
+                    context["asset_2_code"],
+                    context["asset_2_price_unit"],
+                    tone="market",
+                ),
+            ]
+            if snapshot["model"] == "kirk"
+            else [
+                _build_pricer_result_card(
+                    "Asset",
+                    context["asset"],
+                    tone="market",
+                )
+            ]
         ),
         _build_pricer_result_card(
             "Pricing model",
@@ -6526,7 +7521,7 @@ def _model_inputs_summary(snapshot):
                 ),
             ]
         )
-    elif snapshot["model"] in {"black76", "asian76"}:
+    elif snapshot["model"] in SINGLE_ASSET_MODELS:
         cards.extend(
             [
                 _build_pricer_result_card(
@@ -6562,22 +7557,29 @@ def _model_inputs_summary(snapshot):
         cards.extend(
             [
                 _build_pricer_result_card(
-                    "Asset price cross used",
-                    (
-                        f"{_format_number(context['asset_1'])} / "
-                        f"{_format_number(context['asset_2'])}"
-                    ),
-                    "Asset 1 / Asset 2",
+                    "Asset 1 forward",
+                    _format_number(context["asset_1_forward"]),
+                    context["asset_1_price_unit"],
                     tone="market",
                 ),
                 _build_pricer_result_card(
-                    "Option expiration",
-                    context["expiration_date"],
+                    "Asset 2 forward",
+                    _format_number(context["asset_2_forward"]),
+                    context["asset_2_price_unit"],
+                    tone="market",
+                ),
+                _build_pricer_result_card(
+                    "Contractual option expiry",
+                    context["contractual_expiry"],
                     tone="context",
                 ),
                 _build_pricer_result_card(
-                    "Exchange option expiration",
-                    context["contract_expiration_date"],
+                    "Volatility-reference expiries",
+                    (
+                        f"{context['asset_1_reference_expiry']} / "
+                        f"{context['asset_2_reference_expiry']}"
+                    ),
+                    "Asset 1 / Asset 2",
                     tone="context",
                 ),
                 _build_pricer_result_card(
@@ -6679,6 +7681,16 @@ def render_structure_results(snapshot, calculation_store_id=None):
             f"{snapshot['context']['variance_calendar_code']}; "
             f"{snapshot['context']['day_count_basis']}; {weighting_label}"
         )
+    elif snapshot["model"] == "kirk":
+        volatility_adjustment_detail = (
+            f"Asset 1: √({snapshot['context']['asset_1_contractual_business_days']} "
+            f"days / {snapshot['context']['asset_1_reference_business_days']} "
+            f"reference days), {snapshot['context']['asset_1_calendar_code']}; "
+            f"Asset 2: √({snapshot['context']['asset_2_contractual_business_days']} "
+            f"days / {snapshot['context']['asset_2_reference_business_days']} "
+            f"reference days), {snapshot['context']['asset_2_calendar_code']}; "
+            f"{snapshot['context']['day_count_basis']}"
+        )
     else:
         volatility_adjustment_detail = (
             f"√({snapshot['context']['option_business_days']} days / "
@@ -6691,6 +7703,14 @@ def render_structure_results(snapshot, calculation_store_id=None):
         for warning in snapshot.get("warnings") or []
         if warning != FUTURES_STYLE_RATE_NOTE
     ]
+    volatility_adjustment_value = (
+        (
+            f"{snapshot['context']['asset_1_vol_adjustment_factor']:.6f}× / "
+            f"{snapshot['context']['asset_2_vol_adjustment_factor']:.6f}×"
+        )
+        if snapshot["model"] == "kirk"
+        else f"{snapshot['context']['vol_adjustment_factor']:.6f}×"
+    )
     output_cards = [
         html.Span(
             [
@@ -6706,7 +7726,7 @@ def render_structure_results(snapshot, calculation_store_id=None):
                     "Vol adj",
                     className="pricer-calculation-meta-label",
                 ),
-                f"{snapshot['context']['vol_adjustment_factor']:.6f}×",
+                volatility_adjustment_value,
             ],
             className="pricer-calculation-meta-item",
             title=volatility_adjustment_detail,

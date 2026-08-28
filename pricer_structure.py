@@ -20,24 +20,36 @@ from scipy.optimize import brentq
 
 from options import option_expiry_engine as expiry_engine_module
 from options.options_library import (
+    american_on_futures_equity_style,
+    american_on_futures_equity_style_price,
     asian_76,
     black_76,
     black_76_futures_style,
     kirk_model_with_substitution,
     kirk_spread_greeks,
 )
+from options.option_contract_conventions import FlatDiscountCurve
 from options.option_expiry_engine import (
     business_days_between,
     get_business_calendar,
     get_surface_calendar_mapping,
+    resolve_option_expiry,
     resolve_surface_expiry,
     validate_expiry_records,
 )
+from pricer_exchange_registry import (
+    USER_INPUT_FORWARD_SOURCE,
+    canonical_exchange_mapping_id,
+    exchange_mapping_for_asset_model,
+    exchange_option_mapping,
+)
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 16
 MAX_LEGS = 20
-SUPPORTED_MODELS = {"black76", "asian76", "kirk"}
+SINGLE_ASSET_MODELS = frozenset({"black76", "asian76", "american_futures"})
+SUPPORTED_MODELS = set(SINGLE_ASSET_MODELS) | {"kirk"}
+AMERICAN_FUTURES_STEPS = 400
 SUPPORTED_PREMIUM_CONVENTIONS = ("futures_style", "upfront")
 PREMIUM_CONVENTION_LABELS = {
     "futures_style": "Futures-style",
@@ -91,8 +103,6 @@ JKM_APO_PRODUCT_ID = "71090519"
 JKM_APO_PRODUCT_NAME = "JKM LNG (Platts) Average Price Options"
 JKM_VANILLA_PRODUCT_CODE = "JKZ"
 JKM_VANILLA_PRODUCT_NAME = "JKM LNG (Platts) Options"
-JKM_VANILLA_EXPIRY_CONVENTION = "ICE_JKM_JKZ_VIA_TFO"
-JKM_VANILLA_EXPIRY_VERSION = "ICE_JKM_JKZ_VIA_TFO_RULE_V1"
 JKM_CONTRACT_SIZE_MMBTU = 10_000
 BRENT_CONTRACT_SIZE_BBL = 1_000
 HH_CONTRACT_SIZE_MMBTU = 2_500
@@ -123,11 +133,13 @@ SIDE_SIGN = {"BUY": 1.0, "SELL": -1.0}
 MODEL_LABELS = {
     "black76": "Black-76",
     "asian76": "Asian-76",
+    "american_futures": "American futures",
     "kirk": "Kirk",
 }
 GREEK_FIELDS = {
     "black76": ("delta", "gamma", "theta", "vega", "rho"),
     "asian76": ("delta", "gamma", "theta", "vega", "rho"),
+    "american_futures": ("delta", "gamma", "theta", "vega", "rho"),
     "kirk": (
         "delta_s1",
         "delta_s2",
@@ -278,12 +290,38 @@ def _load_expiry_records_cached(
     del modified_ns, size
     mapping = get_surface_calendar_mapping(asset)
     with Path(snapshot_path).open(newline="", encoding="utf-8") as source:
-        rows = [
-            row
-            for row in csv.DictReader(source)
-            if row.get("expiry_convention_code") == mapping.expiry_convention_code
-        ]
-    return validate_expiry_records(mapping.expiry_convention_code, rows)
+        snapshot_rows = list(csv.DictReader(source))
+    rows = [
+        row
+        for row in snapshot_rows
+        if row.get("expiry_convention_code") == mapping.expiry_convention_code
+    ]
+    records = validate_expiry_records(mapping.expiry_convention_code, rows)
+    if records:
+        return records
+
+    convention = expiry_engine_module.get_expiry_convention(
+        mapping.expiry_convention_code
+    )
+    if convention.official_frontier_required:
+        return records
+
+    # Deterministic exchange rules such as CME LNE remain selectable during a
+    # coordinated rollout even when the checked-in snapshot predates the new
+    # convention.  Reuse the snapshot's governed contract-month inventory and
+    # calculate only the missing convention dates; the database refresh will
+    # subsequently persist the same dates.
+    contract_months = sorted(
+        {
+            date.fromisoformat(str(row["contract_month"])[:10]).replace(day=1)
+            for row in snapshot_rows
+            if row.get("contract_month")
+        }
+    )
+    return tuple(
+        resolve_surface_expiry(asset, contract_month, ())
+        for contract_month in contract_months
+    )
 
 
 def _asset_expiry_records(asset: str) -> tuple[Any, ...]:
@@ -311,8 +349,41 @@ def _asset_expiry_records(asset: str) -> tuple[Any, ...]:
         ) from exc
 
 
-def _ttf_expiry_records() -> tuple[Any, ...]:
-    return _asset_expiry_records("TTF")
+@lru_cache(maxsize=32)
+def _load_target_expiry_records_cached(
+    snapshot_path: str,
+    modified_ns: int,
+    size: int,
+    expiry_convention_code: str,
+) -> tuple[Any, ...]:
+    del modified_ns, size
+    with Path(snapshot_path).open(newline="", encoding="utf-8") as source:
+        rows = [
+            row
+            for row in csv.DictReader(source)
+            if row.get("expiry_convention_code") == expiry_convention_code
+        ]
+    return validate_expiry_records(expiry_convention_code, rows)
+
+
+def _target_expiry_records(expiry_convention_code: str) -> tuple[Any, ...]:
+    try:
+        identity = OPTION_EXPIRY_SNAPSHOT.stat()
+        return _load_target_expiry_records_cached(
+            str(OPTION_EXPIRY_SNAPSHOT),
+            identity.st_mtime_ns,
+            identity.st_size,
+            expiry_convention_code,
+        )
+    except Exception as exc:
+        convention = expiry_engine_module.get_expiry_convention(
+            expiry_convention_code
+        )
+        if not convention.official_frontier_required:
+            return ()
+        raise StructureValidationError(
+            f"The governed {expiry_convention_code} expiry snapshot could not be validated."
+        ) from exc
 
 
 def _jkm_expiry_records() -> tuple[Any, ...]:
@@ -379,7 +450,14 @@ def default_model_for_asset(asset: str) -> str:
     return "asian76" if normalized_asset == "JKM" else "black76"
 
 
-def _jkm_product_metadata(model: str) -> dict[str, Any]:
+def _jkm_product_metadata(model: str, mapping=None) -> dict[str, Any]:
+    if mapping is not None and mapping.exchange_product_code:
+        return {
+            "exchange_product_code": mapping.exchange_product_code,
+            "exchange_product_id": None,
+            "exchange_product_name": mapping.product,
+            "exchange_expiry_rule": mapping.expiry_convention_code,
+        }
     if model == "asian76":
         return {
             "exchange_product_code": JKM_APO_PRODUCT_CODE,
@@ -429,6 +507,7 @@ def available_delivery_months(
     asset: str,
     model: str,
     as_of: date,
+    mapping_id: str | None = None,
 ) -> tuple[date, ...]:
     """Return unexpired governed monthly contracts for an asset/model."""
     normalized_asset = str(asset or "").strip()
@@ -437,18 +516,48 @@ def available_delivery_months(
         raise StructureValidationError(f"Asset must be one of: {supported}.")
     if model not in SUPPORTED_MODELS:
         raise StructureValidationError(f"Unsupported pricing model: {model}.")
+    target_mapping = exchange_option_mapping(mapping_id)
+    if target_mapping is None:
+        target_mapping = exchange_mapping_for_asset_model(normalized_asset, model)
     if normalized_asset == "JKM" and model == "asian76":
-        return available_jkm_apo_delivery_months(as_of)
-    if normalized_asset == "JKM" and model == "black76":
+        if target_mapping is None:
+            return available_jkm_apo_delivery_months(as_of)
+        months = []
+        for surface_record in _jkm_expiry_records():
+            resolved = _resolve_mapping_expiry(target_mapping, surface_record)
+            if (
+                resolved.option_expiration_date > as_of
+                and _jkm_apo_averaging_start(surface_record.contract_month) >= as_of
+            ):
+                months.append(surface_record.contract_month)
+        return tuple(months)
+    if (
+        target_mapping is None
+        or not target_mapping.pricing_supported
+        or target_mapping.asset != normalized_asset
+        or target_mapping.model != model
+    ):
         return tuple(
-            _add_months(record.contract_month, 2)
-            for record in _ttf_expiry_records()
+            record.contract_month
+            for record in _asset_expiry_records(normalized_asset)
             if record.option_expiration_date > as_of
         )
-    return tuple(
-        record.contract_month
-        for record in _asset_expiry_records(normalized_asset)
-        if record.option_expiration_date > as_of
+    months = []
+    for surface_record in _asset_expiry_records(normalized_asset):
+        resolved = _resolve_mapping_expiry(target_mapping, surface_record)
+        if resolved.option_expiration_date > as_of:
+            months.append(surface_record.contract_month)
+    return tuple(months)
+
+
+def _resolve_mapping_expiry(mapping, surface_resolved):
+    """Resolve a target expiry while keeping the surface inventory authoritative."""
+    if mapping.expiry_convention_code == surface_resolved.expiry_convention_code:
+        return surface_resolved
+    return resolve_option_expiry(
+        mapping.expiry_convention_code,
+        surface_resolved.contract_month,
+        _target_expiry_records(mapping.expiry_convention_code),
     )
 
 
@@ -457,6 +566,7 @@ def build_jkm_month_component(
     as_of: date,
     forward: float,
     model: str = "asian76",
+    mapping_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one governed JKM APO or JKZ monthly delivery component."""
     if model not in {"black76", "asian76"}:
@@ -465,8 +575,21 @@ def build_jkm_month_component(
         )
     raw_month = _as_date(contract_month, "Delivery month")
     month = date(raw_month.year, raw_month.month, 1)
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is None:
+        mapping = exchange_mapping_for_asset_model("JKM", model)
+    if (
+        mapping is None
+        or not mapping.pricing_supported
+        or mapping.asset != "JKM"
+        or mapping.model != model
+    ):
+        raise StructureValidationError(
+            "A supported JKM exchange mapping is required."
+        )
+    surface_resolved = resolve_surface_expiry("JKM", month, _jkm_expiry_records())
+    resolved = _resolve_mapping_expiry(mapping, surface_resolved)
     if model == "asian76":
-        resolved = resolve_surface_expiry("JKM", month, _jkm_expiry_records())
         averaging_start = _jkm_apo_averaging_start(month)
         if averaging_start < as_of:
             raise StructureValidationError(
@@ -479,17 +602,11 @@ def build_jkm_month_component(
         expiry_status = resolved.expiry_status
         option_expiration = resolved.option_expiration_date
     else:
-        # ICE JKZ expires with the TFO immediately before the JKM future
-        # becomes front month. A JKM delivery month becomes front after the
-        # JKM future two contract months earlier completes, so the governed
-        # TFO month is delivery month minus two.
-        tfo_month = _add_months(month, -2)
-        resolved = resolve_surface_expiry("TTF", tfo_month, _ttf_expiry_records())
         averaging_start = None
         option_expiration = resolved.option_expiration_date
-        expiry_code = JKM_VANILLA_EXPIRY_CONVENTION
-        expiry_version = JKM_VANILLA_EXPIRY_VERSION
-        expiry_status = f"TFO {resolved.expiry_status}"
+        expiry_code = resolved.expiry_convention_code
+        expiry_version = resolved.expiry_convention_version
+        expiry_status = resolved.expiry_status
     if option_expiration <= as_of:
         raise StructureValidationError(
             f"{month.strftime('%b-%y')} cannot be priced because its monthly "
@@ -510,7 +627,22 @@ def build_jkm_month_component(
         "contract_size": JKM_CONTRACT_SIZE_MMBTU,
         "weight": 1.0,
         "forward": forward,
-        **_jkm_product_metadata(model),
+        "contract_convention_code": mapping.contract_convention_code,
+        "exchange_mapping_id": mapping.mapping_id,
+        "surface_product": mapping.surface_product,
+        "surface_option_expiration_date": (
+            surface_resolved.option_expiration_date.isoformat()
+        ),
+        "surface_expiry_convention_code": (
+            surface_resolved.expiry_convention_code
+        ),
+        "surface_expiry_convention_version": (
+            surface_resolved.expiry_convention_version
+        ),
+        "forward_source": mapping.forward_source,
+        "volatility_surface_source": mapping.volatility_surface_source,
+        "max_surface_extension_days": mapping.max_surface_extension_days,
+        **_jkm_product_metadata(model, mapping),
     }
     if averaging_start is not None:
         component["averaging_start_date"] = averaging_start.isoformat()
@@ -527,6 +659,7 @@ def build_delivery_month_component(
     contract_month: date | str,
     as_of: date,
     forward: float = 1.0,
+    mapping_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve the exchange option expiry for one selected delivery month.
 
@@ -540,16 +673,79 @@ def build_delivery_month_component(
         raise StructureValidationError(f"Asset must be one of: {supported}.")
     if model not in SUPPORTED_MODELS:
         raise StructureValidationError(f"Unsupported pricing model: {model}.")
-    if normalized_asset == "JKM" and model in {"black76", "asian76"}:
+    target_mapping = exchange_option_mapping(mapping_id)
+    if target_mapping is None:
+        target_mapping = exchange_mapping_for_asset_model(normalized_asset, model)
+    if (
+        normalized_asset == "JKM"
+        and model in {"black76", "asian76"}
+        and target_mapping is not None
+        and target_mapping.pricing_supported
+        and target_mapping.asset == normalized_asset
+        and target_mapping.model == model
+    ):
         return build_jkm_month_component(
             contract_month,
             as_of,
             forward,
             model,
+            mapping_id,
         )
 
     raw_month = _as_date(contract_month, "Delivery month")
     month = date(raw_month.year, raw_month.month, 1)
+    if (
+        target_mapping is not None
+        and target_mapping.pricing_supported
+        and target_mapping.asset == normalized_asset
+        and target_mapping.model == model
+    ):
+        surface_resolved = resolve_surface_expiry(
+            normalized_asset, month, _asset_expiry_records(normalized_asset)
+        )
+        resolved = _resolve_mapping_expiry(target_mapping, surface_resolved)
+        if resolved.option_expiration_date <= as_of:
+            raise StructureValidationError(
+                f"{month.strftime('%b-%y')} cannot be priced because its "
+                f"{target_mapping.mapping_id} option has expired."
+            )
+        surface_mapping = get_surface_calendar_mapping(normalized_asset)
+        return {
+            "contract_month": month.isoformat(),
+            "contract_month_label": month.strftime("%b-%y"),
+            "option_expiration_date": resolved.option_expiration_date.isoformat(),
+            "contract_expiration_date": resolved.option_expiration_date.isoformat(),
+            "expiry_status": resolved.expiry_status,
+            "expiry_convention_code": resolved.expiry_convention_code,
+            "expiry_convention_version": resolved.expiry_convention_version,
+            "contract_convention_code": target_mapping.contract_convention_code,
+            "exchange_mapping_id": target_mapping.mapping_id,
+            "surface_product": target_mapping.surface_product,
+            "surface_option_expiration_date": (
+                surface_resolved.option_expiration_date.isoformat()
+            ),
+            "surface_expiry_convention_code": (
+                surface_resolved.expiry_convention_code
+            ),
+            "surface_expiry_convention_version": (
+                surface_resolved.expiry_convention_version
+            ),
+            "forward_source": target_mapping.forward_source,
+            "volatility_surface_source": (
+                target_mapping.volatility_surface_source
+            ),
+            "max_surface_extension_days": (
+                target_mapping.max_surface_extension_days
+            ),
+            "variance_calendar_code": surface_mapping.variance_calendar_code,
+            "contract_size": target_mapping.contract_size,
+            "time_to_expiry": (
+                resolved.option_expiration_date - as_of
+            ).days
+            / OPTION_DAY_COUNT_DENOMINATOR,
+            "weight": 1.0,
+            "forward": forward,
+        }
     resolved = resolve_surface_expiry(
         normalized_asset,
         month,
@@ -584,6 +780,7 @@ def build_jkm_strip_components(
     as_of: date,
     forward: float,
     model: str,
+    mapping_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Build equal-lot JKM APO or JKZ monthly components for a delivery strip."""
     if model not in {"black76", "asian76"}:
@@ -594,7 +791,13 @@ def build_jkm_strip_components(
     component_count = len(months)
     components: list[dict[str, Any]] = []
     for month in months:
-        component = build_jkm_month_component(month, as_of, forward, model)
+        component = build_jkm_month_component(
+            month,
+            as_of,
+            forward,
+            model,
+            mapping_id,
+        )
         component["weight"] = 1.0 / component_count
         components.append(component)
     return components, component_count * JKM_CONTRACT_SIZE_MMBTU
@@ -605,38 +808,41 @@ def build_ttf_strip_components(
     delivery_year: int,
     as_of: date,
     forward: float,
+    mapping_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Resolve exact monthly TFO expiries and delivery-hour weights for a strip."""
-    known_expiries = _ttf_expiry_records()
     components: list[dict[str, Any]] = []
-    total_hours = sum(_ttf_delivery_hours(month) for month in _delivery_months(shape, delivery_year))
-    for month in _delivery_months(shape, delivery_year):
-        resolved = resolve_surface_expiry("TTF", month, known_expiries)
-        if resolved.option_expiration_date <= as_of:
+    months = _delivery_months(shape, delivery_year)
+    mapping = exchange_option_mapping(mapping_id)
+    equal_monthly_lots = bool(
+        mapping and mapping.sizing_mode == "monthly_contract_lots"
+    )
+    total_quantity = (
+        len(months) * int(mapping.contract_size)
+        if equal_monthly_lots
+        else sum(_ttf_delivery_hours(month) for month in months)
+    )
+    for month in months:
+        try:
+            component = build_delivery_month_component(
+                "TTF", "black76", month, as_of, forward, mapping_id=mapping_id
+            )
+        except StructureValidationError as exc:
             raise StructureValidationError(
                 f"{_delivery_period_label(shape, delivery_year)} cannot be priced as "
                 "a complete strip because at least one monthly option has expired."
-            )
+            ) from exc
         delivery_hours = _ttf_delivery_hours(month)
-        components.append(
-            {
-                "contract_month": month.isoformat(),
-                "contract_month_label": month.strftime("%b-%y"),
-                "option_expiration_date": resolved.option_expiration_date.isoformat(),
-                "expiry_status": resolved.expiry_status,
-                "expiry_convention_code": resolved.expiry_convention_code,
-                "expiry_convention_version": resolved.expiry_convention_version,
-                "variance_calendar_code": TTF_VARIANCE_CALENDAR,
-                "time_to_expiry": (
-                    resolved.option_expiration_date - as_of
-                ).days
-                / TTF_DAY_COUNT_DENOMINATOR,
-                "delivery_hours": delivery_hours,
-                "weight": delivery_hours / total_hours,
-                "forward": forward,
-            }
+        component.update(
+            delivery_hours=delivery_hours,
+            weight=(
+                1.0 / len(months)
+                if equal_monthly_lots
+                else delivery_hours / total_quantity
+            ),
         )
-    return components, total_hours
+        components.append(component)
+    return components, total_quantity
 
 
 def _default_dates(as_of: date) -> tuple[str, str]:
@@ -660,13 +866,37 @@ def default_premium_convention(asset: str, model: str | None = None) -> str:
     return ASSET_DEFAULT_PREMIUM_CONVENTIONS[normalized_asset]
 
 
-def asset_price_spec(asset: str) -> dict[str, str]:
+def asset_price_spec(
+    asset: str,
+    mapping_id: str | None = None,
+) -> dict[str, str | float]:
     """Return governed currency and price-unit metadata for an asset."""
     normalized_asset = str(asset or DEFAULT_ASSET).strip()
     if normalized_asset not in ASSET_PRICE_SPECS:
         supported = ", ".join(SUPPORTED_ASSETS)
         raise StructureValidationError(f"Asset must be one of: {supported}.")
-    return dict(ASSET_PRICE_SPECS[normalized_asset])
+    spec: dict[str, str | float] = dict(ASSET_PRICE_SPECS[normalized_asset])
+    mapping = exchange_option_mapping(mapping_id)
+    if mapping is not None and mapping.asset == normalized_asset:
+        if mapping.price_currency:
+            spec["currency"] = mapping.price_currency
+        if mapping.price_unit:
+            spec["unit"] = mapping.price_unit
+        if mapping.price_unit_label:
+            spec["price_unit_label"] = mapping.price_unit_label
+        if mapping.currency_conversion_factor is not None:
+            spec["currency_conversion_factor"] = float(
+                mapping.currency_conversion_factor
+            )
+        if mapping.price_unit_label:
+            spec["description"] = (
+                f"Governed quote unit for {mapping.mapping_id}."
+            )
+    spec.setdefault(
+        "currency_conversion_factor",
+        0.01 if normalized_asset == "NBP" else 1.0,
+    )
+    return spec
 
 
 def default_contract_size(
@@ -687,18 +917,50 @@ def default_contract_size(
     if normalized_asset not in SUPPORTED_ASSETS:
         supported = ", ".join(SUPPORTED_ASSETS)
         raise StructureValidationError(f"Asset must be one of: {supported}.")
+    resolved_context = context if isinstance(context, dict) else {}
+    target_mapping = exchange_option_mapping(
+        resolved_context.get("exchange_mapping_id")
+    )
+    if (
+        target_mapping is not None
+        and target_mapping.pricing_supported
+        and target_mapping.asset == normalized_asset
+        and target_mapping.sizing_mode == "fixed"
+    ):
+        return float(target_mapping.contract_size)
     if normalized_asset == "Brent":
         return float(BRENT_CONTRACT_SIZE_BBL)
     if normalized_asset == "HH":
         return float(HH_CONTRACT_SIZE_MMBTU)
 
-    resolved_context = context if isinstance(context, dict) else {}
     raw_shape = resolved_context.get("delivery_shape", "MONTH")
     shape = str(raw_shape or "MONTH").strip().upper()
     if shape not in SUPPORTED_DELIVERY_SHAPES:
         raise StructureValidationError(
             "Delivery shape must be Month, Q1-Q4, Summer, or Winter."
         )
+
+    if (
+        target_mapping is not None
+        and target_mapping.pricing_supported
+        and target_mapping.asset == normalized_asset
+        and target_mapping.sizing_mode == "monthly_contract_lots"
+    ):
+        if shape == "MONTH":
+            month_count = 1
+        else:
+            raw_year = _finite_number(
+                resolved_context.get("delivery_year"),
+                "Delivery year",
+                minimum=2000,
+                maximum=2100,
+            )
+            if not raw_year.is_integer():
+                raise StructureValidationError(
+                    "Delivery year must be a whole year."
+                )
+            month_count = len(_delivery_months(shape, int(raw_year)))
+        return float(month_count * target_mapping.contract_size)
 
     if normalized_asset == "JKM":
         month_count = 1
@@ -773,7 +1035,7 @@ def default_contract_size(
 def default_context(model: str, as_of: date | None = None) -> dict[str, Any]:
     as_of = as_of or date.today()
     expiration, contract_expiration = _default_dates(as_of)
-    if model == "black76":
+    if model in {"black76", "american_futures"}:
         return {
             "asset": DEFAULT_ASSET,
             "premium_convention": default_premium_convention(DEFAULT_ASSET, model),
@@ -798,14 +1060,17 @@ def default_context(model: str, as_of: date | None = None) -> dict[str, Any]:
         }
     if model == "kirk":
         return {
-            "asset": DEFAULT_ASSET,
-            "premium_convention": default_premium_convention(DEFAULT_ASSET, model),
+            "asset": None,
+            "asset_1_code": None,
+            "asset_2_code": None,
+            "premium_convention": "futures_style",
             "delivery_shape": "MONTH",
-            "asset_1": 100.0,
-            "asset_2": 90.0,
+            "asset_1_forward": 100.0,
+            "asset_2_forward": 90.0,
             "correlation": 0.5,
-            "expiration_date": expiration,
-            "contract_expiration_date": contract_expiration,
+            "contractual_expiry": expiration,
+            "asset_1_reference_expiry": contract_expiration,
+            "asset_2_reference_expiry": contract_expiration,
         }
     raise StructureValidationError(f"Unsupported pricing model: {model}.")
 
@@ -819,7 +1084,7 @@ def default_leg(model: str, sequence: int = 1) -> dict[str, Any]:
         "call_put": "C",
         "strike": 100.0 if model != "kirk" else 5.0,
     }
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
         common["quote_basis"] = "VOL"
         common["quote_value"] = 0.2
     elif model == "kirk":
@@ -841,11 +1106,215 @@ def default_draft(model: str = "black76", as_of: date | None = None) -> dict[str
     }
 
 
+def _required_kirk_asset_code(value: Any, label: str) -> str:
+    if value is None or not str(value).strip():
+        raise StructureValidationError(f"{label} is required for Kirk.")
+    asset = str(value).strip()
+    if asset not in SUPPORTED_ASSETS:
+        supported = ", ".join(SUPPORTED_ASSETS)
+        raise StructureValidationError(f"{label} must be one of: {supported}.")
+    return asset
+
+
+def _normalize_kirk_context(
+    context: dict[str, Any],
+    as_of: date,
+) -> dict[str, Any]:
+    """Normalize an explicit two-asset Kirk context.
+
+    Legacy drafts may supply the former single ``asset`` field and numeric
+    ``asset_1``/``asset_2`` values. The former asset is defensible only as the
+    Asset 1 identity; Asset 2 must still be selected explicitly.
+    """
+    asset_1_code = _required_kirk_asset_code(
+        context.get("asset_1_code") or context.get("asset"),
+        "Asset 1",
+    )
+    asset_2_code = _required_kirk_asset_code(
+        context.get("asset_2_code"),
+        "Asset 2",
+    )
+    if asset_1_code == asset_2_code:
+        raise StructureValidationError(
+            "Asset 1 and Asset 2 must be different for Kirk."
+        )
+
+    asset_1_spec = asset_price_spec(asset_1_code)
+    asset_2_spec = asset_price_spec(asset_2_code)
+    if (
+        asset_1_spec["currency"] != asset_2_spec["currency"]
+        or asset_1_spec["unit"] != asset_2_spec["unit"]
+    ):
+        raise StructureValidationError(
+            "Multiplier/conversion required: "
+            f"Asset 1 ({asset_1_code}, {asset_1_spec['price_unit_label']}) and "
+            f"Asset 2 ({asset_2_code}, {asset_2_spec['price_unit_label']}) do not "
+            "share a compatible currency and price unit."
+        )
+
+    premium_convention = str(
+        context.get("premium_convention") or "futures_style"
+    ).strip().lower()
+    if premium_convention not in SUPPORTED_PREMIUM_CONVENTIONS:
+        supported = ", ".join(
+            PREMIUM_CONVENTION_LABELS[value]
+            for value in SUPPORTED_PREMIUM_CONVENTIONS
+        )
+        raise StructureValidationError(
+            f"Premium convention must be one of: {supported}."
+        )
+    if premium_convention == "upfront":
+        raise StructureValidationError(
+            "Upfront is not supported for Kirk because the current Kirk "
+            "implementation is undiscounted. Use Futures-style."
+        )
+
+    contractual_expiry = _as_date(
+        context.get("contractual_expiry") or context.get("expiration_date"),
+        "Contractual expiry",
+    )
+    legacy_reference_expiry = context.get("contract_expiration_date")
+    asset_1_reference_expiry = _as_date(
+        context.get("asset_1_reference_expiry") or legacy_reference_expiry,
+        "Asset 1 volatility-reference expiry",
+    )
+    asset_2_reference_expiry = _as_date(
+        context.get("asset_2_reference_expiry") or legacy_reference_expiry,
+        "Asset 2 volatility-reference expiry",
+    )
+    if contractual_expiry <= as_of:
+        raise StructureValidationError(
+            "Contractual expiry must be after the valuation date."
+        )
+    for label, reference_expiry in (
+        ("Asset 1 volatility-reference expiry", asset_1_reference_expiry),
+        ("Asset 2 volatility-reference expiry", asset_2_reference_expiry),
+    ):
+        if reference_expiry < contractual_expiry:
+            raise StructureValidationError(
+                f"{label} must be on or after the contractual expiry."
+            )
+    for label, expiry in (
+        ("Contractual expiry", contractual_expiry),
+        ("Asset 1 volatility-reference expiry", asset_1_reference_expiry),
+        ("Asset 2 volatility-reference expiry", asset_2_reference_expiry),
+    ):
+        if (expiry - as_of).days > MAX_OPTION_HORIZON_DAYS:
+            raise StructureValidationError(
+                f"{label} must be within the supported 100-year horizon."
+            )
+
+    (
+        asset_1_vol_adjustment_factor,
+        asset_1_contractual_business_days,
+        asset_1_reference_business_days,
+    ) = volatility_adjustment(
+        as_of,
+        contractual_expiry,
+        asset_1_reference_expiry,
+        asset=asset_1_code,
+    )
+    (
+        asset_2_vol_adjustment_factor,
+        asset_2_contractual_business_days,
+        asset_2_reference_business_days,
+    ) = volatility_adjustment(
+        as_of,
+        contractual_expiry,
+        asset_2_reference_expiry,
+        asset=asset_2_code,
+    )
+    asset_1_calendar_code = get_surface_calendar_mapping(
+        asset_1_code
+    ).variance_calendar_code
+    asset_2_calendar_code = get_surface_calendar_mapping(
+        asset_2_code
+    ).variance_calendar_code
+    asset_1_forward = _finite_number(
+        context.get("asset_1_forward", context.get("asset_1")),
+        "Asset 1 forward",
+        minimum=0.0,
+        strict_minimum=True,
+    )
+    asset_2_forward = _finite_number(
+        context.get("asset_2_forward", context.get("asset_2")),
+        "Asset 2 forward",
+        minimum=0.0,
+        strict_minimum=True,
+    )
+    if context.get("correlation") is None:
+        raise StructureValidationError(
+            "Correlation is required and must be between -1 and 1."
+        )
+    correlation = _finite_number(
+        context.get("correlation"),
+        "Correlation",
+        minimum=-1.0,
+        maximum=1.0,
+    )
+    reference_expiry_alias = min(
+        asset_1_reference_expiry,
+        asset_2_reference_expiry,
+    )
+    return {
+        # Compatibility aliases retained for charts, sizing, and older result
+        # renderers. New snapshots also persist the explicit two-asset fields.
+        "asset": asset_1_code,
+        "asset_1": asset_1_forward,
+        "asset_2": asset_2_forward,
+        "expiration_date": contractual_expiry.isoformat(),
+        "contract_expiration_date": reference_expiry_alias.isoformat(),
+        "asset_1_code": asset_1_code,
+        "asset_2_code": asset_2_code,
+        "asset_1_forward": asset_1_forward,
+        "asset_2_forward": asset_2_forward,
+        "asset_1_price_unit": asset_1_spec["price_unit_label"],
+        "asset_2_price_unit": asset_2_spec["price_unit_label"],
+        "asset_1_currency": asset_1_spec["currency"],
+        "asset_2_currency": asset_2_spec["currency"],
+        "asset_1_unit": asset_1_spec["unit"],
+        "asset_2_unit": asset_2_spec["unit"],
+        "price_unit_label": asset_1_spec["price_unit_label"],
+        "trade_currency": asset_1_spec["currency"],
+        "contractual_expiry": contractual_expiry.isoformat(),
+        "asset_1_reference_expiry": asset_1_reference_expiry.isoformat(),
+        "asset_2_reference_expiry": asset_2_reference_expiry.isoformat(),
+        "asset_1_calendar_code": asset_1_calendar_code,
+        "asset_2_calendar_code": asset_2_calendar_code,
+        "asset_1_contractual_business_days": asset_1_contractual_business_days,
+        "asset_2_contractual_business_days": asset_2_contractual_business_days,
+        "asset_1_reference_business_days": asset_1_reference_business_days,
+        "asset_2_reference_business_days": asset_2_reference_business_days,
+        "asset_1_vol_adjustment_factor": asset_1_vol_adjustment_factor,
+        "asset_2_vol_adjustment_factor": asset_2_vol_adjustment_factor,
+        "premium_convention": premium_convention,
+        "premium_convention_label": PREMIUM_CONVENTION_LABELS[premium_convention],
+        "resolved_premium_convention": "futures_style",
+        "resolved_premium_convention_label": PREMIUM_CONVENTION_LABELS[
+            "futures_style"
+        ],
+        "delivery_shape": "MONTH",
+        "delivery_year": context.get("delivery_year"),
+        "time_to_expiry": (
+            contractual_expiry - as_of
+        ).days / OPTION_DAY_COUNT_DENOMINATOR,
+        "day_count_denominator": OPTION_DAY_COUNT_DENOMINATOR,
+        "day_count_basis": "ACT/365.25",
+        "vega_basis": "input_vol",
+        "margin_style": "futures_style",
+        "discount_factor": 1.0,
+        "correlation": correlation,
+    }
+
+
 def _normalize_context(
     model: str,
     context: dict[str, Any],
     as_of: date,
 ) -> dict[str, Any]:
+    if model == "kirk":
+        return _normalize_kirk_context(context, as_of)
+
     raw_asset = context.get("asset", DEFAULT_ASSET)
     if raw_asset is None:
         raise StructureValidationError("Asset is required.")
@@ -853,7 +1322,30 @@ def _normalize_context(
     if asset not in SUPPORTED_ASSETS:
         supported = ", ".join(SUPPORTED_ASSETS)
         raise StructureValidationError(f"Asset must be one of: {supported}.")
-    price_spec = asset_price_spec(asset)
+    raw_exchange_mapping_id = (
+        str(context.get("exchange_mapping_id") or "").strip() or None
+    )
+    exchange_mapping = exchange_option_mapping(raw_exchange_mapping_id)
+    if raw_exchange_mapping_id and exchange_mapping is None:
+        raise StructureValidationError(
+            f"Unknown exchange Mapping ID: {raw_exchange_mapping_id}."
+        )
+    exchange_mapping_id = (
+        canonical_exchange_mapping_id(raw_exchange_mapping_id)
+        if raw_exchange_mapping_id
+        else None
+    )
+    if exchange_mapping is not None:
+        if not exchange_mapping.pricing_supported:
+            raise StructureValidationError(
+                f"{exchange_mapping.mapping_id} is not enabled for pricing."
+            )
+        if exchange_mapping.asset != asset or exchange_mapping.model != model:
+            raise StructureValidationError(
+                f"{exchange_mapping.mapping_id} requires "
+                f"{exchange_mapping.asset} {MODEL_LABELS[exchange_mapping.model]}."
+            )
+    price_spec = asset_price_spec(asset, exchange_mapping_id)
 
     raw_premium_convention = context.get(
         "premium_convention", default_premium_convention(asset, model)
@@ -866,6 +1358,16 @@ def _normalize_context(
         )
         raise StructureValidationError(
             f"Premium convention must be one of: {supported}."
+        )
+    if (
+        exchange_mapping is not None
+        and premium_convention != exchange_mapping.premium_convention
+    ):
+        expected = PREMIUM_CONVENTION_LABELS[
+            exchange_mapping.premium_convention
+        ]
+        raise StructureValidationError(
+            f"{exchange_mapping.mapping_id} requires the {expected} premium convention."
         )
     resolved_premium_convention = premium_convention
     if model == "kirk" and resolved_premium_convention == "upfront":
@@ -891,7 +1393,7 @@ def _normalize_context(
             "Asian-76/Black-76."
         )
 
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
         forward = _finite_number(
             context.get("forward"),
             "Forward price",
@@ -909,6 +1411,7 @@ def _normalize_context(
             context["delivery_month"],
             as_of,
             float(forward) if forward is not None else 1.0,
+            mapping_id=exchange_mapping_id,
         )
 
     if is_delivery_strip:
@@ -927,14 +1430,30 @@ def _normalize_context(
                 delivery_year,
                 as_of,
                 float(forward),
+                mapping_id=exchange_mapping_id,
             )
-            component_weight_basis = "delivery_hours"
-            component_quantity_label = "delivery hours"
+            equal_monthly_lots = (
+                exchange_mapping is not None
+                and exchange_mapping.sizing_mode == "monthly_contract_lots"
+            )
+            component_weight_basis = (
+                "equal_contract_lots" if equal_monthly_lots else "delivery_hours"
+            )
+            component_quantity_label = (
+                "MMBtu across monthly lots"
+                if equal_monthly_lots
+                else "delivery hours"
+            )
             variance_calendar_code = TTF_VARIANCE_CALENDAR
             day_count_denominator = TTF_DAY_COUNT_DENOMINATOR
-            strip_quantity_fields = {
-                "delivery_total_hours": delivery_total_quantity,
-            }
+            strip_quantity_fields = (
+                {
+                    "delivery_total_quantity": delivery_total_quantity,
+                    "monthly_contract_size": exchange_mapping.contract_size,
+                }
+                if equal_monthly_lots
+                else {"delivery_total_hours": delivery_total_quantity}
+            )
             product_metadata: dict[str, Any] = {}
         else:
             delivery_components, delivery_total_quantity = build_jkm_strip_components(
@@ -943,6 +1462,7 @@ def _normalize_context(
                 as_of,
                 float(forward),
                 model,
+                exchange_mapping_id,
             )
             component_weight_basis = "equal_contract_lots"
             component_quantity_label = "MMBtu across monthly lots"
@@ -952,7 +1472,7 @@ def _normalize_context(
                 "delivery_total_quantity": delivery_total_quantity,
                 "monthly_contract_size": JKM_CONTRACT_SIZE_MMBTU,
             }
-            product_metadata = _jkm_product_metadata(model)
+            product_metadata = _jkm_product_metadata(model, exchange_mapping)
         first_expiration = min(
             _as_date(item["option_expiration_date"], "Component expiration date")
             for item in delivery_components
@@ -969,6 +1489,9 @@ def _normalize_context(
             "asset": asset,
             "price_unit_label": price_spec["price_unit_label"],
             "trade_currency": price_spec["currency"],
+            "price_currency_conversion_factor": price_spec[
+                "currency_conversion_factor"
+            ],
             "premium_convention": premium_convention,
             "premium_convention_label": PREMIUM_CONVENTION_LABELS[
                 premium_convention
@@ -1002,6 +1525,7 @@ def _normalize_context(
             "vega_basis": "input_vol",
             "margin_style": resolved_premium_convention,
             "forward": forward,
+            "forward_source": USER_INPUT_FORWARD_SOURCE,
             "rate": (
                 0.0
                 if resolved_premium_convention == "futures_style"
@@ -1014,6 +1538,21 @@ def _normalize_context(
             ),
             **product_metadata,
         }
+        if exchange_mapping is not None:
+            normalized_strip.update(
+                {
+                    "exchange_mapping_id": exchange_mapping.mapping_id,
+                    "contract_convention_code": (
+                        exchange_mapping.contract_convention_code
+                    ),
+                    "surface_product": exchange_mapping.surface_product,
+                    "volatility_surface_source": (
+                        exchange_mapping.volatility_surface_source
+                    ),
+                    "sizing_mode": exchange_mapping.sizing_mode,
+                    "exchange_product_code": exchange_mapping.exchange_product_code,
+                }
+            )
         if model == "asian76":
             first_averaging_start = min(
                 _as_date(
@@ -1037,8 +1576,10 @@ def _normalize_context(
         (
             governed_month_component["option_expiration_date"]
             if governed_month_component
-            and asset == "JKM"
-            and model == "asian76"
+            and (
+                exchange_mapping is not None
+                or (asset == "JKM" and model == "asian76")
+            )
             else context.get("expiration_date")
         ),
         "Expiration date",
@@ -1084,6 +1625,9 @@ def _normalize_context(
         "asset": asset,
         "price_unit_label": price_spec["price_unit_label"],
         "trade_currency": price_spec["currency"],
+        "price_currency_conversion_factor": price_spec[
+            "currency_conversion_factor"
+        ],
         "premium_convention": premium_convention,
         "premium_convention_label": PREMIUM_CONVENTION_LABELS[premium_convention],
         "resolved_premium_convention": resolved_premium_convention,
@@ -1105,9 +1649,12 @@ def _normalize_context(
             "adjusted_pricing_vol" if asset == "JKM" else "input_vol"
         ),
         "margin_style": resolved_premium_convention,
+        "forward_source": USER_INPUT_FORWARD_SOURCE,
     }
+    if exchange_mapping_id is not None:
+        normalized["exchange_mapping_id"] = exchange_mapping_id
     if asset == "JKM":
-        normalized.update(_jkm_product_metadata(model))
+        normalized.update(_jkm_product_metadata(model, exchange_mapping))
     if governed_month_component:
         normalized.update(
             {
@@ -1124,12 +1671,28 @@ def _normalize_context(
                 ],
             }
         )
+        for metadata_field in (
+            "contract_convention_code",
+            "surface_product",
+            "surface_expiry_convention_code",
+            "surface_expiry_convention_version",
+            "surface_option_expiration_date",
+            "volatility_surface_source",
+            "max_surface_extension_days",
+            "exchange_product_code",
+            "exchange_product_name",
+            "exchange_expiry_rule",
+        ):
+            if metadata_field in governed_month_component:
+                normalized[metadata_field] = governed_month_component[
+                    metadata_field
+                ]
         if "averaging_end_date" in governed_month_component:
             normalized["averaging_end_date"] = governed_month_component[
                 "averaging_end_date"
             ]
 
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
         normalized["forward"] = forward
         normalized["rate"] = (
             0.0
@@ -1141,29 +1704,8 @@ def _normalize_context(
                 maximum=2.0,
             )
         )
-    elif model == "kirk":
-        normalized["asset_1"] = _finite_number(
-            context.get("asset_1"),
-            "Asset 1 price",
-            minimum=0.0,
-            strict_minimum=True,
-        )
-        normalized["asset_2"] = _finite_number(
-            context.get("asset_2"),
-            "Asset 2 price",
-            minimum=0.0,
-            strict_minimum=True,
-        )
-        if context.get("correlation") is None:
-            raise StructureValidationError(
-                "Correlation is required and must be between -1 and 1."
-            )
-        normalized["correlation"] = _finite_number(
-            context.get("correlation"),
-            "Correlation",
-            minimum=-1.0,
-            maximum=1.0,
-        )
+        if model == "american_futures":
+            normalized["american_futures_steps"] = AMERICAN_FUTURES_STEPS
     else:
         raise StructureValidationError(f"Unsupported pricing model: {model}.")
 
@@ -1232,7 +1774,12 @@ def _sizing_scales(
     # NBP premiums and Greeks are quoted in pence/therm while trade totals are
     # reported in pounds sterling. All other supported prices already use the
     # underlying trade currency.
-    currency_conversion_factor = 0.01 if context["asset"] == "NBP" else 1.0
+    currency_conversion_factor = float(
+        context.get(
+            "price_currency_conversion_factor",
+            0.01 if context["asset"] == "NBP" else 1.0,
+        )
+    )
     position_scale = quantity_scale * currency_conversion_factor
     if not all(
         math.isfinite(value)
@@ -1286,7 +1833,7 @@ def _normalize_leg(
         ratio = abs(raw_ratio)
         weight = raw_ratio
     strike = _finite_number(raw_leg.get("strike"), f"{prefix} strike")
-    if model in {"black76", "asian76"} and strike <= 0:
+    if model in SINGLE_ASSET_MODELS and strike <= 0:
         raise StructureValidationError(f"{prefix}: strike must be greater than zero.")
     if model == "kirk" and context["asset_2"] + strike <= 0:
         raise StructureValidationError(
@@ -1303,9 +1850,11 @@ def _normalize_leg(
         "call_put": call_put,
         "strike": strike,
     }
-    factor = context["vol_adjustment_factor"]
-
-    def normalize_vol(raw_key: str, label: str) -> tuple[float, float]:
+    def normalize_vol(
+        raw_key: str,
+        label: str,
+        factor: float,
+    ) -> tuple[float, float]:
         entered_vol = _finite_number(
             raw_leg.get(raw_key),
             f"{prefix} {label}",
@@ -1326,7 +1875,8 @@ def _normalize_leg(
             )
         return raw_vol, used_vol
 
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
+        factor = context["vol_adjustment_factor"]
         raw_basis = raw_leg.get("quote_basis")
         quote_basis = str(raw_basis or "VOL").strip().upper()
         if quote_basis == "VOLATILITY":
@@ -1338,7 +1888,11 @@ def _normalize_leg(
         quote_key = "quote_value" if raw_basis is not None else "volatility"
         quote_input = raw_leg.get(quote_key)
         if quote_basis == "VOL":
-            raw_vol, used_vol = normalize_vol(quote_key, "input volatility")
+            raw_vol, used_vol = normalize_vol(
+                quote_key,
+                "input volatility",
+                factor,
+            )
             entered_premium = None
         else:
             entered_premium = _finite_number(
@@ -1371,10 +1925,12 @@ def _normalize_leg(
         raw_v1, used_v1 = normalize_vol(
             "volatility_asset_1",
             "Asset 1 input volatility",
+            context["asset_1_vol_adjustment_factor"],
         )
         raw_v2, used_v2 = normalize_vol(
             "volatility_asset_2",
             "Asset 2 input volatility",
+            context["asset_2_vol_adjustment_factor"],
         )
         leg["raw_volatility_asset_1"] = raw_v1
         leg["raw_volatility_asset_2"] = raw_v2
@@ -1645,6 +2201,25 @@ def _price_leg(
                 ),
                 "rho": rho,
             }
+    elif model == "american_futures":
+        value, delta, gamma, theta, vega, rho = (
+            american_on_futures_equity_style(
+                leg["call_put"],
+                context["forward"],
+                leg["strike"],
+                context["time_to_expiry"],
+                FlatDiscountCurve(context["rate"]),
+                leg["volatility_used"],
+                steps=context.get("american_futures_steps", AMERICAN_FUTURES_STEPS),
+            )
+        )
+        greeks = {
+            "delta": delta,
+            "gamma": gamma,
+            "theta": theta,
+            "vega": vega * context["vol_adjustment_factor"],
+            "rho": rho,
+        }
     else:
         call_put = "call" if leg["call_put"] == "C" else "put"
         value = kirk_model_with_substitution(
@@ -1667,7 +2242,8 @@ def _price_leg(
             context["time_to_expiry"],
             call_put,
         )
-        volatility_factor = context["vol_adjustment_factor"]
+        volatility_factor_1 = context["asset_1_vol_adjustment_factor"]
+        volatility_factor_2 = context["asset_2_vol_adjustment_factor"]
         vega_sigma1 = _json_number(raw_greeks.get("vega_sigma1"))
         vega_sigma2 = _json_number(raw_greeks.get("vega_sigma2"))
         greeks = {
@@ -1677,10 +2253,10 @@ def _price_leg(
             "gamma_s2": raw_greeks.get("gamma_S2"),
             "gamma_s1s2": raw_greeks.get("gamma_S1S2"),
             "vega_sigma1": (
-                None if vega_sigma1 is None else vega_sigma1 * volatility_factor
+                None if vega_sigma1 is None else vega_sigma1 * volatility_factor_1
             ),
             "vega_sigma2": (
-                None if vega_sigma2 is None else vega_sigma2 * volatility_factor
+                None if vega_sigma2 is None else vega_sigma2 * volatility_factor_2
             ),
             "theta": raw_greeks.get("theta"),
             "corr_sensitivity": raw_greeks.get("corr_sensitivity"),
@@ -1769,6 +2345,16 @@ def _price_leg_value_only(
                 context["rate"],
                 leg["volatility_used"],
             )[0]
+    elif model == "american_futures":
+        value = american_on_futures_equity_style_price(
+            leg["call_put"],
+            context["forward"],
+            leg["strike"],
+            context["time_to_expiry"],
+            FlatDiscountCurve(context["rate"]),
+            leg["volatility_used"],
+            steps=context.get("american_futures_steps", AMERICAN_FUTURES_STEPS),
+        )
     else:
         value = kirk_model_with_substitution(
             context["asset_1"],
@@ -1841,13 +2427,24 @@ def _raw_context_from_normalized(model: str, context: dict[str, Any]) -> dict[st
     }
     if context.get("delivery_month"):
         common["delivery_month"] = context["delivery_month"]
-    if model in {"black76", "asian76"}:
+    if context.get("exchange_mapping_id"):
+        common["exchange_mapping_id"] = context["exchange_mapping_id"]
+    if model in SINGLE_ASSET_MODELS:
         common.update({"forward": context["forward"], "rate": context["rate"]})
     else:
         common.update(
             {
-                "asset_1": context["asset_1"],
-                "asset_2": context["asset_2"],
+                "asset_1_code": context["asset_1_code"],
+                "asset_2_code": context["asset_2_code"],
+                "asset_1_forward": context["asset_1_forward"],
+                "asset_2_forward": context["asset_2_forward"],
+                "asset_1_reference_expiry": context[
+                    "asset_1_reference_expiry"
+                ],
+                "asset_2_reference_expiry": context[
+                    "asset_2_reference_expiry"
+                ],
+                "contractual_expiry": context["contractual_expiry"],
                 "correlation": context["correlation"],
             }
         )
@@ -1861,7 +2458,7 @@ def _raw_leg_from_normalized(model: str, leg: dict[str, Any]) -> dict[str, Any]:
         key: leg[key]
         for key in ("leg_id", "name", "side", "ratio", "call_put", "strike")
     }
-    if model in {"black76", "asian76"}:
+    if model in SINGLE_ASSET_MODELS:
         raw["volatility"] = leg["raw_volatility"]
     else:
         raw["volatility_asset_1"] = leg["raw_volatility_asset_1"]
@@ -2017,9 +2614,9 @@ def calculate_structure(
             "and Rho are not applicable."
         )
         warnings.append(
-            "Kirk applies the selected asset calendar and one shared contract-expiration "
-            "adjustment to both volatility inputs; Asset 1, Asset 2, and strike must "
-            "use the same price unit."
+            "Kirk adjusts each volatility with its asset's governed variance "
+            "calendar and volatility-reference expiry. Asset 1, Asset 2, and "
+            "strike use the same currency and price unit."
         )
     if is_futures_style and model != "kirk":
         warnings.append(
@@ -2062,7 +2659,7 @@ def calculate_structure(
         else "Theta (one-calendar-day roll)"
     )
     if (
-        model in {"black76", "asian76"}
+        model in SINGLE_ASSET_MODELS
         and normalized_context["vega_basis"] == "adjusted_pricing_vol"
     ):
         greek_labels["vega"] = "Vega (adjusted pricing vol, 1 point)"
@@ -2252,6 +2849,18 @@ def _price_at_state(
                 context["rate"],
                 leg["volatility_used"],
             )[0]
+        elif model == "american_futures":
+            value = american_on_futures_equity_style_price(
+                leg["call_put"],
+                underlying_value,
+                leg["strike"],
+                time_to_expiry,
+                FlatDiscountCurve(context["rate"]),
+                leg["volatility_used"],
+                steps=context.get(
+                    "american_futures_steps", AMERICAN_FUTURES_STEPS
+                ),
+            )
         else:
             value = kirk_model_with_substitution(
                 underlying_value,
@@ -2430,7 +3039,7 @@ def parallel_volatility_series(
     for raw_shift in _include_base_number(shifts, 0.0):
         shifted_legs = [dict(leg) for leg in legs]
         for leg in shifted_legs:
-            if model in {"black76", "asian76"}:
+            if model in SINGLE_ASSET_MODELS:
                 leg["volatility"] += raw_shift
             else:
                 leg["volatility_asset_1"] += raw_shift
@@ -2531,10 +3140,22 @@ def expiration_extension_series(
             "monthly expiries."
         )
     base_expiration = _as_date(context["expiration_date"], "Expiration date")
-    contract_expiration = _as_date(
-        context["contract_expiration_date"],
-        "Contract expiration date",
-    )
+    if model == "kirk":
+        contract_expiration = min(
+            _as_date(
+                context["asset_1_reference_expiry"],
+                "Asset 1 volatility-reference expiry",
+            ),
+            _as_date(
+                context["asset_2_reference_expiry"],
+                "Asset 2 volatility-reference expiry",
+            ),
+        )
+    else:
+        contract_expiration = _as_date(
+            context["contract_expiration_date"],
+            "Contract expiration date",
+        )
     start = calculation_date + timedelta(days=1)
     if model == "asian76":
         start = max(
@@ -2550,6 +3171,8 @@ def expiration_extension_series(
     for candidate_date in dates:
         candidate_context = dict(context)
         candidate_context["expiration_date"] = candidate_date.isoformat()
+        if model == "kirk":
+            candidate_context["contractual_expiry"] = candidate_date.isoformat()
         try:
             value = _calculate_trade_value_only(
                 model,

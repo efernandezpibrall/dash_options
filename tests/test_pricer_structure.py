@@ -4,11 +4,23 @@ from datetime import date, timedelta
 import pytest
 
 from options.options_library import (
+    american_on_futures_equity_style,
     asian_76,
     black_76,
     black_76_futures_style,
     kirk_model_with_substitution,
     kirk_spread_greeks,
+)
+from options.option_contract_conventions import FlatDiscountCurve
+from options.option_expiry_engine import (
+    business_days_between,
+    get_surface_calendar_mapping,
+)
+from pricer_exchange_registry import (
+    EXCHANGE_OPTION_MAPPINGS,
+    canonical_exchange_mapping_id,
+    exchange_mapping_for_asset_model,
+    exchange_option_mapping,
 )
 from pricer_structure import (
     GREEK_FIELDS,
@@ -47,6 +59,33 @@ def black_context(contract_expiry=None):
         "rate": 0.03,
         "expiration_date": EXPIRY.isoformat(),
         "contract_expiration_date": (contract_expiry or EXPIRY).isoformat(),
+    }
+
+
+def kirk_context(
+    *,
+    asset_1_code="JKM",
+    asset_2_code="HH",
+    asset_1_forward=100.0,
+    asset_2_forward=90.0,
+    correlation=0.45,
+    contractual_expiry=EXPIRY,
+    asset_1_reference_expiry=None,
+    asset_2_reference_expiry=None,
+):
+    return {
+        "asset_1_code": asset_1_code,
+        "asset_2_code": asset_2_code,
+        "asset_1_forward": asset_1_forward,
+        "asset_2_forward": asset_2_forward,
+        "correlation": correlation,
+        "contractual_expiry": contractual_expiry.isoformat(),
+        "asset_1_reference_expiry": (
+            asset_1_reference_expiry or contractual_expiry
+        ).isoformat(),
+        "asset_2_reference_expiry": (
+            asset_2_reference_expiry or contractual_expiry
+        ).isoformat(),
     }
 
 
@@ -626,13 +665,7 @@ def test_premium_quote_validation_is_actionable_and_kirk_remains_vol_only():
     with pytest.raises(StructureValidationError, match="volatility inputs only"):
         calculate_structure(
             "kirk",
-            {
-                "asset_1": 100,
-                "asset_2": 90,
-                "correlation": 0.5,
-                "expiration_date": EXPIRY.isoformat(),
-                "contract_expiration_date": EXPIRY.isoformat(),
-            },
+            kirk_context(correlation=0.5),
             sizing(),
             [{**default_leg("kirk", 1), "quote_basis": "PREMIUM"}],
             as_of=AS_OF,
@@ -830,13 +863,7 @@ def test_asian_structure_preserves_scaling_and_propagates_unavailable_theta():
 
 
 def test_kirk_structure_keeps_risk_dimensions_and_explicitly_has_no_rho():
-    context = {
-        "asset_1": 100,
-        "asset_2": 90,
-        "correlation": 0.45,
-        "expiration_date": EXPIRY.isoformat(),
-        "contract_expiration_date": EXPIRY.isoformat(),
-    }
+    context = kirk_context()
     legs = [
         {
             **default_leg("kirk", 1),
@@ -867,13 +894,7 @@ def test_kirk_structure_keeps_risk_dimensions_and_explicitly_has_no_rho():
 
 
 def test_single_kirk_leg_matches_existing_library_value_and_greeks():
-    context = {
-        "asset_1": 100,
-        "asset_2": 90,
-        "correlation": 0.45,
-        "expiration_date": EXPIRY.isoformat(),
-        "contract_expiration_date": EXPIRY.isoformat(),
-    }
+    context = kirk_context()
     leg = {
         **default_leg("kirk", 1),
         "strike": 3,
@@ -925,6 +946,130 @@ def test_single_kirk_leg_matches_existing_library_value_and_greeks():
     for metric, library_key in mapping.items():
         assert actual["greeks"][metric] == pytest.approx(
             expected_greeks[library_key]
+        )
+
+
+def test_kirk_uses_separate_governed_calendar_factors_for_each_asset_volatility():
+    asset_1_reference = EXPIRY + timedelta(days=30)
+    asset_2_reference = EXPIRY + timedelta(days=60)
+    context = kirk_context(
+        asset_1_reference_expiry=asset_1_reference,
+        asset_2_reference_expiry=asset_2_reference,
+    )
+    leg = {
+        **default_leg("kirk", 1),
+        "volatility_asset_1": 0.24,
+        "volatility_asset_2": 0.36,
+    }
+
+    snapshot = calculate_structure(
+        "kirk",
+        context,
+        sizing(),
+        [leg],
+        as_of=AS_OF,
+    )
+    normalized = snapshot["context"]
+    result_leg = snapshot["legs"][0]
+    jkm_calendar = get_surface_calendar_mapping("JKM").variance_calendar_code
+    hh_calendar = get_surface_calendar_mapping("HH").variance_calendar_code
+    jkm_contractual_days = business_days_between(AS_OF, EXPIRY, jkm_calendar)
+    jkm_reference_days = business_days_between(
+        AS_OF,
+        asset_1_reference,
+        jkm_calendar,
+    )
+    hh_contractual_days = business_days_between(AS_OF, EXPIRY, hh_calendar)
+    hh_reference_days = business_days_between(
+        AS_OF,
+        asset_2_reference,
+        hh_calendar,
+    )
+    expected_factor_1 = (jkm_contractual_days / jkm_reference_days) ** 0.5
+    expected_factor_2 = (hh_contractual_days / hh_reference_days) ** 0.5
+
+    assert normalized["asset_1_code"] == "JKM"
+    assert normalized["asset_2_code"] == "HH"
+    assert normalized["asset_1_price_unit"] == "USD/MMBtu"
+    assert normalized["asset_2_price_unit"] == "USD/MMBtu"
+    assert normalized["asset_1_calendar_code"] == jkm_calendar
+    assert normalized["asset_2_calendar_code"] == hh_calendar
+    assert normalized["asset_1_contractual_business_days"] == jkm_contractual_days
+    assert normalized["asset_2_contractual_business_days"] == hh_contractual_days
+    assert normalized["asset_1_reference_business_days"] == jkm_reference_days
+    assert normalized["asset_2_reference_business_days"] == hh_reference_days
+    assert normalized["asset_1_vol_adjustment_factor"] == pytest.approx(
+        expected_factor_1
+    )
+    assert normalized["asset_2_vol_adjustment_factor"] == pytest.approx(
+        expected_factor_2
+    )
+    assert normalized["discount_factor"] == 1.0
+    assert normalized["time_to_expiry"] == pytest.approx(
+        (EXPIRY - AS_OF).days / 365.25
+    )
+    assert result_leg["raw_volatility_asset_1"] == pytest.approx(0.24)
+    assert result_leg["raw_volatility_asset_2"] == pytest.approx(0.36)
+    assert result_leg["volatility_asset_1_used"] == pytest.approx(
+        0.24 * expected_factor_1
+    )
+    assert result_leg["volatility_asset_2_used"] == pytest.approx(
+        0.36 * expected_factor_2
+    )
+
+
+@pytest.mark.parametrize("missing_field", ["asset_1_code", "asset_2_code"])
+def test_kirk_requires_both_asset_selections(missing_field):
+    context = kirk_context()
+    context[missing_field] = None
+    with pytest.raises(StructureValidationError, match="is required for Kirk"):
+        calculate_structure(
+            "kirk",
+            context,
+            sizing(),
+            [default_leg("kirk", 1)],
+            as_of=AS_OF,
+        )
+
+
+def test_kirk_rejects_duplicate_assets():
+    with pytest.raises(StructureValidationError, match="must be different"):
+        calculate_structure(
+            "kirk",
+            kirk_context(asset_2_code="JKM"),
+            sizing(),
+            [default_leg("kirk", 1)],
+            as_of=AS_OF,
+        )
+
+
+def test_kirk_mixed_price_units_fail_closed_until_conversion_is_supported():
+    with pytest.raises(
+        StructureValidationError,
+        match="Multiplier/conversion required",
+    ):
+        calculate_structure(
+            "kirk",
+            kirk_context(asset_2_code="Brent"),
+            sizing(),
+            [default_leg("kirk", 1)],
+            as_of=AS_OF,
+        )
+
+
+def test_kirk_rejects_reference_expiry_before_contractual_expiry():
+    with pytest.raises(
+        StructureValidationError,
+        match="must be on or after the contractual expiry",
+    ):
+        calculate_structure(
+            "kirk",
+            kirk_context(
+                asset_2_reference_expiry=EXPIRY - timedelta(days=1),
+            ),
+            sizing(),
+            [default_leg("kirk", 1)],
+            as_of=AS_OF,
         )
 
 
@@ -1171,11 +1316,268 @@ def test_all_assets_expose_governed_monthly_deliveries(
     assert component["option_expiration_date"] == expected_expiration
     assert component["contract_expiration_date"] == expected_expiration
     if asset == "HH":
-        assert component["expiry_convention_code"] == "ICE_HH_PHE_6590274_EXPIRY"
-        assert component["expiry_status"] == "official"
+        assert component["expiry_convention_code"] == "CME_HH_LNE_560_EXPIRY"
+        assert component["expiry_status"] == "calculated"
 
 
-def test_hh_january_2028_uses_the_published_phe_expiry():
+def test_cme_bzo_uses_user_forward_and_ice_brent_surface_with_target_identity():
+    as_of = date(2026, 8, 21)
+    months = available_delivery_months(
+        "Brent",
+        "black76",
+        as_of,
+        mapping_id="CME-BRENT-BZO",
+    )
+    component = build_delivery_month_component(
+        "Brent",
+        "black76",
+        months[0],
+        as_of,
+        72.5,
+        mapping_id="CME-BRENT-BZO",
+    )
+
+    assert months[0] == date(2026, 10, 1)
+    assert component["option_expiration_date"] == "2026-08-25"
+    assert component["expiry_convention_code"] == "CME_BRENT_BZO_504_EXPIRY"
+    assert component["contract_convention_code"] == "CME_BRENT_BZO_504"
+    assert component["surface_product"] == "BRENT"
+    assert component["surface_expiry_convention_code"] == "ICE_BRENT_218_EXPIRY"
+    assert component["forward_source"] == "USER_INPUT"
+    assert component["volatility_surface_source"] == "ICE_BRENT"
+    assert component["forward"] == 72.5
+
+    # Mapping and asset/model arrive through separate Dash callbacks. A
+    # transient mixed UI state must remain renderable, while calculations
+    # retain strict contract-identity validation.
+    assert available_delivery_months(
+        "TTF",
+        "black76",
+        as_of,
+        mapping_id="CME-BRENT-BZO",
+    ) == available_delivery_months("TTF", "black76", as_of)
+    with pytest.raises(
+        StructureValidationError,
+        match="CME-BRENT-BZO requires Brent Black-76",
+    ):
+        calculate_structure(
+            "black76",
+            {
+                "asset": "TTF",
+                "exchange_mapping_id": "CME-BRENT-BZO",
+                "premium_convention": "futures_style",
+                "delivery_shape": "MONTH",
+                "delivery_month": "2026-09-01",
+                "forward": 42.0,
+                "rate": 0.0,
+                "expiration_date": "2026-08-25",
+                "contract_expiration_date": "2026-08-26",
+            },
+            sizing(1, 720),
+            [black_leg(1, strike=42.0, volatility=0.50)],
+            as_of=as_of,
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "mapping_id",
+        "expiry_convention_code",
+        "volatility_surface_source",
+        "expected_contract_size",
+    ),
+    [
+        ("ICE-TTF-TFO", "ICE_TTF_TFO_71085679_EXPIRY", "ICE_TTF_TFO", 720),
+        ("ICE-JKM-APO", "ICE_JKM_71090519_EXPIRY", "ICE_JKM_APO", 10_000),
+        ("ICE-JKM-JKZ", "ICE_JKM_JKZ_VIA_TFO", "ICE_JKM_APO", 10_000),
+        ("ICE-HH-PHE", "ICE_HH_PHE_6590274_EXPIRY", "CME_HH_LNE", 2_500),
+        ("ICE-BRENT-B", "ICE_BRENT_218_EXPIRY", "ICE_BRENT", 1_000),
+        ("ICE-NBP-UKF", "ICE_NBP_UKF_71085728_EXPIRY", "ICE_NBP_UKF", 30_000),
+        ("CME-TTF-TFO", "CME_TTF_TFO_1162_EXPIRY", "ICE_TTF_TFO", 720),
+        ("CME-TTF-TTO", "CME_TTF_TTO_1161_EXPIRY", "ICE_TTF_TFO", 720),
+        ("CME-HH-LNE", "CME_HH_LNE_560_EXPIRY", "CME_HH_LNE", 10_000),
+        ("CME-BRENT-BE", "CME_BRENT_BE_378_EXPIRY", "ICE_BRENT", 1_000),
+        ("CME-BRENT-BZO", "CME_BRENT_BZO_504_EXPIRY", "ICE_BRENT", 1_000),
+        ("CME-NBP-UKO", "CME_NBP_UKO_1163_EXPIRY", "ICE_NBP_UKF", 30_000),
+        ("CME-NBP-UFO", "CME_NBP_UFO_1164_EXPIRY", "ICE_NBP_UKF", 30_000),
+        ("CME-TTF-TTL", "CME_TTF_TTL_1016_EXPIRY", "ICE_TTF_TFO", 720),
+        ("CME-TTF-TFP", "CME_TTF_TFP_1018_EXPIRY", "ICE_TTF_TFO", 10_000),
+        ("CME-TTF-TFF", "CME_TTF_TFF_1019_EXPIRY", "ICE_TTF_TFO", 10_000),
+        ("CME-JKM-JKO", "CME_JKM_JKO_869_EXPIRY", "ICE_JKM_APO", 10_000),
+        ("CME-JKM-JFO", "CME_JKM_JFO_864_EXPIRY", "ICE_JKM_APO", 10_000),
+        ("CME-HH-ON", "CME_HH_ON_370_EXPIRY", "CME_HH_LNE", 10_000),
+    ],
+)
+def test_ready_exchange_mapping_registry_and_calculation_parity(
+    mapping_id,
+    expiry_convention_code,
+    volatility_surface_source,
+    expected_contract_size,
+):
+    as_of = date(2026, 8, 21)
+    mapping = exchange_option_mapping(mapping_id)
+    month = available_delivery_months(
+        mapping.asset, mapping.model, as_of, mapping_id=mapping_id
+    )[0]
+    component = build_delivery_month_component(
+        mapping.asset, mapping.model, month, as_of, 42.0, mapping_id=mapping_id
+    )
+    context = {
+        "asset": mapping.asset,
+        "exchange_mapping_id": mapping_id,
+        "premium_convention": mapping.premium_convention,
+        "delivery_shape": "MONTH",
+        "delivery_month": month.isoformat(),
+        "forward": 42.0,
+        "rate": 0.03,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+    if mapping.model == "asian76":
+        context["averaging_start_date"] = component["averaging_start_date"]
+    snapshot = calculate_structure(
+        mapping.model,
+        context,
+        sizing(1, expected_contract_size),
+        [black_leg(1, strike=42.0, volatility=0.5)],
+        as_of=as_of,
+    )
+
+    assert snapshot["schema_version"] == 16
+    assert snapshot["context"]["exchange_mapping_id"] == mapping_id
+    assert snapshot["context"]["expiry_convention_code"] == expiry_convention_code
+    assert snapshot["context"]["contract_convention_code"] == (
+        mapping.contract_convention_code
+    )
+    assert snapshot["context"]["forward"] == 42.0
+    assert snapshot["context"]["forward_source"] == "USER_INPUT"
+    assert snapshot["context"]["volatility_surface_source"] == (
+        volatility_surface_source
+    )
+    assert default_contract_size(mapping.asset, context, as_of=as_of) == pytest.approx(
+        expected_contract_size
+    )
+
+
+def test_registry_has_canonical_phe_alias_all_ready_and_lne_hh_default():
+    assert len(EXCHANGE_OPTION_MAPPINGS) == 19
+    assert sum(mapping.pricing_supported for mapping in EXCHANGE_OPTION_MAPPINGS) == 19
+    assert canonical_exchange_mapping_id("ICE-HH-CURRENT") == "ICE-HH-PHE"
+    assert exchange_option_mapping("ICE-HH-CURRENT").mapping_id == "ICE-HH-PHE"
+    assert exchange_mapping_for_asset_model("HH", "black76").mapping_id == (
+        "CME-HH-LNE"
+    )
+
+
+@pytest.mark.parametrize(("call_put", "lots"), [("C", 2.0), ("P", -2.0)])
+def test_cme_hh_on_matches_the_american_library_and_signed_lots(call_put, lots):
+    as_of = date(2026, 8, 21)
+    component = build_delivery_month_component(
+        "HH",
+        "american_futures",
+        "2027-01-01",
+        as_of,
+        3.25,
+        mapping_id="CME-HH-ON",
+    )
+    context = {
+        "asset": "HH",
+        "exchange_mapping_id": "CME-HH-ON",
+        "premium_convention": "upfront",
+        "delivery_shape": "MONTH",
+        "delivery_month": "2027-01-01",
+        "forward": 3.25,
+        "rate": 0.04,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+    leg = default_leg("american_futures", 1)
+    leg.update(call_put=call_put, strike=3.4, ratio=lots, quote_value=0.55)
+    leg.pop("side")
+    snapshot = calculate_structure(
+        "american_futures",
+        context,
+        sizing(1, 10_000),
+        [leg],
+        as_of=as_of,
+    )
+    time_to_expiry = snapshot["context"]["time_to_expiry"]
+    expected = american_on_futures_equity_style(
+        call_put,
+        3.25,
+        3.4,
+        time_to_expiry,
+        FlatDiscountCurve(0.04),
+        0.55,
+        steps=400,
+    )
+
+    priced = snapshot["legs"][0]
+    assert priced["unit"]["value"] == pytest.approx(expected[0])
+    for field, value in zip(GREEK_FIELDS["american_futures"], expected[1:]):
+        assert priced["unit"]["greeks"][field] == pytest.approx(value)
+    assert snapshot["totals"]["trade_value"] == pytest.approx(
+        lots * expected[0] * 10_000
+    )
+    assert snapshot["context"]["american_futures_steps"] == 400
+    if call_put == "C":
+        payoff = payoff_series(snapshot, valuation_date=as_of, points=11)
+        rates = rate_sensitivity_series(snapshot, points=5)
+        shifted_vol = parallel_volatility_series(snapshot, points=5)
+
+        assert len(payoff["theoretical"]) == 11
+        assert 0.04 in rates["rates"]
+        assert len(set(round(value, 10) for value in rates["values"])) > 1
+        assert 0.0 in shifted_vol["shifts_percentage_points"]
+
+
+def test_new_equal_monthly_lot_strips_use_mapping_specific_sizes_and_identity():
+    as_of = date(2026, 8, 21)
+    ttf_context = {
+        "asset": "TTF",
+        "exchange_mapping_id": "CME-TTF-TFP",
+        "premium_convention": "upfront",
+        "delivery_shape": "Q1",
+        "delivery_year": 2027,
+        "forward": 12.0,
+        "rate": 0.03,
+    }
+    ttf = calculate_structure(
+        "black76",
+        ttf_context,
+        sizing(1, default_contract_size("TTF", ttf_context, as_of=as_of)),
+        [black_leg(1, strike=12.0, volatility=0.4)],
+        as_of=as_of,
+    )
+    jkm_context = {
+        "asset": "JKM",
+        "exchange_mapping_id": "CME-JKM-JFO",
+        "premium_convention": "futures_style",
+        "delivery_shape": "Q1",
+        "delivery_year": 2027,
+        "forward": 12.0,
+        "rate": 0.0,
+    }
+    jkm = calculate_structure(
+        "asian76",
+        jkm_context,
+        sizing(1, default_contract_size("JKM", jkm_context, as_of=as_of)),
+        [black_leg(1, strike=12.0, volatility=0.4)],
+        as_of=as_of,
+    )
+
+    assert ttf["context"]["delivery_total_quantity"] == 30_000
+    assert ttf["context"]["component_weight_basis"] == "equal_contract_lots"
+    assert ttf["sizing"]["contract_multiplier"] == 30_000
+    assert jkm["context"]["delivery_total_quantity"] == 30_000
+    assert jkm["context"]["exchange_product_code"] == "JFO"
+    assert {
+        component["exchange_mapping_id"]
+        for component in jkm["context"]["delivery_components"]
+    } == {"CME-JKM-JFO"}
+
+
+def test_hh_january_2028_uses_the_cme_lne_expiry():
     component = build_delivery_month_component(
         "HH",
         "black76",
@@ -1184,7 +1586,7 @@ def test_hh_january_2028_uses_the_published_phe_expiry():
     )
 
     assert component["option_expiration_date"] == "2027-12-28"
-    assert component["expiry_status"] == "official"
+    assert component["expiry_status"] == "calculated"
 
 
 def test_ttf_month_delivery_governs_contract_anchor_but_keeps_custom_option_expiry():
@@ -1311,7 +1713,7 @@ def test_ttf_strip_scenarios_respect_staggered_expiries_and_rate_contract():
     [
         ("TTF", "ICE_TTF_TFO_TRADING", 2, 6),
         ("JKM", "ICE_JKM_71090519_TRADING", 3, 7),
-        ("HH", "ICE_HH_PHE_TRADING", 3, 7),
+        ("HH", "CME_NYMEX_HH_OPTION_TRADING", 3, 7),
         ("Brent", "ICE_BRENT_218_TRADING", 3, 7),
         ("NBP", "ICE_NBP_UKF_TRADING", 2, 6),
     ],
@@ -1547,13 +1949,8 @@ def test_ttf_strip_upfront_premium_discounts_each_monthly_component():
 
 def test_kirk_rejects_unsupported_upfront_premium_convention():
     context = {
-        "asset": "TTF",
+        **kirk_context(),
         "premium_convention": "upfront",
-        "asset_1": 100.0,
-        "asset_2": 90.0,
-        "correlation": 0.5,
-        "expiration_date": EXPIRY.isoformat(),
-        "contract_expiration_date": EXPIRY.isoformat(),
     }
     with pytest.raises(StructureValidationError, match="not supported for Kirk"):
         calculate_structure(
@@ -1720,14 +2117,7 @@ def test_price_only_scenario_path_matches_full_pricing_for_every_pricing_branch(
         (
             "Kirk",
             "kirk",
-            {
-                "asset": "Brent",
-                "asset_1": 100.0,
-                "asset_2": 90.0,
-                "correlation": 0.45,
-                "expiration_date": EXPIRY.isoformat(),
-                "contract_expiration_date": EXPIRY.isoformat(),
-            },
+            kirk_context(),
             [
                 {
                     **default_leg("kirk", 1),

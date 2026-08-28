@@ -845,7 +845,7 @@ def _trade_tape() -> pd.DataFrame:
                 "trade_size": 20.0,
                 "condition_codes": None,
                 "future_match_price": 78.0,
-                "future_match_source": "TRADE",
+                "future_match_source": "PREVAILING_MID",
                 "future_match_lag_ms": 800,
                 "trade_iv": 0.31,
                 "trade_iv_status": "resolved",
@@ -944,6 +944,8 @@ def test_trade_window_filters_only_exact_trade_overlays_and_rows():
     assert traces["Trade-time IV · Puts"].marker.symbol[0] == "circle-open"
     assert "Underlying" in traces["Trade-time IV · Calls"].hovertemplate
     assert float(traces["Trade-time IV · Calls"].customdata[0][4]) == 78.0
+    assert traces["Trade-time IV · Calls"].customdata[0][5] == "Exact mid"
+    assert traces["Trade-time IV · Puts"].customdata[0][5] == "Prevailing mid"
     assert figure.layout.yaxis.range is not None
 
     recent = history.filter_trade_window(tape, 12 * 3600 + 20 * 60)
@@ -951,6 +953,7 @@ def test_trade_window_filters_only_exact_trade_overlays_and_rows():
     rows = history._trade_tape_rows(recent, "2026-12-01", 0)
     assert len(rows) == 1
     assert rows[0]["trade_size"] == 20.0
+    assert rows[0]["future_match_source"] == "Prevailing mid"
 
 
 def test_delta_axis_does_not_use_untimed_last_price_as_an_iv_reference():
@@ -977,6 +980,10 @@ def test_layout_orders_primary_and_trade_controls_in_sticky_toolbar():
     toolbar = header.children[0]
     assert "brent-vol-history-sticky-filter-bar" in header.className
     assert toolbar.children[0].children[1].id == "brent-vol-history-product"
+    assert [
+        item["value"] for item in toolbar.children[0].children[1].options
+    ] == ["BRENT", "TFO", "ON", "LNE"]
+    assert gateway.SUPPORTED_PRODUCTS == frozenset({"BRENT", "TFO", "ON", "LNE"})
     assert toolbar.children[1].children[1].id == "brent-vol-history-x-axis"
     refresh_row = toolbar.children[2].children[1]
     assert refresh_row.className == "brent-vol-history-refresh-row"
