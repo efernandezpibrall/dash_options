@@ -1,4 +1,5 @@
 import io
+import logging
 
 import dash
 from dash import Input, Output, State, callback, dcc, html
@@ -6,6 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from dash_utils import triggered_id
 from market_data import FORWARD_CURVE_PRODUCTS, clear_forward_curve_cache, load_forward_curves
 from source_status import make_source_status
 
@@ -30,6 +32,7 @@ ROLLING_OPTIONS = [
     {'label': '60D', 'value': 60},
 ]
 CHART_CONFIG = {'displaylogo': False, 'responsive': True, 'displayModeBar': 'hover'}
+LOGGER = logging.getLogger(__name__)
 
 
 def _history_window(history_range, end_date=None):
@@ -64,25 +67,23 @@ def assign_delivery_periods(curves, grouping):
         data['period_start'] = pd.to_datetime(maturity.dt.year.astype(str) + '-01-01')
         data['required_months'] = 12
     elif grouping == 'seasonal':
-        labels = []
-        starts = []
-        required = []
-        for value in maturity:
-            if value.month >= 10:
-                labels.append(f"Winter {value.year}/{str(value.year + 1)[-2:]}")
-                starts.append(pd.Timestamp(value.year, 10, 1))
-                required.append(7)
-            elif value.month <= 4:
-                labels.append(f"Winter {value.year - 1}/{str(value.year)[-2:]}")
-                starts.append(pd.Timestamp(value.year - 1, 10, 1))
-                required.append(7)
-            else:
-                labels.append(f"Summer {value.year}")
-                starts.append(pd.Timestamp(value.year, 5, 1))
-                required.append(5)
-        data['period'] = labels
-        data['period_start'] = starts
-        data['required_months'] = required
+        months = maturity.dt.month
+        years = maturity.dt.year
+        is_summer = months.between(5, 9)
+        winter_year = years.where(months >= 10, years - 1)
+        data['period'] = np.where(
+            is_summer,
+            'Summer ' + years.astype(str),
+            'Winter ' + winter_year.astype(str) + '/' + (winter_year + 1).astype(str).str[-2:],
+        )
+        data['period_start'] = pd.to_datetime(
+            np.where(
+                is_summer,
+                years.astype(str) + '-05-01',
+                winter_year.astype(str) + '-10-01',
+            )
+        )
+        data['required_months'] = np.where(is_summer, 5, 7)
     else:
         raise ValueError(f'Unsupported grouping: {grouping}')
 
@@ -138,11 +139,9 @@ def calculate_correlation_analysis(grouped, period, selected_products, pair_a, p
     prices = prices.reindex(columns=selected_products or PRODUCTS)
     returns = np.log(prices).diff().replace([np.inf, -np.inf], np.nan)
 
-    overlap = pd.DataFrame(index=returns.columns, columns=returns.columns, dtype='Int64')
+    present = returns.notna().astype(np.int64)
+    overlap = present.T.dot(present).astype('Int64')
     correlations = returns.corr(min_periods=MIN_OBSERVATIONS)
-    for left in returns.columns:
-        for right in returns.columns:
-            overlap.loc[left, right] = int(returns[[left, right]].dropna().shape[0])
 
     pair = returns[[pair_a, pair_b]].dropna() if pair_a in returns and pair_b in returns else pd.DataFrame()
     regression = {'correlation': np.nan, 'beta': np.nan, 'intercept': np.nan, 'r_squared': np.nan}
@@ -307,6 +306,11 @@ layout = html.Div(
             ],
             className='correlations-filter-bar',
         ),
+        html.Div(
+            id='correlations-source-status',
+            className='correlations-status',
+            role='status',
+        ),
         html.Div(id='correlations-status', className='correlations-status'),
         html.Div(
             'Returns use each market\'s native settlement price with no FX or unit conversion. Correlation is scale-invariant, but currency moves remain embedded.',
@@ -333,6 +337,7 @@ layout = html.Div(
     Output('correlations-pair-a', 'value'),
     Output('correlations-pair-b', 'options'),
     Output('correlations-pair-b', 'value'),
+    Output('correlations-source-status', 'children'),
     Input('correlations-grouping', 'value'),
     Input('correlations-products', 'value'),
     Input('correlations-history', 'value'),
@@ -343,17 +348,25 @@ layout = html.Div(
 )
 def update_correlation_controls(grouping, products, history_range, refresh_clicks, current_period, pair_a, pair_b):
     products = products or []
-    if refresh_clicks:
-        clear_forward_curve_cache()
-    _, grouped = _load_grouped_data(history_range, grouping, products, 0)
-    options = period_options(grouped, products)
-    option_values = [option['value'] for option in options]
-    resolved_period = current_period if current_period in option_values else (option_values[0] if option_values else None)
     pair_options = [{'label': product, 'value': product} for product in products]
     resolved_a = pair_a if pair_a in products else (products[0] if products else None)
     remaining = [product for product in products if product != resolved_a]
     resolved_b = pair_b if pair_b in remaining else (remaining[0] if remaining else None)
-    return options, resolved_period, pair_options, resolved_a, pair_options, resolved_b
+    if refresh_clicks and triggered_id() in {None, 'refresh-options-data'}:
+        clear_forward_curve_cache()
+    try:
+        _, grouped = _load_grouped_data(history_range, grouping, products, 0)
+    except Exception:
+        LOGGER.exception('Correlation source loading failed')
+        warning = html.Div(
+            'Correlation source is unavailable.',
+            className='correlations-warning',
+        )
+        return [], None, pair_options, resolved_a, pair_options, resolved_b, warning
+    options = period_options(grouped, products)
+    option_values = [option['value'] for option in options]
+    resolved_period = current_period if current_period in option_values else (option_values[0] if option_values else None)
+    return options, resolved_period, pair_options, resolved_a, pair_options, resolved_b, None
 
 
 @callback(

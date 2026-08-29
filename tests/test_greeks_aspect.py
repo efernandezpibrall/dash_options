@@ -126,6 +126,22 @@ def test_layout_omits_current_greeks_summary_section():
     )) == 6
 
 
+def test_corrupt_greeks_snapshot_reference_recovers_as_expired():
+    payload = greeks._resolve_greeks_payload('corrupt-session-value')
+
+    assert payload['rows'] == []
+    assert payload['meta']['message'] == 'Server snapshot expired; refresh the page'
+    assert greeks.export_greeks_workbook(
+        1,
+        'corrupt-session-value',
+        None,
+        'mixed',
+        None,
+        None,
+        'native',
+    ) is greeks.dash.no_update
+
+
 def test_common_maturity_axis_aligns_core_and_aspect_tables_with_blank_gaps():
     core_rows = pd.DataFrame([
         _normalized_greek_row('2026-10', 0.0, source_row_id=0),
@@ -636,6 +652,48 @@ def test_spread_theta_and_correlation_remain_pair_risks(monkeypatch):
         table for table in bucket_tables if table['bucket_type'] == 'Instrument'
     ):
         assert 'Theta' not in asset_table['table'].columns
+
+
+def test_greek_normalization_uses_stable_source_ids_for_non_default_index(monkeypatch):
+    monkeypatch.setattr(
+        greeks,
+        'fetch_instrument_unit_map',
+        lambda: {
+            'ICE_TTF': {
+                'native_unit': 'MWh',
+                'unit': 'MMBtu',
+                'conv_factor': 3.41214245,
+            },
+        },
+    )
+    data = pd.DataFrame(
+        [
+            {
+                'cob_date': pd.Timestamp('2026-07-27'),
+                'unit_quantity': 'MWh',
+                'asset_a': 'ICE_TTF',
+                'asset_b': None,
+                'maturity_date_a': pd.Timestamp('2026-10-01'),
+                'maturity_date_type_a': 'month',
+                'qty_delta_asset_a': 100.0,
+                'qty_gamma_asset_a': 10.0,
+                'qty_vega_sigma1': 20.0,
+                'qty_theta': 5.0,
+            }
+        ],
+        index=[42],
+    )
+
+    normalized = greeks.normalize_greek_contributions(
+        data,
+        aggregation='mixed',
+        unit_mode='native',
+        cob_date='2026-07-27',
+    )
+
+    assert normalized['source_row_id'].unique().tolist() == [0]
+    assert normalized['cob_date'].unique().tolist() == ['2026-07-27']
+    assert normalized['maturity_bucket'].unique().tolist() == ['2026-10']
 
 
 def test_filter_values_only_labels_two_underlying_rows_as_pairs(monkeypatch):

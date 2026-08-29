@@ -961,38 +961,28 @@ def group_data_by_period(data, grouping_mode):
         data = data.copy()
         data['maturity_date'] = pd.to_datetime(data['maturity_date'], errors='coerce')
         data = data.dropna(subset=['maturity_date'])
+        resolved_grouping = (
+            grouping_mode
+            if grouping_mode in {'monthly', 'quarterly', 'season', 'calendar'}
+            else 'monthly'
+        )
+        unique_maturities = data['maturity_date'].drop_duplicates()
+        period_labels = {
+            maturity: _price_period_label(maturity, resolved_grouping)
+            for maturity in unique_maturities
+        }
+        data['period'] = data['maturity_date'].map(period_labels)
 
-        if grouping_mode == 'monthly':
-            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'monthly'))
+        if resolved_grouping == 'monthly':
             return data
 
-        elif grouping_mode == 'quarterly':
-            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'quarterly'))
-
-            grouped = data.groupby(['contract', 'trade_date', 'period']).agg({
-                'settlement_price': 'mean'
-            }).reset_index()
-            return grouped
-
-        elif grouping_mode == 'season':
-            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'season'))
-            data = data.dropna(subset=['period'])
-
-            grouped = data.groupby(['contract', 'trade_date', 'period']).agg({
-                'settlement_price': 'mean'
-            }).reset_index()
-            return grouped
-
-        elif grouping_mode == 'calendar':
-            data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'calendar'))
-
-            grouped = data.groupby(['contract', 'trade_date', 'period']).agg({
-                'settlement_price': 'mean'
-            }).reset_index()
-            return grouped
-
-        data['period'] = data['maturity_date'].apply(lambda date_value: _price_period_label(date_value, 'monthly'))
-        return data
+        return (
+            data.groupby(
+                ['contract', 'trade_date', 'period'],
+                as_index=False,
+            )['settlement_price']
+            .mean()
+        )
 
     except Exception:
         # Return original data in case of error

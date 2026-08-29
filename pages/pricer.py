@@ -719,10 +719,16 @@ def _build_delivery_shape_field(
     structure_id=DEFAULT_STRUCTURE_ID,
     value="MONTH",
     asset=DEFAULT_ASSET,
+    mapping_id=None,
 ):
     supports_strips = (
         (asset == "TTF" and model == "black76")
         or (asset == "JKM" and model in {"black76", "asian76"})
+        or (
+            asset == "NBP"
+            and model == "black76"
+            and canonical_exchange_mapping_id(mapping_id) == "ICE-NBP-UKF"
+        )
     )
     available_shapes = (
         SUPPORTED_DELIVERY_SHAPES if supports_strips else ("MONTH",)
@@ -752,9 +758,13 @@ def _build_delivery_shape_field(
         ),
         class_name="pricer-shape-field",
         hint=(
-            "Strips use exact JKM exchange expiries selected by pricing model."
-            if asset == "JKM"
-            else "Monthly and seasonal strips use exact TTF TFO expiries."
+            "Strips use governed monthly expiries and product-specific weights."
+            if mapping_id
+            else (
+                "Strips use exact JKM exchange expiries selected by pricing model."
+                if asset == "JKM"
+                else "Monthly and seasonal strips use exact TTF TFO expiries."
+            )
         ),
     )
 
@@ -1357,6 +1367,7 @@ def _build_context_form(
                     structure_id,
                     defaults["delivery_shape"],
                     asset,
+                    mapping_id,
                 )
             )
         fields.extend(
@@ -1461,6 +1472,7 @@ def _build_context_form(
                     structure_id,
                     defaults["delivery_shape"],
                     asset,
+                    mapping_id,
                 )
             )
         fields.extend(
@@ -1728,61 +1740,6 @@ def _surface_or_calculated_value_getter(surface_field, calculated_field=None):
     }
 
 
-def _adjusted_surface_or_calculated_value_getter(
-    surface_field,
-    calculated_field,
-    *,
-    scale_from_surface_input=False,
-):
-    adjustment_terms = [
-        f"Number(params.data[{field!r}] == null ? 0 : params.data[{field!r}])"
-        for field in VOLATILITY_ADJUSTMENT_FIELDS
-    ]
-    adjustment = (
-        f"{VOLATILITY_ADJUSTMENT_SCALE!r} * ("
-        + " + ".join(adjustment_terms)
-        + ")"
-    )
-    surface_value = f"Number(surfaceRow[{surface_field!r}])"
-    if scale_from_surface_input:
-        adjusted_value = (
-            f"{surface_value} * (Number(surfaceRow['surface_input_vol']) + {adjustment}) "
-            "/ Number(surfaceRow['surface_input_vol'])"
-        )
-        surface_is_valid = "Number(surfaceRow['surface_input_vol']) > 0"
-    else:
-        adjusted_value = f"{surface_value} + {adjustment}"
-        surface_is_valid = "true"
-    calculated_lookup = (
-        "params.context && params.context.pricingRows && params.data && "
-        "params.context.pricingRows[params.data.leg_id] && "
-        f"params.context.pricingRows[params.data.leg_id][{calculated_field!r}] "
-        "!= null ? "
-        f"params.context.pricingRows[params.data.leg_id][{calculated_field!r}] : "
-    )
-    surface_lookup = (
-        "params.context && params.context.surfaceRows && params.data && "
-        "params.context.surfaceRows[params.data.leg_id]"
-    )
-    adjusted_surface_value = adjusted_value.replace(
-        "surfaceRow",
-        "params.context.surfaceRows[params.data.leg_id]",
-    )
-    valid_surface = surface_is_valid.replace(
-        "surfaceRow",
-        "params.context.surfaceRows[params.data.leg_id]",
-    )
-    return {
-        "function": (
-            calculated_lookup
-            + surface_lookup
-            + f" && {valid_surface} ? "
-            + adjusted_surface_value
-            + " : null"
-        )
-    }
-
-
 def _surface_tooltip_getter(field):
     return {
         "function": (
@@ -1842,8 +1799,8 @@ def _published_pricer_volatility_columns():
             "the ATM, Skew, and Smile adjustments."
         ),
     )
-    input_vol_column["valueGetter"] = _adjusted_surface_or_calculated_value_getter(
-        "surface_input_vol",
+    input_vol_column["valueGetter"] = _surface_or_calculated_value_getter(
+        "surface_effective_input_vol",
         "raw_volatility",
     )
     return {
@@ -1881,10 +1838,9 @@ def _published_pricer_pricing_volatility_columns():
             "Effective Input vol after the governed contract-date adjustment."
         ),
     )
-    column["valueGetter"] = _adjusted_surface_or_calculated_value_getter(
-        "surface_pricing_vol",
+    column["valueGetter"] = _surface_or_calculated_value_getter(
+        "surface_effective_pricing_vol",
         "volatility_used",
-        scale_from_surface_input=True,
     )
     return {
         "headerName": "",
@@ -3041,6 +2997,13 @@ def _build_combined_result_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
 def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
     context = snapshot["context"]
     is_jkm = context.get("asset") == "JKM"
+    is_nbp = context.get("asset") == "NBP"
+    has_exchange_mapping = bool(context.get("exchange_mapping_id"))
+    show_product = (
+        bool(context.get("exchange_product_code"))
+        if has_exchange_mapping
+        else is_jkm
+    )
     is_asian = snapshot.get("model") == "asian76"
     rows = []
     for leg in snapshot["legs"]:
@@ -3054,6 +3017,23 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
                         "contract_size", component.get("delivery_hours")
                     ),
                     "product_code": component.get("exchange_product_code", "TFO"),
+                    "product_detail": " · ".join(
+                        str(value)
+                        for value in (
+                            component.get("exchange_product_name"),
+                            (
+                                f"ID {component['exchange_product_id']}"
+                                if component.get("exchange_product_id")
+                                else None
+                            ),
+                            (
+                                f"{component['exercise_style'].title()} exercise"
+                                if component.get("exercise_style")
+                                else None
+                            ),
+                        )
+                        if value
+                    ),
                     "strip_weight_pct": component["weight"] * 100.0,
                     "forward": component["forward"],
                     "averaging_start_date": component.get("averaging_start_date"),
@@ -3085,34 +3065,51 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
             "cellClass": "pricer-table-text-cell",
         },
     ]
-    if is_jkm:
+    if show_product:
         columns.append(
             {
                 "headerName": "Product",
                 "field": "product_code",
                 "minWidth": 68,
                 "cellClass": "pricer-table-text-cell",
+                **(
+                    {"tooltipField": "product_detail"}
+                    if has_exchange_mapping
+                    else {}
+                ),
             }
         )
     columns.extend(
         [
             _result_numeric_column(
                 "delivery_quantity",
-                "MMBtu" if is_jkm else "Hours",
-                min_width=72 if is_jkm else 62,
+                (
+                    "MMBtu"
+                    if is_jkm
+                    else "Therms"
+                    if has_exchange_mapping and is_nbp
+                    else "Hours"
+                ),
+                min_width=(
+                    72 if is_jkm or (has_exchange_mapping and is_nbp) else 62
+                ),
                 sign_coloring=False,
                 decimal_places=0,
             ),
-        _result_numeric_column(
-            "strip_weight_pct",
-            "Weight %",
-            min_width=74,
-            sign_coloring=False,
-            decimal_places=3,
-        ),
-        _result_numeric_column(
-            "forward", "Forward", min_width=72, sign_coloring=False, decimal_places=4
-        ),
+            _result_numeric_column(
+                "strip_weight_pct",
+                "Weight %",
+                min_width=74,
+                sign_coloring=False,
+                decimal_places=3,
+            ),
+            _result_numeric_column(
+                "forward",
+                "Forward",
+                min_width=72,
+                sign_coloring=False,
+                decimal_places=4,
+            ),
         ]
     )
     if is_jkm and is_asian:
@@ -3128,45 +3125,65 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
         [
             {
                 "headerName": (
-                    "APO expiry"
-                    if is_jkm and is_asian
-                    else "JKZ / TFO expiry"
-                    if is_jkm
-                    else "TFO expiry"
+                    (
+                        f"{context['exchange_product_code']} expiry"
+                        if context.get("exchange_product_code")
+                        else "Option expiry"
+                    )
+                    if has_exchange_mapping
+                    else (
+                        "APO expiry"
+                        if is_jkm and is_asian
+                        else "JKZ / TFO expiry"
+                        if is_jkm
+                        else "TFO expiry"
+                    )
                 ),
                 "field": "option_expiration_date",
                 "minWidth": 112 if is_jkm else 104,
                 "cellClass": "pricer-table-text-cell",
             },
-        {
-            "headerName": "Status",
-            "field": "expiry_status",
-            "minWidth": 72,
-            "cellClass": "pricer-table-text-cell",
-        },
-        _result_numeric_column(
-            "input_vol_pct",
-            "Input vol %",
-            min_width=82,
-            sign_coloring=False,
-            decimal_places=3,
-        ),
-        _result_numeric_column(
-            "unit_value", "Premium", min_width=76, sign_coloring=False, decimal_places=4
-        ),
-        _result_numeric_column(
-            "weighted_unit_value",
-            "Weighted premium",
-            min_width=108,
-            sign_coloring=False,
-            decimal_places=4,
-        ),
-        _result_numeric_column(
-            "delta", "Delta", min_width=68, sign_coloring=False, decimal_places=4
-        ),
-        _result_numeric_column(
-            "vega", "Vega", min_width=68, sign_coloring=False, decimal_places=4
-        ),
+            {
+                "headerName": "Status",
+                "field": "expiry_status",
+                "minWidth": 72,
+                "cellClass": "pricer-table-text-cell",
+            },
+            _result_numeric_column(
+                "input_vol_pct",
+                "Input vol %",
+                min_width=82,
+                sign_coloring=False,
+                decimal_places=3,
+            ),
+            _result_numeric_column(
+                "unit_value",
+                "Premium",
+                min_width=76,
+                sign_coloring=False,
+                decimal_places=4,
+            ),
+            _result_numeric_column(
+                "weighted_unit_value",
+                "Weighted premium",
+                min_width=108,
+                sign_coloring=False,
+                decimal_places=4,
+            ),
+            _result_numeric_column(
+                "delta",
+                "Delta",
+                min_width=68,
+                sign_coloring=False,
+                decimal_places=4,
+            ),
+            _result_numeric_column(
+                "vega",
+                "Vega",
+                min_width=68,
+                sign_coloring=False,
+                decimal_places=4,
+            ),
         ]
     )
     return dag.AgGrid(
@@ -3471,6 +3488,7 @@ def _build_structure_header_context(
             structure_id,
             defaults["delivery_shape"],
             asset,
+            mapping_id,
         )
     )
     fields.append(
@@ -4087,6 +4105,7 @@ _INITIAL_WORKSPACE = _default_workspace()
 layout = html.Main(
     [
         dcc.Store(id="pricer-exchange-workspace-store", data=None),
+        html.Div(id="pricer-exchange-structures-container", hidden=True),
         html.Button(
             id="pricer-exchange-calculate-all",
             style={"display": "none"},
@@ -6747,6 +6766,83 @@ def _published_surface_calculation_rows(
         effective_pricing_volatility = pricing_volatility * (
             effective_input_volatility / input_volatility
         )
+        component_volatilities = []
+        raw_component_volatilities = surface_row.get(
+            "surface_component_volatilities"
+        )
+        if raw_component_volatilities is not None:
+            if not isinstance(raw_component_volatilities, list):
+                raise StructureValidationError(
+                    f"Leg {position}: published component volatility metadata is invalid."
+                )
+            for component_position, component_row in enumerate(
+                raw_component_volatilities,
+                start=1,
+            ):
+                if not isinstance(component_row, dict):
+                    raise StructureValidationError(
+                        f"Leg {position}: published component {component_position} "
+                        "volatility metadata is invalid."
+                )
+                try:
+                    contract_month = str(component_row["contract_month"])
+                    component_input = float(component_row["input_volatility"])
+                    component_pricing = float(component_row["pricing_volatility"])
+                    expiry_factor = float(
+                        component_row["expiry_adjustment_factor"]
+                    )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    raise StructureValidationError(
+                        f"Leg {position}: published component {component_position} "
+                        "volatility metadata is invalid."
+                    ) from None
+                effective_component_input = component_input + total_adjustment
+                effective_component_pricing = (
+                    effective_component_input * expiry_factor
+                )
+                if not (
+                    math.isfinite(component_input)
+                    and 0.005 <= component_input <= 2.0
+                    and math.isfinite(component_pricing)
+                    and 0.005 <= component_pricing <= 2.0
+                    and math.isfinite(expiry_factor)
+                    and expiry_factor > 0.0
+                    and math.isclose(
+                        component_pricing,
+                        component_input * expiry_factor,
+                        rel_tol=1e-10,
+                        abs_tol=1e-12,
+                    )
+                    and math.isfinite(effective_component_input)
+                    and 0.005 <= effective_component_input <= 2.0
+                    and math.isfinite(effective_component_pricing)
+                    and 0.005 <= effective_component_pricing <= 2.0
+                ):
+                    raise StructureValidationError(
+                        f"Leg {position}: published component {component_position} "
+                        "volatility or expiry adjustment is outside the supported range."
+                    )
+                component_volatilities.append(
+                    {
+                        "contract_month": contract_month,
+                        "input_volatility": effective_component_input,
+                        "pricing_volatility": effective_component_pricing,
+                        "expiry_adjustment_factor": expiry_factor,
+                    }
+                )
+        if component_volatilities:
+            try:
+                effective_input_volatility = float(
+                    surface_row["surface_effective_input_vol"]
+                )
+                effective_pricing_volatility = float(
+                    surface_row["surface_effective_pricing_vol"]
+                )
+            except (KeyError, TypeError, ValueError, OverflowError):
+                raise StructureValidationError(
+                    f"Leg {position}: the premium-equivalent Pricing Vol "
+                    "could not be resolved."
+                ) from None
         if not (
             math.isfinite(effective_input_volatility)
             and 0.005 <= effective_input_volatility <= 2.0
@@ -6760,7 +6856,12 @@ def _published_surface_calculation_rows(
         resolved = copy.deepcopy(row)
         resolved["quote_basis"] = "VOL"
         resolved["quote_value"] = effective_input_volatility
+        resolved["expiry_adjustment_factor"] = (
+            effective_pricing_volatility / effective_input_volatility
+        )
         resolved.pop("volatility", None)
+        if len(component_volatilities) > 1:
+            resolved["component_volatilities"] = component_volatilities
         resolved_rows.append(resolved)
         surface_signature_rows.append(
             {
@@ -6772,6 +6873,15 @@ def _published_surface_calculation_rows(
                 **adjustment_values,
                 "effective_input_vol": effective_input_volatility,
                 "effective_pricing_vol": effective_pricing_volatility,
+                **(
+                    {
+                        "component_volatilities": copy.deepcopy(
+                            component_volatilities
+                        )
+                    }
+                    if raw_component_volatilities is not None
+                    else {}
+                ),
                 "surface_expiry_adjustments": copy.deepcopy(
                     surface_row.get("surface_expiry_adjustments") or []
                 ),
@@ -7478,19 +7588,38 @@ def _model_inputs_summary(snapshot):
     ]
     is_delivery_strip = bool(context.get("delivery_components"))
     if is_delivery_strip:
-        is_jkm = context.get("asset") == "JKM"
-        component_quantity = (
-            f"{context['delivery_total_quantity']:,} MMBtu"
-            if is_jkm
-            else f"{context['delivery_total_hours']:,} delivery hours"
-        )
-        expiry_label = (
-            "APO expiry range"
-            if is_jkm and snapshot["model"] == "asian76"
-            else "JKZ / TFO expiry range"
-            if is_jkm
-            else "TFO expiry range"
-        )
+        asset = context.get("asset")
+        has_exchange_mapping = bool(context.get("exchange_mapping_id"))
+        if has_exchange_mapping:
+            if context.get("delivery_total_quantity") is not None:
+                quantity_unit = "therms" if asset == "NBP" else "MMBtu"
+                component_quantity = (
+                    f"{context['delivery_total_quantity']:,} {quantity_unit}"
+                )
+            else:
+                component_quantity = (
+                    f"{context['delivery_total_hours']:,} delivery hours"
+                )
+            product_code = context.get("exchange_product_code")
+            expiry_label = (
+                f"{product_code} expiry range"
+                if product_code
+                else "Option expiry range"
+            )
+        else:
+            is_jkm = asset == "JKM"
+            component_quantity = (
+                f"{context['delivery_total_quantity']:,} MMBtu"
+                if is_jkm
+                else f"{context['delivery_total_hours']:,} delivery hours"
+            )
+            expiry_label = (
+                "APO expiry range"
+                if is_jkm and snapshot["model"] == "asian76"
+                else "JKZ / TFO expiry range"
+                if is_jkm
+                else "TFO expiry range"
+            )
         cards.extend(
             [
                 _build_pricer_result_card(
@@ -7733,6 +7862,44 @@ def render_structure_results(snapshot, calculation_store_id=None):
         ),
     ]
     if snapshot["context"].get("exchange_product_code"):
+        product_context = snapshot["context"]
+        has_exchange_mapping = bool(product_context.get("exchange_mapping_id"))
+        product_value = product_context["exchange_product_code"]
+        if has_exchange_mapping and product_context.get("exchange_product_id"):
+            product_value = (
+                f"{product_value} · ID {product_context['exchange_product_id']}"
+            )
+        product_detail_fields = [product_context.get("exchange_product_name")]
+        if has_exchange_mapping:
+            product_detail_fields.extend(
+                (
+                    f"{product_context['exercise_style'].title()} exercise"
+                    if product_context.get("exercise_style")
+                    else None,
+                    product_context.get("pricing_engine_label"),
+                    (
+                        "Implementation status: "
+                        f"{product_context['implementation_status']}"
+                        if product_context.get("implementation_status")
+                        else None
+                    ),
+                    (
+                        "Current listing evidence conditional"
+                        if product_context.get("listing_evidence_status")
+                        == "conditional"
+                        else None
+                    ),
+                    (
+                        "Current premium evidence conditional"
+                        if product_context.get("premium_evidence_status")
+                        == "conditional"
+                        else None
+                    ),
+                )
+            )
+        product_detail = " · ".join(
+            str(value) for value in product_detail_fields if value
+        )
         output_cards.insert(
             0,
             html.Span(
@@ -7741,10 +7908,10 @@ def render_structure_results(snapshot, calculation_store_id=None):
                         "Product",
                         className="pricer-calculation-meta-label",
                     ),
-                    snapshot["context"]["exchange_product_code"],
+                    product_value,
                 ],
                 className="pricer-calculation-meta-item",
-                title=snapshot["context"].get("exchange_product_name"),
+                title=product_detail,
             ),
         )
     unit_results = ""
@@ -7753,6 +7920,13 @@ def render_structure_results(snapshot, calculation_store_id=None):
             "Premium contributions use equal 10,000 MMBtu monthly lots; "
             "monthly Delta and Vega are shown before strip weighting."
             if snapshot["context"].get("asset") == "JKM"
+            else "Premium contributions are weighted by exact NBP delivery-day therms; "
+            "monthly Delta and Vega are shown before strip weighting."
+            if snapshot["context"].get("asset") == "NBP"
+            else "Premium contributions use equal monthly contract lots; "
+            "monthly Delta and Vega are shown before strip weighting."
+            if snapshot["context"].get("component_weight_basis")
+            == "equal_contract_lots"
             else "Premium contributions are weighted by TTF delivery hours; "
             "monthly Delta and Vega are shown before strip weighting."
         )

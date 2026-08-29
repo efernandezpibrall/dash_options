@@ -4,6 +4,7 @@ import uuid
 
 import pandas as pd
 from dash import dcc, html
+from dash._no_update import NoUpdate
 
 import index_options
 from pages import ice_chat_quotes as quotes
@@ -332,6 +333,32 @@ def test_database_uuid_row_ids_are_serialized_for_dash_json():
     )
 
 
+def test_filter_options_are_sorted_deduplicated_and_keep_display_labels():
+    rows = _rows()
+    duplicate = dict(rows[0])
+    duplicate["event_id"] = "event-2"
+    later_contract = dict(rows[0])
+    later_contract.update(
+        event_id="event-3",
+        contract_month="2026-12-01",
+        contract_label="Dec-26",
+        strike=95.0,
+    )
+
+    options = quotes.update_quote_filter_options(
+        {"rows": [later_contract, duplicate, rows[0]]}
+    )
+
+    assert options[0] == [
+        {"value": "2026-10-01", "label": "Oct-26"},
+        {"value": "2026-12-01", "label": "Dec-26"},
+    ]
+    assert options[2] == [
+        {"value": 90.0, "label": 90.0},
+        {"value": 95.0, "label": 95.0},
+    ]
+
+
 def test_selected_instrument_shows_premium_and_iv_history():
     rows = _rows()
     frame = pd.DataFrame(rows)
@@ -396,6 +423,27 @@ def test_grid_height_is_compact_for_short_tapes_and_bounded_for_long_tapes():
         snapshot, {}, None, None, None, None, None, None, [], []
     )
     assert result[3] == {"height": "418px"}
+
+
+def test_grid_selection_does_not_resend_unchanged_tape_or_status(monkeypatch):
+    rows = _rows()
+    snapshot = {
+        "rows": rows,
+        "error": None,
+        "loaded_at": "2026-08-17T08:00:00+00:00",
+        "truncated": False,
+    }
+    monkeypatch.setattr(quotes, "triggered_id", lambda: "ice-chat-quote-grid")
+
+    result = quotes.render_quote_dashboard(
+        snapshot, {}, None, None, None, None, None, None, [], [rows[0]]
+    )
+
+    assert isinstance(result[0], NoUpdate)
+    assert isinstance(result[2], NoUpdate)
+    assert isinstance(result[3], NoUpdate)
+    assert isinstance(result[4], NoUpdate)
+    assert result[5] == "Instrument quote history"
 
 
 def test_css_is_page_scoped_and_has_responsive_states():

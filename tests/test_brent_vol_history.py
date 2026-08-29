@@ -84,7 +84,7 @@ def _chain_frame():
     return history._normalize_chain_frame(pd.DataFrame(rows))
 
 
-def _published_frame():
+def _published_frame(source_name="published"):
     return pd.DataFrame(
         {
             "cob_date": pd.to_datetime(["2026-08-10", "2026-08-10"]),
@@ -94,7 +94,7 @@ def _published_frame():
             "delta": [0.25, 0.25],
             "volatility": [0.32, 0.28],
             "forward_value": [80.0, 80.0],
-            "source_name": ["published", "published"],
+            "source_name": [source_name, source_name],
         }
     )
 
@@ -330,6 +330,23 @@ def test_product_selector_keeps_all_products_on_one_desktop_row():
     assert "margin-right: 0;" in css
     assert "grid-template-columns:\n        312px\n        168px" in css
     assert "@media (min-width: 1281px) and (max-width: 1760px)" in css
+
+
+def test_expiry_charts_use_compact_desktop_dimensions_with_full_width_reflow():
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    grid_rule = css.split(".brent-vol-history-plot-grid {", 1)[1].split("}", 1)[0]
+    graph_rule = css.split(".brent-vol-history-graph {", 1)[1].split("}", 1)[0]
+    narrow_rule = css.split("@media (max-width: 1024px) {", 1)[1].split(
+        "@media", 1
+    )[0]
+
+    assert "width: 75%;" in grid_rule
+    assert "margin-inline: auto;" in grid_rule
+    assert "height: 308px !important;" in graph_rule
+    assert ".brent-vol-history-plot-grid" in narrow_rule
+    assert "width: 100%;" in narrow_rule
 
 
 def test_trade_and_chain_tables_use_grouped_trader_focused_format():
@@ -666,6 +683,41 @@ def test_tfo_published_overlay_queries_ttf_without_merging_products(monkeypatch)
     assert len(captured) == 1
 
 
+def test_icap_settlement_loader_reuses_prior_vol_calibration_snapshot():
+    operational = pd.DataFrame(
+        {
+            "cob_date": pd.to_datetime(["2026-08-24"]),
+            "contract_date": pd.to_datetime(["2026-10-01"]),
+            "option_expiration_date": pd.to_datetime(["2026-09-25"]),
+            "put_call": ["call"],
+            "delta": [0.25],
+            "volatility": [0.42],
+        }
+    )
+    calls = []
+
+    def snapshot_loader(product, requested_cob, refresh=False):
+        calls.append((product, requested_cob, refresh))
+        return {
+            "data": operational,
+            "requested_cob": pd.Timestamp("2026-08-26"),
+            "actual_cob": pd.Timestamp("2026-08-24"),
+            "date_fallback_used": True,
+        }
+
+    surface = history.load_icap_settlement_surface(
+        "2026-08-26",
+        snapshot_loader=snapshot_loader,
+    )
+
+    assert calls == [("TTF", "2026-08-26", False)]
+    assert surface["cob_date"].tolist() == [pd.Timestamp("2026-08-24")]
+    assert surface["source_name"].tolist() == [
+        "ICAP settlement · COB 2026-08-24"
+    ]
+    assert surface["forward_value"].isna().all()
+
+
 @pytest.mark.parametrize("product", ["ON", "LNE"])
 def test_henry_hub_published_overlay_queries_hh_without_merging_products(
     monkeypatch, product
@@ -829,6 +881,7 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
     assert figure.layout.yaxis.title.text == "IV (%)"
     assert figure.layout.yaxis2.title.text == "Activity (contracts)"
     assert figure.layout.yaxis2.overlaying == "y"
+    assert figure.layout.height == 308
     assert figure.layout.margin.r == 44
     assert figure.layout.showlegend is False
     traces = {trace.name: trace for trace in figure.data}
@@ -929,6 +982,39 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
     detail = history._detail_rows(chain, "2026-12-01")
     assert {row["native_option_underlier"] for row in detail} == {"FJSZ6 Comdty"}
     assert {row["pricing_future"] for row in detail} == {"TZTZ6 Comdty"}
+
+
+def test_tfo_figure_separates_direct_icap_settlement_from_published_surface():
+    chain = _chain_frame().copy()
+    chain["product"] = "TFO"
+    chain["pricing_underlying_security"] = "TZTZ6 Comdty"
+    published = history.published_strike_nodes(
+        _published_frame(source_name="ICAP settlement · COB 2026-08-08"),
+        {pd.Timestamp("2026-12-01"): 80.0},
+        pd.Timestamp("2026-08-10"),
+    )
+
+    figure = history.build_expiry_figure(
+        chain,
+        history.prepare_market_observations(chain, product="TFO"),
+        published,
+        pd.Timestamp("2026-12-01"),
+        product="TFO",
+    )
+
+    traces = {trace.name: trace for trace in figure.data}
+    icap = traces["Settlement vol surface (ICAP)"]
+    assert "Published TTF exact COB" not in traces
+    assert icap.meta["legend_layer"] == "icap-settlement"
+    assert icap.mode == "lines+markers"
+    assert icap.line.color == "#0F766E"
+    assert icap.line.dash == "dash"
+    assert icap.marker.symbol == "diamond"
+    assert list(icap.customdata[:, 3]) == [
+        "ICAP settlement · COB 2026-08-08",
+        "ICAP settlement · COB 2026-08-08",
+    ]
+    assert "TZT %{customdata[4]:.3f}" in icap.hovertemplate
 
 
 def test_tfo_settlement_axis_uses_exchange_range_not_calibrated_tail_extremes():
@@ -1171,6 +1257,19 @@ def test_bloomberg_settlement_legend_uses_plain_label_and_source_tooltip():
 
     assert option["label"].children[1].children == "Settlement"
     assert option["label"].title == "Settlement from Bloomberg"
+
+
+def test_icap_settlement_legend_is_a_distinct_default_visible_layer():
+    option = history._expiry_legend_options(["icap-settlement"])[0]
+
+    assert option["label"].children[1].children == "ICAP settlement"
+    assert option["label"].title == (
+        "Show or hide the latest ICAP settlement surface on or before "
+        "the selected date"
+    )
+    assert history._default_expiry_layers(["icap-settlement"]) == [
+        "icap-settlement"
+    ]
 
 
 def test_expiry_layer_selection_preserves_existing_and_enables_new_layers():

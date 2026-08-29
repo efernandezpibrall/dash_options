@@ -97,7 +97,6 @@ def create_brent_adjustment_grid(
         "calibration_eligible", pd.Series(True, index=market_data.index)
     ).fillna(False)
     eligible = market_data.loc[eligible_mask].copy()
-    excluded = market_data.loc[~eligible_mask].copy()
     base_surface = operational_surface if x_axis == "delta" else pd.DataFrame()
     figure = create_smile_grid_figure(
         eligible,

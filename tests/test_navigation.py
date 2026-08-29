@@ -1,4 +1,8 @@
+from inspect import signature
+
+import pytest
 from dash import dcc, html
+from dash.exceptions import PreventUpdate
 
 import index_options
 from app import app
@@ -42,6 +46,13 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
     }
     assert index_options.PNL_EXPLAIN_VIEWS == ('pnl-explain', 'pnl_explain')
     assert index_options.PAGE_NOT_FOUND_TITLE == 'Page Not Found'
+    assert set(index_options.NAV_LINK_IDS) == set(index_options.PAGE_TITLES)
+    assert set(index_options.PAGE_TITLES) == {
+        *index_options.STATIC_PAGE_LAYOUTS,
+        '/valuation',
+        '/pnl_explain',
+        '/vol_calibration',
+    }
 
     app._setup_server()
     nav_callback = app.callback_map['nav-active-sink.children']
@@ -49,6 +60,58 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
         {'id': 'url', 'property': 'pathname'},
         {'id': 'url', 'property': 'search'},
     ]
+
+
+def test_exchange_pricer_inputs_are_optional_on_pricer_old_route():
+    app._setup_server()
+    exchange_callback = next(
+        callback
+        for output, callback in app.callback_map.items()
+        if 'pricer-exchange-workspace-store.data' in output
+        and 'pricer-exchange-structures-container.children' in output
+    )
+
+    assert exchange_callback['inputs'][:2] == [
+        {
+            'id': 'pricer-exchange-workspace-hydration',
+            'property': 'n_intervals',
+            'allow_optional': True,
+        },
+        {
+            'id': 'pricer-exchange-add-structure',
+            'property': 'n_clicks',
+            'allow_optional': True,
+        },
+    ]
+
+
+def test_exchange_pricer_callback_ignores_pricer_old_without_current_controls():
+    callback = index_options.pages.pricer_new.manage_exchange_workspace
+    kwargs = {name: None for name in signature(callback).parameters}
+
+    with pytest.raises(PreventUpdate):
+        callback(**kwargs)
+
+
+def test_pricer_rate_field_style_has_one_premium_aware_owner():
+    app._setup_server()
+    callbacks = [
+        callback
+        for output, callback in app.callback_map.items()
+        if 'pricer-rate-field' in output
+    ]
+    assert [callback['callback'].__name__ for callback in callbacks] == [
+        'sync_exchange_rate_visibility'
+    ]
+
+    for mapping in EXCHANGE_OPTION_MAPPINGS:
+        expected = {
+            'display': 'flex' if mapping.premium_convention == 'upfront' else 'none'
+        }
+        assert index_options.pages.pricer.sync_exchange_rate_visibility(
+            mapping.premium_convention,
+            'exchange',
+        ) == expected
 
 
 def test_top_navigation_order_and_pricer_separator():
@@ -92,6 +155,12 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
     assert pricer_layout is index_options.pages.pricer_new.layout
     assert pricer_old_layout is index_options.pages.pricer.layout
     assert pricer_layout is not pricer_old_layout
+    exchange_stub = next(
+        item
+        for item in _walk(pricer_old_layout)
+        if getattr(item, 'id', None) == 'pricer-exchange-structures-container'
+    )
+    assert exchange_stub.hidden is True
 
     pricer_headings = [
         item.children
@@ -405,15 +474,6 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
         'display': 'flex'
     }
     assert pricer_new._workflow_model_style('legacy', 'TTF') == {
-        'display': 'flex'
-    }
-    assert pricer_new._workflow_rate_style('exchange', 'HH') == {
-        'display': 'flex'
-    }
-    assert pricer_new._workflow_rate_style('exchange', 'TTF') == {
-        'display': 'none'
-    }
-    assert pricer_new._workflow_rate_style('otc', 'TTF') == {
         'display': 'flex'
     }
     assert pricer_new.configure_otc_asset_identity_controls('otc', 'kirk') == (

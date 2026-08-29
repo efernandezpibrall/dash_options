@@ -30,9 +30,13 @@ from options.options_library import (
 )
 from options.option_contract_conventions import FlatDiscountCurve
 from options.option_expiry_engine import (
+    PLATTS_ASIA_LNG_PUBLICATION,
+    PLATTS_ASIA_LNG_PUBLICATION_VERSION,
+    UnsupportedCalendarError,
     business_days_between,
     get_business_calendar,
     get_surface_calendar_mapping,
+    require_platts_asia_lng_publication_year,
     resolve_option_expiry,
     resolve_surface_expiry,
     validate_expiry_records,
@@ -42,10 +46,11 @@ from pricer_exchange_registry import (
     canonical_exchange_mapping_id,
     exchange_mapping_for_asset_model,
     exchange_option_mapping,
+    exchange_product_metadata,
 )
 
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 18
 MAX_LEGS = 20
 SINGLE_ASSET_MODELS = frozenset({"black76", "asian76", "american_futures"})
 SUPPORTED_MODELS = set(SINGLE_ASSET_MODELS) | {"kirk"}
@@ -97,6 +102,7 @@ ASSET_PRICE_SPECS = {
     },
 }
 JKM_VARIANCE_CALENDAR = "ICE_JKM_71090519_TRADING"
+JKM_DETERMINATION_CALENDAR = "CME_NYMEX_OPTION_TRADING"
 TTF_VARIANCE_CALENDAR = "ICE_TTF_TFO_TRADING"
 JKM_APO_PRODUCT_CODE = "JKM"
 JKM_APO_PRODUCT_ID = "71090519"
@@ -450,20 +456,42 @@ def default_model_for_asset(asset: str) -> str:
     return "asian76" if normalized_asset == "JKM" else "black76"
 
 
-def _jkm_product_metadata(model: str, mapping=None) -> dict[str, Any]:
-    if mapping is not None and mapping.exchange_product_code:
-        return {
-            "exchange_product_code": mapping.exchange_product_code,
-            "exchange_product_id": None,
-            "exchange_product_name": mapping.product,
-            "exchange_expiry_rule": mapping.expiry_convention_code,
-        }
+PRODUCT_METADATA_FIELDS = (
+    "exchange_venue",
+    "exchange_product_code",
+    "exchange_product_id",
+    "exchange_product_name",
+    "exercise_style",
+    "settlement_type",
+    "contract_source_url",
+    "legal_pricing_model",
+    "pricer_pricing_model",
+    "pricing_engine_label",
+    "listing_evidence_status",
+    "premium_evidence_status",
+    "implementation_status",
+    "pricing_supported",
+    "positive_domain_required",
+    "pricing_domain",
+    "fixing_schedule_mode",
+    "exchange_expiry_rule",
+)
+
+
+def _exchange_product_metadata(mapping=None) -> dict[str, Any]:
+    return exchange_product_metadata(mapping) if mapping is not None else {}
+
+
+def _legacy_jkm_product_metadata(model: str) -> dict[str, Any]:
+    """Preserve product disclosure for manual JKM calculations."""
     if model == "asian76":
         return {
             "exchange_product_code": JKM_APO_PRODUCT_CODE,
             "exchange_product_id": JKM_APO_PRODUCT_ID,
             "exchange_product_name": JKM_APO_PRODUCT_NAME,
-            "exchange_expiry_rule": "15th calendar day of the prior month, preceding business day",
+            "exchange_expiry_rule": (
+                "15th calendar day of the prior month, preceding business day"
+            ),
         }
     if model == "black76":
         return {
@@ -491,6 +519,85 @@ def _jkm_apo_averaging_start(contract_month: date) -> date:
         JKM_VARIANCE_CALENDAR,
         date(anchor_month.year, anchor_month.month, 16),
     )
+
+
+def _jkm_publication_schedule(
+    contract_month: date,
+) -> tuple[tuple[date, ...], date]:
+    """Return reviewed JKM publication fixings and Floating Price determination."""
+    anchor_month = _add_months(contract_month, -2)
+    first_day = date(anchor_month.year, anchor_month.month, 16)
+    next_month = _add_months(anchor_month, 1)
+    last_day = date(next_month.year, next_month.month, 15)
+    try:
+        for year in range(first_day.year, last_day.year + 1):
+            require_platts_asia_lng_publication_year(year)
+        calendar = get_business_calendar(PLATTS_ASIA_LNG_PUBLICATION)
+    except UnsupportedCalendarError as exc:
+        raise StructureValidationError(str(exc)) from exc
+    fixing_dates = []
+    candidate = first_day
+    while candidate <= last_day:
+        if calendar.is_business_day(candidate):
+            fixing_dates.append(candidate)
+        candidate += timedelta(days=1)
+    if not fixing_dates:
+        raise StructureValidationError(
+            f"{contract_month.strftime('%b-%y')} has no governed JKM publication days."
+        )
+    determination_date = _roll_following(
+        JKM_DETERMINATION_CALENDAR,
+        fixing_dates[-1],
+    )
+    return tuple(fixing_dates), determination_date
+
+
+def _jkm_publication_fixing_dates(contract_month: date) -> tuple[date, ...]:
+    return _jkm_publication_schedule(contract_month)[0]
+
+
+def _asian_fixing_times(
+    component: dict[str, Any],
+    valuation_date: date | None = None,
+) -> tuple[float, ...] | None:
+    fixing_dates = component.get("averaging_fixing_dates")
+    if fixing_dates and valuation_date is not None:
+        denominator = float(
+            component.get("day_count_denominator", JKM_DAY_COUNT_DENOMINATOR)
+        )
+        return tuple(
+            max(
+                (_as_date(value, "Averaging fixing date") - valuation_date).days
+                / denominator,
+                1e-9,
+            )
+            for value in fixing_dates
+        )
+    fixing_times = component.get("averaging_fixing_times")
+    if not fixing_times:
+        return None
+    return tuple(float(value) for value in fixing_times)
+
+
+def _asian_determination_time(
+    component: dict[str, Any],
+    valuation_date: date | None = None,
+) -> float | None:
+    determination_date = component.get("floating_price_determination_date")
+    if determination_date and valuation_date is not None:
+        denominator = float(
+            component.get("day_count_denominator", JKM_DAY_COUNT_DENOMINATOR)
+        )
+        return max(
+            (_as_date(determination_date, "Floating Price determination date")
+            - valuation_date).days
+            / denominator,
+            1e-9,
+        )
+    determination_time = component.get("time_to_floating_price_determination")
+    if determination_time is None:
+        return None
+    return float(determination_time)
 
 
 def available_jkm_apo_delivery_months(as_of: date) -> tuple[date, ...]:
@@ -525,9 +632,21 @@ def available_delivery_months(
         months = []
         for surface_record in _jkm_expiry_records():
             resolved = _resolve_mapping_expiry(target_mapping, surface_record)
+            if target_mapping.fixing_schedule_mode == "platts_publication_days":
+                try:
+                    fixing_dates = _jkm_publication_fixing_dates(
+                        surface_record.contract_month
+                    )
+                except StructureValidationError:
+                    continue
+                averaging_start = fixing_dates[0]
+            else:
+                averaging_start = _jkm_apo_averaging_start(
+                    surface_record.contract_month
+                )
             if (
                 resolved.option_expiration_date > as_of
-                and _jkm_apo_averaging_start(surface_record.contract_month) >= as_of
+                and averaging_start >= as_of
             ):
                 months.append(surface_record.contract_month)
         return tuple(months)
@@ -590,7 +709,19 @@ def build_jkm_month_component(
     surface_resolved = resolve_surface_expiry("JKM", month, _jkm_expiry_records())
     resolved = _resolve_mapping_expiry(mapping, surface_resolved)
     if model == "asian76":
-        averaging_start = _jkm_apo_averaging_start(month)
+        if mapping.fixing_schedule_mode == "platts_publication_days":
+            (
+                publication_fixing_dates,
+                floating_price_determination_date,
+            ) = _jkm_publication_schedule(month)
+        else:
+            publication_fixing_dates = ()
+            floating_price_determination_date = None
+        averaging_start = (
+            publication_fixing_dates[0]
+            if publication_fixing_dates
+            else _jkm_apo_averaging_start(month)
+        )
         if averaging_start < as_of:
             raise StructureValidationError(
                 f"{month.strftime('%b-%y')} cannot be priced as an unseasoned "
@@ -642,14 +773,42 @@ def build_jkm_month_component(
         "forward_source": mapping.forward_source,
         "volatility_surface_source": mapping.volatility_surface_source,
         "max_surface_extension_days": mapping.max_surface_extension_days,
-        **_jkm_product_metadata(model, mapping),
+        **_exchange_product_metadata(mapping),
     }
     if averaging_start is not None:
         component["averaging_start_date"] = averaging_start.isoformat()
-        component["averaging_end_date"] = option_expiration.isoformat()
+        averaging_end = (
+            publication_fixing_dates[-1]
+            if publication_fixing_dates
+            else option_expiration
+        )
+        component["averaging_end_date"] = averaging_end.isoformat()
         component["time_to_averaging_start"] = (
             averaging_start - as_of
         ).days / JKM_DAY_COUNT_DENOMINATOR
+        if publication_fixing_dates:
+            component["averaging_fixing_calendar_code"] = (
+                PLATTS_ASIA_LNG_PUBLICATION
+            )
+            component["averaging_fixing_calendar_version"] = (
+                PLATTS_ASIA_LNG_PUBLICATION_VERSION
+            )
+            component["averaging_fixing_dates"] = [
+                fixing_date.isoformat() for fixing_date in publication_fixing_dates
+            ]
+            component["averaging_fixing_times"] = [
+                (fixing_date - as_of).days / JKM_DAY_COUNT_DENOMINATOR
+                for fixing_date in publication_fixing_dates
+            ]
+            component["floating_price_determination_date"] = (
+                floating_price_determination_date.isoformat()
+            )
+            component["floating_price_determination_calendar_code"] = (
+                JKM_DETERMINATION_CALENDAR
+            )
+            component["time_to_floating_price_determination"] = (
+                floating_price_determination_date - as_of
+            ).days / JKM_DAY_COUNT_DENOMINATOR
     return component
 
 
@@ -745,6 +904,7 @@ def build_delivery_month_component(
             / OPTION_DAY_COUNT_DENOMINATOR,
             "weight": 1.0,
             "forward": forward,
+            **_exchange_product_metadata(target_mapping),
         }
     resolved = resolve_surface_expiry(
         normalized_asset,
@@ -840,6 +1000,39 @@ def build_ttf_strip_components(
                 if equal_monthly_lots
                 else delivery_hours / total_quantity
             ),
+        )
+        components.append(component)
+    return components, total_quantity
+
+
+def build_nbp_strip_components(
+    shape: str,
+    delivery_year: int,
+    as_of: date,
+    forward: float,
+    mapping_id: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Build UKF-only NBP strips weighted by exact monthly therm quantities."""
+    if canonical_exchange_mapping_id(mapping_id) != "ICE-NBP-UKF":
+        raise StructureValidationError(
+            "NBP strips are supported only for ICE-NBP-UKF."
+        )
+    components = []
+    months = _delivery_months(shape, delivery_year)
+    monthly_quantities = [
+        NBP_CONTRACT_SIZE_THERMS_PER_DAY
+        * (_add_months(month, 1) - month).days
+        for month in months
+    ]
+    total_quantity = sum(monthly_quantities)
+    for month, monthly_quantity in zip(months, monthly_quantities):
+        component = build_delivery_month_component(
+            "NBP", "black76", month, as_of, forward, mapping_id=mapping_id
+        )
+        component.update(
+            delivery_days=monthly_quantity // NBP_CONTRACT_SIZE_THERMS_PER_DAY,
+            contract_size=monthly_quantity,
+            weight=monthly_quantity / total_quantity,
         )
         components.append(component)
     return components, total_quantity
@@ -977,6 +1170,29 @@ def default_contract_size(
         return float(month_count * JKM_CONTRACT_SIZE_MMBTU)
 
     if normalized_asset == "NBP":
+        if shape != "MONTH":
+            if (
+                target_mapping is None
+                or target_mapping.mapping_id != "ICE-NBP-UKF"
+            ):
+                raise StructureValidationError(
+                    "NBP strips are supported only for ICE-NBP-UKF."
+                )
+            raw_year = _finite_number(
+                resolved_context.get("delivery_year"),
+                "Delivery year",
+                minimum=2000,
+                maximum=2100,
+            )
+            if not raw_year.is_integer():
+                raise StructureValidationError("Delivery year must be a whole year.")
+            return float(
+                sum(
+                    NBP_CONTRACT_SIZE_THERMS_PER_DAY
+                    * (_add_months(month, 1) - month).days
+                    for month in _delivery_months(shape, int(raw_year))
+                )
+            )
         reference_date = as_of or date.today()
         if resolved_context.get("delivery_month"):
             delivery_month = _as_date(
@@ -1386,17 +1602,27 @@ def _normalize_context(
     strip_is_supported = (
         (asset == "TTF" and model == "black76")
         or (asset == "JKM" and model in {"black76", "asian76"})
+        or (
+            asset == "NBP"
+            and model == "black76"
+            and exchange_mapping_id == "ICE-NBP-UKF"
+        )
     )
     if is_delivery_strip and not strip_is_supported:
         raise StructureValidationError(
-            "Quarter, Summer, and Winter strips require TTF Black-76 or JKM "
-            "Asian-76/Black-76."
+            "Quarter, Summer, and Winter strips require TTF Black-76, JKM "
+            "Asian-76/Black-76, or the ICE-NBP-UKF mapping."
         )
 
     if model in SINGLE_ASSET_MODELS:
         forward = _finite_number(
             context.get("forward"),
-            "Forward price",
+            (
+                f"{exchange_mapping.mapping_id} lognormal forward price"
+                if exchange_mapping is not None
+                and exchange_mapping.positive_domain_required
+                else "Forward price"
+            ),
             minimum=0.0,
             strict_minimum=True,
         )
@@ -1454,7 +1680,26 @@ def _normalize_context(
                 if equal_monthly_lots
                 else {"delivery_total_hours": delivery_total_quantity}
             )
-            product_metadata: dict[str, Any] = {}
+            product_metadata = _exchange_product_metadata(exchange_mapping)
+        elif asset == "NBP":
+            delivery_components, delivery_total_quantity = build_nbp_strip_components(
+                delivery_shape,
+                delivery_year,
+                as_of,
+                float(forward),
+                exchange_mapping_id,
+            )
+            component_weight_basis = "delivery_days"
+            component_quantity_label = "therms across delivery days"
+            variance_calendar_code = get_surface_calendar_mapping(
+                "NBP"
+            ).variance_calendar_code
+            day_count_denominator = OPTION_DAY_COUNT_DENOMINATOR
+            strip_quantity_fields = {
+                "delivery_total_quantity": delivery_total_quantity,
+                "daily_contract_size": NBP_CONTRACT_SIZE_THERMS_PER_DAY,
+            }
+            product_metadata = _exchange_product_metadata(exchange_mapping)
         else:
             delivery_components, delivery_total_quantity = build_jkm_strip_components(
                 delivery_shape,
@@ -1472,7 +1717,11 @@ def _normalize_context(
                 "delivery_total_quantity": delivery_total_quantity,
                 "monthly_contract_size": JKM_CONTRACT_SIZE_MMBTU,
             }
-            product_metadata = _jkm_product_metadata(model, exchange_mapping)
+            product_metadata = (
+                _exchange_product_metadata(exchange_mapping)
+                if exchange_mapping is not None
+                else _legacy_jkm_product_metadata(model)
+            )
         first_expiration = min(
             _as_date(item["option_expiration_date"], "Component expiration date")
             for item in delivery_components
@@ -1550,7 +1799,7 @@ def _normalize_context(
                         exchange_mapping.volatility_surface_source
                     ),
                     "sizing_mode": exchange_mapping.sizing_mode,
-                    "exchange_product_code": exchange_mapping.exchange_product_code,
+                    **_exchange_product_metadata(exchange_mapping),
                 }
             )
         if model == "asian76":
@@ -1653,8 +1902,10 @@ def _normalize_context(
     }
     if exchange_mapping_id is not None:
         normalized["exchange_mapping_id"] = exchange_mapping_id
-    if asset == "JKM":
-        normalized.update(_jkm_product_metadata(model, exchange_mapping))
+    if exchange_mapping is not None:
+        normalized.update(_exchange_product_metadata(exchange_mapping))
+    elif asset == "JKM":
+        normalized.update(_legacy_jkm_product_metadata(model))
     if governed_month_component:
         normalized.update(
             {
@@ -1671,7 +1922,7 @@ def _normalize_context(
                 ],
             }
         )
-        for metadata_field in (
+        governed_metadata_fields = (
             "contract_convention_code",
             "surface_product",
             "surface_expiry_convention_code",
@@ -1682,15 +1933,35 @@ def _normalize_context(
             "exchange_product_code",
             "exchange_product_name",
             "exchange_expiry_rule",
-        ):
-            if metadata_field in governed_month_component:
+        )
+        if exchange_mapping is not None:
+            governed_metadata_fields += tuple(
+                field
+                for field in PRODUCT_METADATA_FIELDS
+                if field not in governed_metadata_fields
+            )
+        for metadata_field in governed_metadata_fields:
+            if metadata_field in governed_month_component and (
+                exchange_mapping is not None
+                or metadata_field not in PRODUCT_METADATA_FIELDS
+            ):
                 normalized[metadata_field] = governed_month_component[
                     metadata_field
                 ]
-        if "averaging_end_date" in governed_month_component:
-            normalized["averaging_end_date"] = governed_month_component[
-                "averaging_end_date"
-            ]
+        for averaging_field in (
+            "averaging_end_date",
+            "averaging_fixing_calendar_code",
+            "averaging_fixing_calendar_version",
+            "averaging_fixing_dates",
+            "averaging_fixing_times",
+            "floating_price_determination_date",
+            "floating_price_determination_calendar_code",
+            "time_to_floating_price_determination",
+        ):
+            if averaging_field in governed_month_component:
+                normalized[averaging_field] = governed_month_component[
+                    averaging_field
+                ]
 
     if model in SINGLE_ASSET_MODELS:
         normalized["forward"] = forward
@@ -1796,6 +2067,88 @@ def _sizing_scales(
     return quantity_scale, currency_conversion_factor, position_scale
 
 
+def _normalize_component_volatilities(
+    raw_rows: Any,
+    context: dict[str, Any],
+    prefix: str,
+) -> list[dict[str, float | str]]:
+    components = context.get("delivery_components") or []
+    if raw_rows is None:
+        return []
+    if not components or not isinstance(raw_rows, list):
+        raise StructureValidationError(
+            f"{prefix}: component volatility metadata is not valid for this structure."
+        )
+    expected_months = [str(component["contract_month"]) for component in components]
+    rows_by_month: dict[str, dict[str, float | str]] = {}
+    for raw_row in raw_rows:
+        if not isinstance(raw_row, dict):
+            raise StructureValidationError(
+                f"{prefix}: component volatility metadata is invalid."
+            )
+        contract_month = str(raw_row.get("contract_month") or "")
+        if not contract_month or contract_month in rows_by_month:
+            raise StructureValidationError(
+                f"{prefix}: component volatility months must be unique and complete."
+            )
+        input_volatility = _finite_number(
+            raw_row.get("input_volatility"),
+            f"{prefix} {contract_month} input volatility",
+            minimum=0.005,
+            maximum=2.0,
+        )
+        pricing_volatility = _finite_number(
+            raw_row.get("pricing_volatility"),
+            f"{prefix} {contract_month} pricing volatility",
+            minimum=0.005,
+            maximum=2.0,
+        )
+        factor = _finite_number(
+            raw_row.get("expiry_adjustment_factor"),
+            f"{prefix} {contract_month} expiry adjustment factor",
+            minimum=0.0,
+            strict_minimum=True,
+        )
+        if not math.isclose(
+            pricing_volatility,
+            input_volatility * factor,
+            rel_tol=1e-10,
+            abs_tol=1e-12,
+        ):
+            raise StructureValidationError(
+                f"{prefix}: {contract_month} pricing volatility does not reconcile "
+                "to its mandatory expiry adjustment."
+            )
+        rows_by_month[contract_month] = {
+            "contract_month": contract_month,
+            "input_volatility": input_volatility,
+            "pricing_volatility": pricing_volatility,
+            "expiry_adjustment_factor": factor,
+        }
+    if set(rows_by_month) != set(expected_months):
+        raise StructureValidationError(
+            f"{prefix}: component volatility months do not match the delivery strip."
+        )
+    return [rows_by_month[month] for month in expected_months]
+
+
+def _component_leg_volatilities(
+    leg: dict[str, Any],
+    component: dict[str, Any],
+) -> tuple[float, float, float]:
+    contract_month = str(component.get("contract_month") or "")
+    for row in leg.get("component_volatilities") or []:
+        if row["contract_month"] == contract_month:
+            return (
+                float(row["input_volatility"]),
+                float(row["pricing_volatility"]),
+                float(row["expiry_adjustment_factor"]),
+            )
+    input_volatility = float(leg["raw_volatility"])
+    pricing_volatility = float(leg["volatility_used"])
+    return input_volatility, pricing_volatility, pricing_volatility / input_volatility
+
+
 def _normalize_leg(
     model: str,
     raw_leg: dict[str, Any],
@@ -1834,6 +2187,11 @@ def _normalize_leg(
         weight = raw_ratio
     strike = _finite_number(raw_leg.get("strike"), f"{prefix} strike")
     if model in SINGLE_ASSET_MODELS and strike <= 0:
+        if context.get("positive_domain_required"):
+            raise StructureValidationError(
+                f"{prefix}: {context.get('exchange_mapping_id')} uses a lognormal "
+                "surface and requires a strictly positive strike."
+            )
         raise StructureValidationError(f"{prefix}: strike must be greater than zero.")
     if model == "kirk" and context["asset_2"] + strike <= 0:
         raise StructureValidationError(
@@ -1877,6 +2235,15 @@ def _normalize_leg(
 
     if model in SINGLE_ASSET_MODELS:
         factor = context["vol_adjustment_factor"]
+        raw_expiry_factor = raw_leg.get("expiry_adjustment_factor")
+        if raw_expiry_factor is not None:
+            factor = _finite_number(
+                raw_expiry_factor,
+                f"{prefix} expiry adjustment factor",
+                minimum=0.0,
+                strict_minimum=True,
+            )
+            leg["expiry_adjustment_factor"] = factor
         raw_basis = raw_leg.get("quote_basis")
         quote_basis = str(raw_basis or "VOL").strip().upper()
         if quote_basis == "VOLATILITY":
@@ -1913,6 +2280,13 @@ def _normalize_leg(
         leg["entered_premium"] = entered_premium
         leg["raw_volatility"] = raw_vol
         leg["volatility_used"] = used_vol
+        component_volatilities = _normalize_component_volatilities(
+            raw_leg.get("component_volatilities"),
+            context,
+            prefix,
+        )
+        if component_volatilities:
+            leg["component_volatilities"] = component_volatilities
     else:
         raw_basis = raw_leg.get("quote_basis")
         if raw_basis is not None and str(raw_basis).strip().upper() not in {
@@ -2048,13 +2422,16 @@ def _price_leg(
                 "rho": 0.0,
             }
             for component in context["delivery_components"]:
+                component_input_vol, component_pricing_vol, component_vol_factor = (
+                    _component_leg_volatilities(leg, component)
+                )
                 if context.get("margin_style") == "futures_style":
                     result = black_76_futures_style(
                         leg["call_put"],
                         component["forward"],
                         leg["strike"],
                         component["time_to_expiry"],
-                        leg["volatility_used"],
+                        component_pricing_vol,
                     )
                 else:
                     result = black_76(
@@ -2063,9 +2440,11 @@ def _price_leg(
                         leg["strike"],
                         component["time_to_expiry"],
                         context["rate"],
-                        leg["volatility_used"],
+                        component_pricing_vol,
                     )
                 component_value, delta, gamma, theta, vega, rho = result
+                if context["vega_basis"] == "input_vol":
+                    vega *= component_vol_factor
                 component_greeks = {
                     "delta": delta,
                     "gamma": gamma,
@@ -2076,8 +2455,9 @@ def _price_leg(
                 component_results.append(
                     {
                         **component,
-                        "input_volatility": leg["raw_volatility"],
-                        "pricing_volatility": leg["volatility_used"],
+                        "input_volatility": component_input_vol,
+                        "pricing_volatility": component_pricing_vol,
+                        "expiry_adjustment_factor": component_vol_factor,
                         "unit_value": component_value,
                         "weighted_unit_value": component["weight"]
                         * component_value,
@@ -2124,7 +2504,11 @@ def _price_leg(
                 "vega": (
                     vega
                     if context["vega_basis"] == "adjusted_pricing_vol"
-                    else vega * context["vol_adjustment_factor"]
+                    else vega
+                    * leg.get(
+                        "expiry_adjustment_factor",
+                        context["vol_adjustment_factor"],
+                    )
                 ),
                 "rho": rho,
             }
@@ -2139,6 +2523,9 @@ def _price_leg(
                 "rho": 0.0,
             }
             for component in context["delivery_components"]:
+                component_input_vol, component_pricing_vol, component_vol_factor = (
+                    _component_leg_volatilities(leg, component)
+                )
                 result = asian_76(
                     leg["call_put"],
                     component["forward"],
@@ -2146,11 +2533,15 @@ def _price_leg(
                     component["time_to_expiry"],
                     component["time_to_averaging_start"],
                     context["rate"],
-                    leg["volatility_used"],
+                    component_pricing_vol,
+                    fixing_times=_asian_fixing_times(component),
+                    determination_time=_asian_determination_time(component),
                 )
                 component_value, delta, gamma, theta, vega, rho = result
                 if context.get("margin_style") == "futures_style":
                     rho = 0.0
+                if context["vega_basis"] == "input_vol":
+                    vega *= component_vol_factor
                 component_greeks = {
                     "delta": delta,
                     "gamma": gamma,
@@ -2161,8 +2552,9 @@ def _price_leg(
                 component_results.append(
                     {
                         **component,
-                        "input_volatility": leg["raw_volatility"],
-                        "pricing_volatility": leg["volatility_used"],
+                        "input_volatility": component_input_vol,
+                        "pricing_volatility": component_pricing_vol,
+                        "expiry_adjustment_factor": component_vol_factor,
                         "unit_value": component_value,
                         "weighted_unit_value": component["weight"] * component_value,
                         "greeks": component_greeks,
@@ -2186,6 +2578,8 @@ def _price_leg(
                 context["time_to_averaging_start"],
                 context["rate"],
                 leg["volatility_used"],
+                fixing_times=_asian_fixing_times(context),
+                determination_time=_asian_determination_time(context),
             )
             value, delta, gamma, theta, vega, rho = result
             if context.get("margin_style") == "futures_style":
@@ -2197,7 +2591,11 @@ def _price_leg(
                 "vega": (
                     vega
                     if context["vega_basis"] == "adjusted_pricing_vol"
-                    else vega * context["vol_adjustment_factor"]
+                    else vega
+                    * leg.get(
+                        "expiry_adjustment_factor",
+                        context["vol_adjustment_factor"],
+                    )
                 ),
                 "rho": rho,
             }
@@ -2217,7 +2615,11 @@ def _price_leg(
             "delta": delta,
             "gamma": gamma,
             "theta": theta,
-            "vega": vega * context["vol_adjustment_factor"],
+            "vega": vega
+            * leg.get(
+                "expiry_adjustment_factor",
+                context["vol_adjustment_factor"],
+            ),
             "rho": rho,
         }
     else:
@@ -2286,7 +2688,7 @@ def _price_leg_value_only(
                         component["forward"],
                         leg["strike"],
                         component["time_to_expiry"],
-                        leg["volatility_used"],
+                        _component_leg_volatilities(leg, component)[1],
                     )[0]
                     for component in context["delivery_components"]
                 )
@@ -2299,7 +2701,7 @@ def _price_leg_value_only(
                         leg["strike"],
                         component["time_to_expiry"],
                         context["rate"],
-                        leg["volatility_used"],
+                        _component_leg_volatilities(leg, component)[1],
                     )[0]
                     for component in context["delivery_components"]
                 )
@@ -2331,7 +2733,9 @@ def _price_leg_value_only(
                     component["time_to_expiry"],
                     component["time_to_averaging_start"],
                     context["rate"],
-                    leg["volatility_used"],
+                    _component_leg_volatilities(leg, component)[1],
+                    fixing_times=_asian_fixing_times(component),
+                    determination_time=_asian_determination_time(component),
                 )[0]
                 for component in context["delivery_components"]
             )
@@ -2344,6 +2748,8 @@ def _price_leg_value_only(
                 context["time_to_averaging_start"],
                 context["rate"],
                 leg["volatility_used"],
+                fixing_times=_asian_fixing_times(context),
+                determination_time=_asian_determination_time(context),
             )[0]
     elif model == "american_futures":
         value = american_on_futures_equity_style_price(
@@ -2380,6 +2786,8 @@ def _calculate_trade_value_only(
     sizing: dict[str, Any],
     legs: list[dict[str, Any]],
     calculation_date: date,
+    *,
+    normalized_context: dict[str, Any] | None = None,
 ) -> float:
     """Validate scenario inputs and return only the signed trade value."""
     if model not in SUPPORTED_MODELS:
@@ -2390,7 +2798,12 @@ def _calculate_trade_value_only(
         raise StructureValidationError(
             f"A structure can contain at most {MAX_LEGS} legs."
         )
-    normalized_context = _normalize_context(model, context or {}, calculation_date)
+    if normalized_context is None:
+        normalized_context = _normalize_context(
+            model,
+            context or {},
+            calculation_date,
+        )
     normalized_sizing = _normalize_sizing(sizing or {})
     normalized_legs = [
         _normalize_leg(model, raw_leg or {}, index, normalized_context)
@@ -2460,6 +2873,14 @@ def _raw_leg_from_normalized(model: str, leg: dict[str, Any]) -> dict[str, Any]:
     }
     if model in SINGLE_ASSET_MODELS:
         raw["volatility"] = leg["raw_volatility"]
+        if leg.get("expiry_adjustment_factor") is not None:
+            raw["expiry_adjustment_factor"] = leg[
+                "expiry_adjustment_factor"
+            ]
+        if leg.get("component_volatilities"):
+            raw["component_volatilities"] = [
+                dict(row) for row in leg["component_volatilities"]
+            ]
     else:
         raw["volatility_asset_1"] = leg["raw_volatility_asset_1"]
         raw["volatility_asset_2"] = leg["raw_volatility_asset_2"]
@@ -2628,26 +3049,48 @@ def calculate_structure(
             "NBP unit analytics are quoted in GBp/therm; position values and "
             "Greeks are converted to GBP at 100 pence per pound."
         )
+    if normalized_context.get("listing_evidence_status") == "conditional":
+        warnings.append(
+            "Current exchange-listing evidence for this mapping is conditional."
+        )
+    if normalized_context.get("premium_evidence_status") == "conditional":
+        warnings.append(
+            "Current exchange-premium evidence for this mapping is conditional."
+        )
     if normalized_context.get("delivery_components"):
+        volatility_detail = (
+            "Each monthly component uses its own published input volatility and "
+            "mandatory expiry-adjusted pricing volatility."
+            if any(leg.get("component_volatilities") for leg in normalized_legs)
+            else "The entered forward and each leg's volatility are applied flat "
+            "across the monthly components."
+        )
         if normalized_context["asset"] == "TTF":
             warnings.append(
                 "The strip uses exact monthly TFO expiries and delivery-hour "
-                "weights. The entered forward and each leg's volatility are "
-                "applied flat across the monthly components."
+                f"weights. {volatility_detail}"
             )
         elif model == "asian76":
             warnings.append(
                 "The JKM Average Price Option strip uses exact monthly exchange "
                 "expiries, governed averaging starts, and equal 10,000 MMBtu lots. "
-                "Asian-76 is a continuous arithmetic-average approximation; the "
-                "entered forward and each leg's volatility are applied flat across "
-                "the monthly components."
+                + (
+                    "Asian-76 uses the governed Platts publication fixing dates. "
+                    if normalized_context.get("fixing_schedule_mode")
+                    == "platts_publication_days"
+                    else "Asian-76 is a continuous arithmetic-average approximation. "
+                )
+                + volatility_detail
+            )
+        elif normalized_context["asset"] == "NBP":
+            warnings.append(
+                "The ICE-NBP-UKF strip uses governed monthly expiries and exact "
+                f"calendar-day therm weights. {volatility_detail}"
             )
         else:
             warnings.append(
                 "The JKZ strip uses the governed monthly TFO-linked expiries and "
-                "equal 10,000 MMBtu lots. The entered forward and each leg's "
-                "volatility are applied flat across the monthly components."
+                f"equal 10,000 MMBtu lots. {volatility_detail}"
             )
 
     raw_context = _raw_context_from_normalized(model, normalized_context)
@@ -2746,6 +3189,12 @@ def _price_at_state(
                     time_to_expiry = (
                         component_expiration - valuation_date
                     ).days / float(context["day_count_denominator"])
+                    component_pricing_vol = float(
+                        component.get(
+                            "pricing_volatility",
+                            leg["volatility_used"],
+                        )
+                    )
                     if model == "asian76":
                         averaging_start = _as_date(
                             component["averaging_start_date"],
@@ -2769,7 +3218,13 @@ def _price_at_state(
                             time_to_expiry,
                             time_to_averaging_start,
                             context["rate"],
-                            leg["volatility_used"],
+                            component_pricing_vol,
+                            fixing_times=_asian_fixing_times(
+                                component, valuation_date
+                            ),
+                            determination_time=_asian_determination_time(
+                                component, valuation_date
+                            ),
                         )[0]
                     elif context.get("margin_style") == "futures_style":
                         value = black_76_futures_style(
@@ -2777,7 +3232,7 @@ def _price_at_state(
                             underlying_value,
                             leg["strike"],
                             time_to_expiry,
-                            leg["volatility_used"],
+                            component_pricing_vol,
                         )[0]
                     else:
                         value = black_76(
@@ -2786,7 +3241,7 @@ def _price_at_state(
                             leg["strike"],
                             time_to_expiry,
                             context["rate"],
-                            leg["volatility_used"],
+                            component_pricing_vol,
                         )[0]
                 leg_value += component["weight"] * float(value)
             total += leg["weight"] * leg_value * position_scale
@@ -2848,6 +3303,10 @@ def _price_at_state(
                 time_to_averaging_start,
                 context["rate"],
                 leg["volatility_used"],
+                fixing_times=_asian_fixing_times(context, valuation_date),
+                determination_time=_asian_determination_time(
+                    context, valuation_date
+                ),
             )[0]
         elif model == "american_futures":
             value = american_on_futures_equity_style_price(
@@ -3033,24 +3492,55 @@ def parallel_volatility_series(
     points: int = 41,
 ) -> dict[str, Any]:
     model, context, sizing, legs, calculation_date = _snapshot_input(snapshot)
+    normalized_context = None
     shifts = np.linspace(minimum_shift, maximum_shift, max(5, min(points, 101)))
     values: list[float] = []
     valid_shifts: list[float] = []
     for raw_shift in _include_base_number(shifts, 0.0):
-        shifted_legs = [dict(leg) for leg in legs]
+        shifted_legs = [
+            {
+                **leg,
+                **(
+                    {
+                        "component_volatilities": [
+                            dict(row)
+                            for row in leg.get("component_volatilities") or []
+                        ]
+                    }
+                    if leg.get("component_volatilities")
+                    else {}
+                ),
+            }
+            for leg in legs
+        ]
         for leg in shifted_legs:
             if model in SINGLE_ASSET_MODELS:
                 leg["volatility"] += raw_shift
+                for component_volatility in leg.get(
+                    "component_volatilities"
+                ) or []:
+                    component_volatility["input_volatility"] += raw_shift
+                    component_volatility["pricing_volatility"] = (
+                        component_volatility["input_volatility"]
+                        * component_volatility["expiry_adjustment_factor"]
+                    )
             else:
                 leg["volatility_asset_1"] += raw_shift
                 leg["volatility_asset_2"] += raw_shift
         try:
+            if normalized_context is None:
+                normalized_context = _normalize_context(
+                    model,
+                    context,
+                    calculation_date,
+                )
             value = _calculate_trade_value_only(
                 model,
                 context,
                 sizing,
                 shifted_legs,
                 calculation_date,
+                normalized_context=normalized_context,
             )
         except StructureValidationError:
             continue
@@ -3079,16 +3569,18 @@ def rate_sensitivity_series(
         np.linspace(minimum_rate, maximum_rate, max(5, min(points, 101))),
         context["rate"],
     )
+    normalized_context = _normalize_context(model, context, calculation_date)
     values = []
     for level in levels:
-        candidate_context = dict(context)
-        candidate_context["rate"] = level
+        candidate_normalized_context = dict(normalized_context)
+        candidate_normalized_context["rate"] = level
         value = _calculate_trade_value_only(
             model,
-            candidate_context,
+            context,
             sizing,
             legs,
             calculation_date,
+            normalized_context=candidate_normalized_context,
         )
         values.append(value)
     return {"rates": levels, "values": values}
@@ -3108,18 +3600,26 @@ def correlation_sensitivity_series(
         np.linspace(-1.0, 1.0, max(5, min(points, 101))),
         context["correlation"],
     )
+    normalized_context = None
     values = []
     valid_levels = []
     for level in levels:
-        candidate_context = dict(context)
-        candidate_context["correlation"] = level
         try:
+            if normalized_context is None:
+                normalized_context = _normalize_context(
+                    model,
+                    context,
+                    calculation_date,
+                )
+            candidate_normalized_context = dict(normalized_context)
+            candidate_normalized_context["correlation"] = level
             value = _calculate_trade_value_only(
                 model,
-                candidate_context,
+                context,
                 sizing,
                 legs,
                 calculation_date,
+                normalized_context=candidate_normalized_context,
             )
         except (StructureValidationError, ValueError, FloatingPointError):
             continue

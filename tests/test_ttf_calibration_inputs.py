@@ -45,6 +45,61 @@ def test_month_label_is_parsed_as_2026_not_year_26():
     assert expiry_month("Sep-26") == pd.Period("2026-09", freq="M")
 
 
+def test_reset_candidate_decodes_market_data_once(monkeypatch):
+    monkeypatch.setattr(
+        ttf,
+        "ctx",
+        SimpleNamespace(triggered_id="ttf-reset-adjustment-btn"),
+    )
+    real_read_json = ttf.pd.read_json
+    decoded = []
+
+    def counted_read_json(*args, **kwargs):
+        decoded.append(args[0])
+        return real_read_json(*args, **kwargs)
+
+    monkeypatch.setattr(ttf.pd, "read_json", counted_read_json)
+    monkeypatch.setattr(
+        ttf,
+        "format_params_for_table",
+        lambda params, market, commodity: [{"expiry": "Sep-26", "vr": 0.25}],
+    )
+    monkeypatch.setattr(
+        ttf,
+        "_apply_published_parameters",
+        lambda rows, market, publication: rows,
+    )
+    market_json = _valid_ttf_observations().to_json(
+        date_format="iso", orient="split"
+    )
+    params_json = pd.DataFrame([{"expiry": "2026-09-01", "vr": 0.25}]).to_json(
+        date_format="iso", orient="split"
+    )
+
+    result = ttf.build_ttf_intraday_candidate(
+        None,
+        1,
+        "Sep-26",
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        [],
+        [],
+        {},
+        market_json,
+        None,
+        [{"expiry": "Sep-26", "vr": 0.31}],
+        params_json,
+        {},
+        {},
+        [],
+    )
+
+    assert len(decoded) == 2
+    assert result[1] == [{"expiry": "Sep-26", "vr": 0.25}]
+
+
 def test_expiry_selection_excludes_zero_weight_extrapolated_rows():
     market_data = pd.concat(
         [

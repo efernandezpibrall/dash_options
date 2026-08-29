@@ -6,6 +6,13 @@ from dash import Input, Output, State, callback, dcc, html
 import pandas as pd
 import plotly.graph_objects as go
 
+from analytics_components import (
+    CHART_CONFIG,
+    empty_figure as _empty_figure,
+    grid_payload,
+    money as _money,
+    stat as _stat,
+)
 from valuation_analytics import (
     GROUPING_LABELS,
     ValuationDataError,
@@ -18,7 +25,6 @@ from valuation_analytics import (
 )
 
 
-CHART_CONFIG = {'displaylogo': False, 'responsive': True, 'displayModeBar': 'hover'}
 EXPLAIN_COLUMNS = [
     'actual_pnl',
     'delta_pnl',
@@ -30,30 +36,6 @@ EXPLAIN_COLUMNS = [
     'explained_pnl',
     'unexplained_pnl',
 ]
-
-
-def _empty_figure(message):
-    figure = go.Figure()
-    figure.update_layout(
-        template='plotly_white',
-        xaxis={'visible': False},
-        yaxis={'visible': False},
-        margin=dict(l=20, r=20, t=20, b=20),
-    )
-    figure.add_annotation(text=message, x=0.5, y=0.5, showarrow=False, xref='paper', yref='paper')
-    return figure
-
-
-def _money(value, currency):
-    value = float(value or 0)
-    return f'{value:,.2f} {currency}'
-
-
-def _stat(label, value, tone='neutral'):
-    return html.Div(
-        [html.Span(label, className='analytics-stat-label'), html.Strong(value)],
-        className=f'analytics-stat analytics-stat-{tone}',
-    )
 
 
 def _pnl_waterfall(explain, currency):
@@ -128,14 +110,6 @@ def _group_chart(aggregated, grouping, currency):
 
 
 def _grid_payload(aggregated, grouping):
-    if aggregated.empty:
-        return [], []
-    display = aggregated.copy()
-    for column in EXPLAIN_COLUMNS:
-        display[column] = pd.to_numeric(
-            display[column],
-            errors='coerce',
-        ).round(2)
     headers = {
         grouping: GROUPING_LABELS.get(grouping, grouping),
         'actual_pnl': 'Actual P&L change',
@@ -148,37 +122,7 @@ def _grid_payload(aggregated, grouping):
         'explained_pnl': 'Explained',
         'unexplained_pnl': 'Unexplained',
     }
-    headers['currency'] = 'Currency'
-    columns = []
-    for column in ['currency', grouping, *EXPLAIN_COLUMNS]:
-        definition = {
-            'field': column,
-            'headerName': headers.get(column, column),
-            'sortable': True,
-            'filter': True,
-            'resizable': True,
-            'minWidth': 118 if column != grouping else 170,
-        }
-        if column not in {grouping, 'currency'}:
-            definition.update(
-                {
-                    'type': 'numericColumn',
-                    'valueFormatter': {
-                        'function': "d3.format(',.2f')(params.value)"
-                    },
-                    'cellStyle': {
-                        'styleConditions': [
-                            {'condition': 'params.value < 0', 'style': {'color': '#b91c1c'}},
-                            {'condition': 'params.value > 0', 'style': {'color': '#15803d'}},
-                        ]
-                    },
-                }
-            )
-        columns.append(definition)
-    return (
-        display[['currency', grouping, *EXPLAIN_COLUMNS]].to_dict('records'),
-        columns,
-    )
+    return grid_payload(aggregated, grouping, EXPLAIN_COLUMNS, headers)
 
 
 def _build_explain(previous_date, current_date, strategies, currency):

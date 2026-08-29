@@ -5,11 +5,15 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
-from options.options_library import asian_76
+from options.options_library import asian_76, black_76_futures_style
 from options.ttf_volatility import black76_call_delta
 from pages import pricer
 import pricer_surface_reference as surface_reference
-from pricer_structure import build_delivery_month_component, calculate_structure
+from pricer_structure import (
+    build_delivery_month_component,
+    calculate_structure,
+    parallel_volatility_series,
+)
 
 
 AS_OF = date(2026, 7, 30)
@@ -229,6 +233,9 @@ def test_new_pricer_consolidates_surface_vols_and_places_premium_then_value():
         for column in volatility_columns
     )
     assert "pricingRows" in volatility_columns[0]["valueGetter"]["function"]
+    assert "surface_effective_input_vol" in volatility_columns[0][
+        "valueGetter"
+    ]["function"]
     adjustment_columns = definitions[3]["children"]
     assert [column["headerName"] for column in adjustment_columns] == [
         "ATM",
@@ -254,6 +261,9 @@ def test_new_pricer_consolidates_surface_vols_and_places_premium_then_value():
     assert pricing_vol_column["editable"] is False
     assert "surfaceRows" in pricing_vol_column["valueGetter"]["function"]
     assert "pricingRows" in pricing_vol_column["valueGetter"]["function"]
+    assert "surface_effective_pricing_vol" in pricing_vol_column[
+        "valueGetter"
+    ]["function"]
     assert "pricer-result-column-group-premium" in definitions[5]["headerClass"]
     assert [column["headerName"] for column in definitions[5]["children"]] == [
         "Premium",
@@ -403,7 +413,7 @@ def test_grid_merge_preserves_pricing_totals_and_keeps_references_out_of_rows():
     assert "surface_pricing_vol" not in leg_row
 
 
-def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor():
+def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor(monkeypatch):
     month = "2026-12-01"
     reference_expiry = _surface_expiry("TTF", month)
     selected_expiry = reference_expiry - timedelta(days=5)
@@ -418,6 +428,18 @@ def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor():
         _leg("call", strike=100.0, call_put="C"),
         _leg("put", strike=100.0, call_put="P", basis="PREMIUM"),
     ]
+    prepare = surface_reference._prepare_component_surface
+    prepared_months = []
+
+    def counted_prepare(*args, **kwargs):
+        prepared_months.append(args[1]["contract_month"])
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(
+        surface_reference,
+        "_prepare_component_surface",
+        counted_prepare,
+    )
 
     payload = surface_reference.build_published_surface_reference(
         "TTF",
@@ -428,6 +450,7 @@ def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor():
         surface_loader=_loader({(2026, 12): 0.4}, saved_forward=72.0),
     )
 
+    assert prepared_months == [month]
     for leg_id in ("call", "put"):
         result = payload["rows"][leg_id]
         assert result["surface_input_vol"] == pytest.approx(0.4)
@@ -581,6 +604,68 @@ def test_cme_bzo_uses_user_forward_and_ice_brent_surface_with_target_expiry():
     assert snapshot["context"]["volatility_surface_source"] == "ICE_BRENT"
 
 
+@pytest.mark.parametrize("mapping_id", ["CME-BRENT-BE", "CME-BRENT-BZO"])
+def test_cme_brent_allows_only_the_governed_one_day_surface_extension(mapping_id):
+    month = "2027-02-01"
+    mapping = pricer.exchange_option_mapping(mapping_id)
+    component = build_delivery_month_component(
+        "Brent",
+        "black76",
+        month,
+        AS_OF,
+        80.0,
+        mapping_id=mapping_id,
+    )
+    assert component["surface_option_expiration_date"] == "2026-12-23"
+    assert component["option_expiration_date"] == "2026-12-24"
+    assert component["max_surface_extension_days"] == 1
+    context = {
+        "exchange_mapping_id": mapping_id,
+        "premium_convention": mapping.premium_convention,
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": 80.0,
+        "rate": 0.03,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+
+    payload = surface_reference.build_published_surface_reference(
+        "Brent",
+        "black76",
+        context,
+        [_leg(strike=80.0)],
+        AS_OF,
+        operational_loader=_operational_loader(0.42),
+    )
+    adjustment = payload["rows"]["leg-1"]["surface_expiry_adjustments"][0]
+
+    assert adjustment["direction"] == "extension"
+    assert adjustment["factor"] > 1.0
+    assert payload["rows"]["leg-1"]["surface_pricing_vol"] > 0.42
+
+    publication = _operational_loader(0.42)(
+        "BRENT",
+        AS_OF,
+        [date.fromisoformat(month)],
+    )
+    beyond_allowance = {
+        **component,
+        "option_expiration_date": "2026-12-28",
+    }
+    with pytest.raises(
+        surface_reference.SurfaceReferenceError,
+        match="this mapping permits 1",
+    ):
+        surface_reference._prepare_component_surface(
+            publication["points"],
+            beyond_allowance,
+            asset="Brent",
+            valuation_date=AS_OF,
+            current_forward=80.0,
+        )
+
+
 def test_phe_allows_the_governed_one_day_january_2033_surface_extension():
     month = "2033-01-01"
     component = build_delivery_month_component(
@@ -620,8 +705,8 @@ def test_phe_allows_the_governed_one_day_january_2033_surface_extension():
         ("CME-TTF-TTL", "TTF", "black76", "2031-12-01", "shortening"),
         ("CME-TTF-TFP", "TTF", "black76", "2026-10-01", "extension"),
         ("CME-TTF-TFF", "TTF", "black76", "2026-10-01", "extension"),
-        ("CME-JKM-JKO", "JKM", "asian76", "2027-03-01", "shortening"),
-        ("CME-JKM-JFO", "JKM", "asian76", "2027-03-01", "shortening"),
+        ("CME-JKM-JKO", "JKM", "asian76", "2027-01-01", "equal"),
+        ("CME-JKM-JFO", "JKM", "asian76", "2027-01-01", "equal"),
         ("CME-HH-ON", "HH", "american_futures", "2026-09-01", "equal"),
     ],
 )
@@ -951,9 +1036,7 @@ def test_jkm_black_uses_apo_publication_expiry_and_jkz_pricing_expiry():
     result = payload["rows"]["leg-1"]
 
     assert 0 < result["surface_pricing_vol"] < 0.6
-    assert result["surface_input_vol"] == pytest.approx(
-        result["surface_pricing_vol"]
-    )
+    assert result["surface_input_vol"] == pytest.approx(0.6)
     _assert_compact_surface_tooltip(result["surface_pricing_tooltip"], "black76")
 
 
@@ -1002,6 +1085,51 @@ def test_jkm_asian_surface_delta_uses_asian76_with_published_volatility():
     _assert_compact_surface_tooltip(
         result["surface_pricing_tooltip"], "asian76"
     )
+
+
+def test_cme_jkm_surface_delta_uses_the_governed_discrete_fixing_schedule():
+    component = build_delivery_month_component(
+        "JKM",
+        "asian76",
+        "2027-01-01",
+        AS_OF,
+        17.0,
+        mapping_id="CME-JKM-JFO",
+    )
+    pricing_volatility = 0.56
+    actual = surface_reference._surface_model_call_delta(
+        "asian76",
+        component,
+        current_forward=17.0,
+        strike=17.0,
+        reference_time=component["time_to_expiry"],
+        reference_volatility=pricing_volatility,
+        pricing_volatility=pricing_volatility,
+    )
+    expected = asian_76(
+        "C",
+        17.0,
+        17.0,
+        component["time_to_expiry"],
+        component["time_to_averaging_start"],
+        0.0,
+        pricing_volatility,
+        fixing_times=tuple(component["averaging_fixing_times"]),
+        determination_time=component[
+            "time_to_floating_price_determination"
+        ],
+    )[1]
+    continuous = asian_76(
+        "C",
+        17.0,
+        17.0,
+        component["time_to_expiry"],
+        component["time_to_averaging_start"],
+        0.0,
+        pricing_volatility,
+    )[1]
+    assert actual == pytest.approx(expected)
+    assert actual != pytest.approx(continuous)
 
 
 @pytest.mark.parametrize(
@@ -1064,6 +1192,260 @@ def test_strip_flat_vol_is_premium_equivalent(asset, model, shape, year, vols):
     assert payload["rows"]["leg-1"]["surface_skew_input_vol"] == pytest.approx(0.0)
     _assert_compact_surface_tooltip(
         payload["rows"]["leg-1"]["surface_pricing_tooltip"], model
+    )
+
+
+def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility():
+    vols = {(2026, 10): 0.35, (2026, 11): 0.42, (2026, 12): 0.48}
+    context = {
+        "exchange_mapping_id": "CME-TTF-TTL",
+        "premium_convention": "futures_style",
+        "delivery_shape": "Q4",
+        "delivery_year": 2026,
+        "forward": 30.0,
+        "rate": 0.0,
+    }
+    row = {
+        **_leg(strike=30.0, call_put="P"),
+        "atm_vol_adjustment": 1.0,
+        "skew_vol_adjustment": -0.25,
+        "smile_vol_adjustment": 0.5,
+    }
+    payload = surface_reference.build_published_surface_reference(
+        "TTF",
+        "black76",
+        context,
+        [row],
+        AS_OF,
+        surface_loader=_loader(vols),
+    )
+    signature = pricer._surface_reference_input_signature(
+        "TTF",
+        "black76",
+        [row],
+        context,
+        AS_OF.isoformat(),
+    )
+    payload["_ui_reference_signature"] = signature
+    calculation_rows, source_signature = (
+        pricer._published_surface_calculation_rows(
+            "TTF",
+            "black76",
+            [row],
+            payload,
+            signature,
+        )
+    )
+    component_vols = calculation_rows[0]["component_volatilities"]
+    assert len(component_vols) == 3
+    assert source_signature["rows"][0]["component_volatilities"] == component_vols
+    manual_adjustment = 0.0125
+    for component_volatility in component_vols:
+        month = date.fromisoformat(component_volatility["contract_month"])
+        expected_input = vols[(month.year, month.month)] + manual_adjustment
+        assert component_volatility["input_volatility"] == pytest.approx(
+            expected_input
+        )
+        assert component_volatility["pricing_volatility"] == pytest.approx(
+            expected_input
+            * component_volatility["expiry_adjustment_factor"]
+        )
+    assert source_signature["rows"][0]["effective_pricing_vol"] == pytest.approx(
+        payload["rows"]["leg-1"]["surface_effective_pricing_vol"],
+        abs=1e-12,
+    )
+
+    snapshot = calculate_structure(
+        "black76",
+        {**context, "asset": "TTF"},
+        {"structure_quantity": 1, "contract_multiplier": 1.0},
+        calculation_rows,
+        as_of=AS_OF,
+    )
+    components = snapshot["legs"][0]["components"]
+    assert [item["pricing_volatility"] for item in components] == pytest.approx(
+        [item["pricing_volatility"] for item in component_vols]
+    )
+    assert snapshot["input"]["legs"][0]["component_volatilities"] == (
+        component_vols
+    )
+    expected_value = 0.0
+    expected_delta = 0.0
+    for component in components:
+        result = black_76_futures_style(
+            "P",
+            component["forward"],
+            30.0,
+            component["time_to_expiry"],
+            component["pricing_volatility"],
+        )
+        expected_value += component["weight"] * result[0]
+        expected_delta += component["weight"] * result[1]
+    flat_value = sum(
+        component["weight"]
+        * black_76_futures_style(
+            "P",
+            component["forward"],
+            30.0,
+            component["time_to_expiry"],
+            payload["rows"]["leg-1"]["surface_effective_pricing_vol"],
+        )[0]
+        for component in components
+    )
+    assert flat_value == pytest.approx(expected_value, abs=1e-10)
+    assert snapshot["legs"][0]["unit"]["value"] == pytest.approx(expected_value)
+    assert snapshot["legs"][0]["unit"]["greeks"]["delta"] == pytest.approx(
+        expected_delta
+    )
+    scenario = parallel_volatility_series(snapshot, points=5)
+    zero_index = scenario["shifts_percentage_points"].index(0.0)
+    assert scenario["values"][zero_index] == pytest.approx(
+        snapshot["totals"]["trade_value"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mapping_id", "month", "expected_direction"),
+    [
+        ("CME-TTF-TFP", "2026-10-01", "extension"),
+        ("ICE-TTF-TFO", "2026-12-01", "equal"),
+    ],
+)
+def test_monthly_manual_vol_adjustment_precedes_the_mandatory_expiry_factor(
+    mapping_id,
+    month,
+    expected_direction,
+):
+    mapping = pricer.exchange_option_mapping(mapping_id)
+    component = build_delivery_month_component(
+        "TTF",
+        "black76",
+        month,
+        AS_OF,
+        12.0,
+        mapping_id=mapping_id,
+    )
+    context = {
+        "exchange_mapping_id": mapping_id,
+        "premium_convention": mapping.premium_convention,
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": 12.0,
+        "rate": 0.03,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+    }
+    row = {
+        **_leg(strike=12.0),
+        "atm_vol_adjustment": 1.0,
+        "skew_vol_adjustment": -0.25,
+        "smile_vol_adjustment": 0.5,
+    }
+    payload = surface_reference.build_published_surface_reference(
+        "TTF",
+        "black76",
+        context,
+        [row],
+        AS_OF,
+        surface_loader=_loader({tuple(map(int, month[:7].split("-"))): 0.4}),
+    )
+    signature = pricer._surface_reference_input_signature(
+        "TTF",
+        "black76",
+        [row],
+        context,
+        AS_OF.isoformat(),
+    )
+    payload["_ui_reference_signature"] = signature
+    calculation_rows, source_signature = (
+        pricer._published_surface_calculation_rows(
+            "TTF",
+            "black76",
+            [row],
+            payload,
+            signature,
+        )
+    )
+    factor = payload["rows"]["leg-1"]["surface_component_volatilities"][0][
+        "expiry_adjustment_factor"
+    ]
+    manual_adjustment = 0.0125
+    expected_pricing_volatility = (0.4 + manual_adjustment) * factor
+    signature_row = source_signature["rows"][0]
+
+    assert signature_row["surface_expiry_adjustments"][0]["direction"] == (
+        expected_direction
+    )
+    assert signature_row["effective_pricing_vol"] == pytest.approx(
+        expected_pricing_volatility
+    )
+    assert payload["rows"]["leg-1"]["surface_input_vol"] == pytest.approx(0.4)
+    assert signature_row["effective_input_vol"] == pytest.approx(
+        0.4 + manual_adjustment
+    )
+    if expected_direction == "extension":
+        assert signature_row["effective_pricing_vol"] != pytest.approx(
+            0.4 * factor + manual_adjustment
+        )
+    else:
+        assert factor == pytest.approx(1.0)
+        assert signature_row["effective_pricing_vol"] == pytest.approx(
+            0.4 + manual_adjustment
+        )
+
+    snapshot = calculate_structure(
+        "black76",
+        {**context, "asset": "TTF"},
+        {"structure_quantity": 1, "contract_multiplier": 1.0},
+        calculation_rows,
+        as_of=AS_OF,
+    )
+    assert snapshot["legs"][0]["volatility_used"] == pytest.approx(
+        expected_pricing_volatility
+    )
+    assert snapshot["legs"][0]["raw_volatility"] == pytest.approx(
+        0.4 + manual_adjustment
+    )
+
+    epsilon = 1e-5
+    shifted_values = []
+    for shift in (-epsilon, epsilon):
+        shifted_row = {**calculation_rows[0]}
+        shifted_row["quote_value"] += shift
+        shifted = calculate_structure(
+            "black76",
+            {**context, "asset": "TTF"},
+            {"structure_quantity": 1, "contract_multiplier": 1.0},
+            [shifted_row],
+            as_of=AS_OF,
+        )
+        shifted_values.append(shifted["legs"][0]["unit"]["value"])
+    finite_difference_vega = (
+        (shifted_values[1] - shifted_values[0]) / (2.0 * epsilon) * 0.01
+    )
+    assert snapshot["legs"][0]["unit"]["greeks"]["vega"] == pytest.approx(
+        finite_difference_vega,
+        rel=2e-6,
+    )
+
+    scenario = parallel_volatility_series(
+        snapshot,
+        minimum_shift=0.01,
+        maximum_shift=0.01,
+        points=5,
+    )
+    shifted_row = {**calculation_rows[0]}
+    shifted_row["quote_value"] += 0.01
+    expected_shifted = calculate_structure(
+        "black76",
+        {**context, "asset": "TTF"},
+        {"structure_quantity": 1, "contract_multiplier": 1.0},
+        [shifted_row],
+        as_of=AS_OF,
+    )
+    scenario_index = scenario["shifts_percentage_points"].index(1.0)
+    assert scenario["values"][scenario_index] == pytest.approx(
+        expected_shifted["totals"]["trade_value"]
     )
 
 

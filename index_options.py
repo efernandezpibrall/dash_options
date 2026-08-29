@@ -45,6 +45,35 @@ PAGE_TITLES = {
 }
 PAGE_NOT_FOUND_TITLE = 'Page Not Found'
 PNL_EXPLAIN_VIEWS = ('pnl-explain', 'pnl_explain')
+STATIC_PAGE_LAYOUTS = {
+    '/': pages.greeks.layout,
+    '/greeks': pages.greeks.layout,
+    '/trades': pages.trades.layout,
+    '/prices': pages.prices.layout,
+    '/vol_surface': pages.vol_surface.layout,
+    '/brent_vol_history': pages.brent_vol_history.layout,
+    '/ice_chat_quotes': pages.ice_chat_quotes.layout,
+    '/correlations': pages.correlations.layout,
+    '/scenarios': pages.scenarios.layout,
+    '/pricer': pages.pricer_new.layout,
+    '/pricer_old': pages.pricer.layout,
+}
+NAV_LINK_IDS = {
+    '/': 'nav-greeks',
+    '/greeks': 'nav-greeks',
+    '/valuation': 'nav-valuation',
+    '/pnl_explain': 'nav-valuation',
+    '/trades': 'nav-trades',
+    '/prices': 'nav-prices',
+    '/vol_surface': 'nav-vol-surface',
+    '/vol_calibration': 'nav-vol-calibration',
+    '/brent_vol_history': 'nav-brent-vol-history',
+    '/ice_chat_quotes': 'nav-ice-chat-quotes',
+    '/correlations': 'nav-correlations',
+    '/scenarios': 'nav-scenarios',
+    '/pricer': 'nav-pricer',
+    '/pricer_old': 'nav-pricer-old',
+}
 
 
 def _valuation_workspace(search=None, *, default_view='valuation'):
@@ -543,36 +572,13 @@ def render_brent_vol_history_source_status(statuses, _mounted):
     Input('url', 'search'),
 )
 def display_page(pathname, search):
-    if pathname == '/':
-        return pages.greeks.layout
-    elif pathname == '/greeks':
-        return pages.greeks.layout
-    elif pathname == '/valuation':
+    if pathname == '/valuation':
         return _valuation_workspace(search)
-    elif pathname == '/trades':
-        return pages.trades.layout
-    elif pathname == '/vol_surface':
-        return pages.vol_surface.layout
-    elif pathname == '/vol_calibration' and pages.vol_calibration.calibration_enabled():
-        return pages.vol_calibration.create_layout(search)
-    elif pathname == '/brent_vol_history':
-        return pages.brent_vol_history.layout
-    elif pathname == '/ice_chat_quotes':
-        return pages.ice_chat_quotes.layout
-    elif pathname == '/prices':
-        return pages.prices.layout
-    elif pathname == '/pricer':
-        return pages.pricer_new.layout
-    elif pathname == '/pricer_old':
-        return pages.pricer.layout
-    elif pathname == '/correlations':
-        return pages.correlations.layout
-    elif pathname == '/scenarios':
-        return pages.scenarios.layout
-    elif pathname == '/pnl_explain':
+    if pathname == '/pnl_explain':
         return _valuation_workspace(search, default_view='pnl-explain')
-    else:
-        return '404 - Page not found'
+    if pathname == '/vol_calibration' and pages.vol_calibration.calibration_enabled():
+        return pages.vol_calibration.create_layout(search)
+    return STATIC_PAGE_LAYOUTS.get(pathname, '404 - Page not found')
 
 # Clientside callback for active navigation states
 clientside_callback(
@@ -596,29 +602,10 @@ clientside_callback(
         }});
         
         // Add active class based on current pathname
-        var activeLink = null;
-        if (currentPath === '/greeks' || currentPath === '/') {{
-            activeLink = document.getElementById('nav-greeks');
-        }} else {{
-            var linkMap = {{
-                '/valuation': 'nav-valuation',
-                '/trades': 'nav-trades',
-                '/prices': 'nav-prices',
-                '/vol_surface': 'nav-vol-surface',
-                '/vol_calibration': 'nav-vol-calibration',
-                '/brent_vol_history': 'nav-brent-vol-history',
-                '/ice_chat_quotes': 'nav-ice-chat-quotes',
-                '/correlations': 'nav-correlations',
-                '/scenarios': 'nav-scenarios',
-                '/pnl_explain': 'nav-valuation',
-                '/pricer': 'nav-pricer',
-                '/pricer_old': 'nav-pricer-old'
-            }};
-            
-            if (linkMap[currentPath]) {{
-                activeLink = document.getElementById(linkMap[currentPath]);
-            }}
-        }}
+        var linkMap = {json.dumps(NAV_LINK_IDS, sort_keys=True)};
+        var activeLink = linkMap[currentPath]
+            ? document.getElementById(linkMap[currentPath])
+            : null;
         
         if (activeLink) {{
             activeLink.classList.add('active');

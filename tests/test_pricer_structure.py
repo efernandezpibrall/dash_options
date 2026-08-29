@@ -3,6 +3,8 @@ from datetime import date, timedelta
 
 import pytest
 
+import pricer_structure as structure_module
+
 from options.options_library import (
     american_on_futures_equity_style,
     asian_76,
@@ -13,6 +15,8 @@ from options.options_library import (
 )
 from options.option_contract_conventions import FlatDiscountCurve
 from options.option_expiry_engine import (
+    PLATTS_ASIA_LNG_PUBLICATION,
+    PLATTS_ASIA_LNG_PUBLICATION_VERSION,
     business_days_between,
     get_surface_calendar_mapping,
 )
@@ -21,6 +25,7 @@ from pricer_exchange_registry import (
     canonical_exchange_mapping_id,
     exchange_mapping_for_asset_model,
     exchange_option_mapping,
+    exchange_product_metadata,
 )
 from pricer_structure import (
     GREEK_FIELDS,
@@ -34,9 +39,11 @@ from pricer_structure import (
     available_jkm_apo_delivery_months,
     build_delivery_month_component,
     build_jkm_month_component,
+    build_nbp_strip_components,
     build_ttf_strip_components,
     calculate_structure,
     correlation_sensitivity_series,
+    default_context,
     default_contract_size,
     default_model_for_asset,
     default_premium_convention,
@@ -1073,7 +1080,7 @@ def test_kirk_rejects_reference_expiry_before_contractual_expiry():
         )
 
 
-def test_structure_scenarios_are_total_only_and_zero_shift_matches_base():
+def test_structure_scenarios_are_total_only_and_zero_shift_matches_base(monkeypatch):
     snapshot = calculate_structure(
         "black76",
         {**black_context(), "asset": "HH"},
@@ -1084,12 +1091,22 @@ def test_structure_scenarios_are_total_only_and_zero_shift_matches_base():
         ],
         as_of=AS_OF,
     )
+    normalize_context = structure_module._normalize_context
+    normalize_calls = []
+
+    def counted_normalize(*args, **kwargs):
+        normalize_calls.append(args[0])
+        return normalize_context(*args, **kwargs)
+
+    monkeypatch.setattr(structure_module, "_normalize_context", counted_normalize)
     vol = parallel_volatility_series(snapshot)
+    assert normalize_calls == ["black76"]
     zero_index = vol["shifts_percentage_points"].index(0.0)
     assert vol["values"][zero_index] == pytest.approx(
         snapshot["totals"]["trade_value"]
     )
     rate = rate_sensitivity_series(snapshot)
+    assert normalize_calls == ["black76", "black76"]
     base_index = rate["rates"].index(0.03)
     assert rate["values"][base_index] == pytest.approx(
         snapshot["totals"]["trade_value"]
@@ -1203,6 +1220,91 @@ def test_ttf_sum27_exact_monthly_pricing_matches_reference(
     json.dumps(snapshot)
 
 
+@pytest.mark.parametrize(
+    ("model", "asset", "mapping_id", "premium_convention", "forward", "rate"),
+    [
+        ("black76", "TTF", "CME-TTF-TFP", "upfront", 12.0, 0.03),
+        ("black76", "TTF", "CME-TTF-TFF", "futures_style", 12.0, 0.0),
+        ("asian76", "JKM", "CME-JKM-JKO", "upfront", 16.0, 0.03),
+        ("asian76", "JKM", "CME-JKM-JFO", "futures_style", 16.0, 0.0),
+    ],
+)
+def test_strip_vega_applies_each_expiry_factor_to_input_vol_shifts(
+    model,
+    asset,
+    mapping_id,
+    premium_convention,
+    forward,
+    rate,
+):
+    context = {
+        "asset": asset,
+        "exchange_mapping_id": mapping_id,
+        "premium_convention": premium_convention,
+        "delivery_shape": "Q4",
+        "delivery_year": 2026,
+        "forward": forward,
+        "rate": rate,
+    }
+    manual_shift = 0.0125
+    factors = (0.82, 1.0, 1.18)
+    input_volatilities = tuple(
+        base + manual_shift for base in (0.36, 0.41, 0.47)
+    )
+    leg = black_leg(1, strike=forward, volatility=0.4)
+    leg["component_volatilities"] = [
+        {
+            "contract_month": f"2026-{month:02d}-01",
+            "input_volatility": input_volatility,
+            "pricing_volatility": input_volatility * factor,
+            "expiry_adjustment_factor": factor,
+        }
+        for month, input_volatility, factor in zip(
+            (10, 11, 12), input_volatilities, factors
+        )
+    ]
+    snapshot = calculate_structure(
+        model,
+        context,
+        sizing(
+            2,
+            default_contract_size(asset, context, as_of=AS_OF),
+        ),
+        [leg],
+        as_of=AS_OF,
+    )
+
+    components = snapshot["legs"][0]["components"]
+    assert [item["expiry_adjustment_factor"] for item in components] == list(
+        factors
+    )
+    assert snapshot["legs"][0]["unit"]["greeks"]["vega"] == pytest.approx(
+        sum(item["weighted_greeks"]["vega"] for item in components)
+    )
+    assert snapshot["totals"]["trade_greeks"]["vega"] == pytest.approx(
+        snapshot["legs"][0]["unit"]["greeks"]["vega"]
+        * snapshot["sizing"]["position_scale"]
+    )
+
+    input_vol_bump = 1e-5
+    shifted = parallel_volatility_series(
+        snapshot,
+        minimum_shift=-input_vol_bump,
+        maximum_shift=input_vol_bump,
+        points=5,
+    )
+    finite_difference_vega = (
+        (shifted["values"][-1] - shifted["values"][0])
+        / (2.0 * input_vol_bump)
+        * 0.01
+    )
+    assert snapshot["totals"]["trade_greeks"]["vega"] == pytest.approx(
+        finite_difference_vega,
+        rel=5e-5,
+        abs=1e-4,
+    )
+
+
 def test_jkm_models_select_distinct_exchange_products_and_monthly_expiries():
     apo = calculate_structure(
         "asian76",
@@ -1232,6 +1334,12 @@ def test_jkm_models_select_distinct_exchange_products_and_monthly_expiries():
     assert default_model_for_asset("JKM") == "asian76"
     assert apo["context"]["exchange_product_code"] == "JKM"
     assert vanilla["context"]["exchange_product_code"] == "JKZ"
+    for snapshot in (apo, vanilla):
+        assert "exchange_mapping_id" not in snapshot["context"]
+        assert "listing_evidence_status" not in snapshot["context"]
+        assert "premium_evidence_status" not in snapshot["context"]
+        assert "implementation_status" not in snapshot["context"]
+        assert not any("conditional" in warning.lower() for warning in snapshot["warnings"])
     assert apo["context"]["delivery_total_quantity"] == 30_000
     assert vanilla["context"]["delivery_total_quantity"] == 30_000
     assert [
@@ -1263,6 +1371,75 @@ def test_jkm_models_select_distinct_exchange_products_and_monthly_expiries():
             date.fromisoformat(snapshot["calculation_date"]),
         ) == pytest.approx(snapshot["totals"]["trade_value"])
     assert time_decay_series(apo)["dates"][-1] == "2026-11-16"
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_code", "expected_id", "expected_name"),
+    [
+        (
+            "asian76",
+            "JKM",
+            "71090519",
+            "JKM LNG (Platts) Average Price Options",
+        ),
+        ("black76", "JKZ", None, "JKM LNG (Platts) Options"),
+    ],
+)
+def test_manual_jkm_without_delivery_month_preserves_legacy_product_metadata(
+    model,
+    expected_code,
+    expected_id,
+    expected_name,
+):
+    context = default_context(model, AS_OF)
+    context.update(
+        {
+            "asset": "JKM",
+            "premium_convention": "futures_style",
+            "forward": 16.0,
+        }
+    )
+    leg = default_leg(model)
+    leg.update({"strike": 16.0, "quote_value": 0.4})
+
+    snapshot = calculate_structure(
+        model,
+        context,
+        sizing(),
+        [leg],
+        as_of=AS_OF,
+    )
+
+    assert snapshot["context"]["exchange_product_code"] == expected_code
+    assert snapshot["context"]["exchange_product_id"] == expected_id
+    assert snapshot["context"]["exchange_product_name"] == expected_name
+    assert snapshot["context"]["exchange_expiry_rule"]
+    assert "exchange_mapping_id" not in snapshot["context"]
+    assert "implementation_status" not in snapshot["context"]
+    assert "listing_evidence_status" not in snapshot["context"]
+
+
+def test_unmapped_jkm_uses_legacy_continuous_averaging_only():
+    legacy = build_jkm_month_component(
+        "2027-01-01",
+        date(2026, 8, 21),
+        16.0,
+        "asian76",
+    )
+    exchange = build_jkm_month_component(
+        "2027-01-01",
+        date(2026, 8, 21),
+        16.0,
+        "asian76",
+        "CME-JKM-JKO",
+    )
+
+    assert legacy["fixing_schedule_mode"] is None
+    assert "averaging_fixing_dates" not in legacy
+    assert "floating_price_determination_date" not in legacy
+    assert exchange["fixing_schedule_mode"] == "platts_publication_days"
+    assert len(exchange["averaging_fixing_dates"]) == 22
+    assert exchange["floating_price_determination_date"] == "2026-12-15"
 
 
 def test_jkm_apo_month_delivery_resolves_the_same_governed_dates_as_a_strip():
@@ -1346,6 +1523,11 @@ def test_cme_bzo_uses_user_forward_and_ice_brent_surface_with_target_identity():
     assert component["forward_source"] == "USER_INPUT"
     assert component["volatility_surface_source"] == "ICE_BRENT"
     assert component["forward"] == 72.5
+    assert component["exchange_product_code"] == "BZO"
+    assert component["exercise_style"] == "american"
+    assert component["pricing_engine_label"] == (
+        "Black-76 (American-equivalent futures-style)"
+    )
 
     # Mapping and asset/model arrive through separate Dash callbacks. A
     # transient mixed UI state must remain renderable, while calculations
@@ -1422,6 +1604,7 @@ def test_ready_exchange_mapping_registry_and_calculation_parity(
     component = build_delivery_month_component(
         mapping.asset, mapping.model, month, as_of, 42.0, mapping_id=mapping_id
     )
+    product_metadata = exchange_product_metadata(mapping)
     context = {
         "asset": mapping.asset,
         "exchange_mapping_id": mapping_id,
@@ -1443,7 +1626,7 @@ def test_ready_exchange_mapping_registry_and_calculation_parity(
         as_of=as_of,
     )
 
-    assert snapshot["schema_version"] == 16
+    assert snapshot["schema_version"] == SCHEMA_VERSION
     assert snapshot["context"]["exchange_mapping_id"] == mapping_id
     assert snapshot["context"]["expiry_convention_code"] == expiry_convention_code
     assert snapshot["context"]["contract_convention_code"] == (
@@ -1454,6 +1637,25 @@ def test_ready_exchange_mapping_registry_and_calculation_parity(
     assert snapshot["context"]["volatility_surface_source"] == (
         volatility_surface_source
     )
+    for field in (
+        "exchange_venue",
+        "exchange_product_code",
+        "exchange_product_id",
+        "exchange_product_name",
+        "exercise_style",
+        "settlement_type",
+        "contract_source_url",
+        "legal_pricing_model",
+        "pricer_pricing_model",
+        "pricing_engine_label",
+        "listing_evidence_status",
+        "premium_evidence_status",
+        "positive_domain_required",
+        "pricing_domain",
+    ):
+        assert component[field] == product_metadata[field]
+        assert snapshot["context"][field] == product_metadata[field]
+    assert product_metadata["pricer_pricing_model"] == mapping.model
     assert default_contract_size(mapping.asset, context, as_of=as_of) == pytest.approx(
         expected_contract_size
     )
@@ -1467,6 +1669,192 @@ def test_registry_has_canonical_phe_alias_all_ready_and_lne_hh_default():
     assert exchange_mapping_for_asset_model("HH", "black76").mapping_id == (
         "CME-HH-LNE"
     )
+    assert exchange_product_metadata("ICE-JKM-JKZ")[
+        "listing_evidence_status"
+    ] == "conditional"
+    assert exchange_product_metadata("ICE-HH-PHE")[
+        "premium_evidence_status"
+    ] == "conditional"
+    assert exchange_option_mapping("ICE-JKM-JKZ").implementation_status == (
+        "Conditional"
+    )
+    assert exchange_option_mapping("ICE-HH-PHE").implementation_status == (
+        "Conditional"
+    )
+
+
+def test_cme_jkm_average_options_use_governed_discrete_publication_fixings():
+    as_of = date(2026, 8, 21)
+    for mapping_id in ("CME-JKM-JKO", "CME-JKM-JFO"):
+        mapping = exchange_option_mapping(mapping_id)
+        component = build_jkm_month_component(
+            "2027-01-01",
+            as_of,
+            16.0,
+            "asian76",
+            mapping_id,
+        )
+        assert component["exchange_mapping_id"] == mapping_id
+        assert component["exchange_product_code"] == mapping_id.rsplit("-", 1)[-1]
+        assert component["fixing_schedule_mode"] == "platts_publication_days"
+        assert component["averaging_fixing_dates"][0] == "2026-11-16"
+        assert component["averaging_fixing_dates"][-1] == "2026-12-15"
+        assert len(component["averaging_fixing_dates"]) == 22
+        assert component["averaging_end_date"] == "2026-12-15"
+        assert component["averaging_fixing_calendar_code"] == (
+            PLATTS_ASIA_LNG_PUBLICATION
+        )
+        assert component["averaging_fixing_calendar_version"] == (
+            PLATTS_ASIA_LNG_PUBLICATION_VERSION
+        )
+        assert component["floating_price_determination_date"] == "2026-12-15"
+        assert component["floating_price_determination_calendar_code"] == (
+            "CME_NYMEX_OPTION_TRADING"
+        )
+
+        context = {
+            "asset": "JKM",
+            "exchange_mapping_id": mapping_id,
+            "premium_convention": mapping.premium_convention,
+            "delivery_shape": "MONTH",
+            "delivery_month": "2027-01-01",
+            "forward": 16.0,
+            "rate": 0.03,
+            "expiration_date": component["option_expiration_date"],
+            "contract_expiration_date": component["contract_expiration_date"],
+            "averaging_start_date": component["averaging_start_date"],
+        }
+        snapshot = calculate_structure(
+            "asian76",
+            context,
+            sizing(1, 10_000),
+            [black_leg(1, strike=16.0, volatility=0.50)],
+            as_of=as_of,
+        )
+        normalized = snapshot["context"]
+        expected = asian_76(
+            "C",
+            16.0,
+            16.0,
+            normalized["time_to_expiry"],
+            normalized["time_to_averaging_start"],
+            normalized["rate"],
+            0.50,
+            fixing_times=tuple(normalized["averaging_fixing_times"]),
+            determination_time=normalized[
+                "time_to_floating_price_determination"
+            ],
+        )[0]
+        continuous = asian_76(
+            "C",
+            16.0,
+            16.0,
+            normalized["time_to_expiry"],
+            normalized["time_to_averaging_start"],
+            normalized["rate"],
+            0.50,
+        )[0]
+        assert snapshot["legs"][0]["unit"]["value"] == pytest.approx(expected)
+        assert snapshot["legs"][0]["unit"]["value"] != pytest.approx(continuous)
+        decay = time_decay_series(snapshot)
+        assert decay["dates"][-1] == component["averaging_start_date"]
+
+
+def test_cme_jkm_publication_schedule_uses_reviewed_closures_and_fails_closed():
+    component = build_jkm_month_component(
+        "2026-12-01",
+        date(2026, 8, 21),
+        16.0,
+        "asian76",
+        "CME-JKM-JFO",
+    )
+    assert "2026-11-09" not in component["averaging_fixing_dates"]
+    assert component["averaging_fixing_dates"][-1] == "2026-11-13"
+    assert component["floating_price_determination_date"] == "2026-11-13"
+
+    with pytest.raises(
+        StructureValidationError,
+        match="verified publication closures only for 2026",
+    ):
+        build_jkm_month_component(
+            "2028-01-01",
+            date(2026, 8, 21),
+            16.0,
+            "asian76",
+            "CME-JKM-JFO",
+        )
+
+
+def test_jkm_lognormal_capability_rejects_nonpositive_forward_and_strike():
+    context = {
+        "asset": "JKM",
+        "exchange_mapping_id": "CME-JKM-JFO",
+        "premium_convention": "futures_style",
+        "delivery_shape": "MONTH",
+        "delivery_month": "2027-01-01",
+        "forward": 0.0,
+        "rate": 0.0,
+    }
+    with pytest.raises(StructureValidationError, match="lognormal forward price"):
+        calculate_structure(
+            "asian76",
+            context,
+            sizing(1, 10_000),
+            [black_leg(1, strike=16.0, volatility=0.50)],
+            as_of=date(2026, 8, 21),
+        )
+
+    context["forward"] = 16.0
+    with pytest.raises(StructureValidationError, match="strictly positive strike"):
+        calculate_structure(
+            "asian76",
+            context,
+            sizing(1, 10_000),
+            [black_leg(1, strike=0.0, volatility=0.50)],
+            as_of=date(2026, 8, 21),
+        )
+
+
+def test_only_ice_nbp_ukf_supports_governed_delivery_strips():
+    as_of = date(2026, 8, 21)
+    components, total_quantity = build_nbp_strip_components(
+        "Q1", 2027, as_of, 80.0, "ICE-NBP-UKF"
+    )
+    assert [component["delivery_days"] for component in components] == [31, 28, 31]
+    assert total_quantity == 90_000
+    context = {
+        "asset": "NBP",
+        "exchange_mapping_id": "ICE-NBP-UKF",
+        "premium_convention": "futures_style",
+        "delivery_shape": "Q1",
+        "delivery_year": 2027,
+        "forward": 80.0,
+        "rate": 0.0,
+    }
+    snapshot = calculate_structure(
+        "black76",
+        context,
+        sizing(1, default_contract_size("NBP", context, as_of=as_of)),
+        [black_leg(1, strike=80.0, volatility=0.50)],
+        as_of=as_of,
+    )
+    assert snapshot["context"]["exchange_product_code"] == "UKF"
+    assert snapshot["context"]["delivery_total_quantity"] == 90_000
+
+    for mapping_id, premium in ((None, "futures_style"), ("CME-NBP-UKO", "upfront")):
+        unsupported = {**context, "premium_convention": premium}
+        if mapping_id is None:
+            unsupported.pop("exchange_mapping_id")
+        else:
+            unsupported["exchange_mapping_id"] = mapping_id
+        with pytest.raises(StructureValidationError, match="ICE-NBP-UKF"):
+            calculate_structure(
+                "black76",
+                unsupported,
+                sizing(1, 1_000),
+                [black_leg(1, strike=80.0, volatility=0.50)],
+                as_of=as_of,
+            )
 
 
 @pytest.mark.parametrize(("call_put", "lots"), [("C", 2.0), ("P", -2.0)])
@@ -1531,7 +1919,7 @@ def test_cme_hh_on_matches_the_american_library_and_signed_lots(call_put, lots):
         assert 0.0 in shifted_vol["shifts_percentage_points"]
 
 
-def test_new_equal_monthly_lot_strips_use_mapping_specific_sizes_and_identity():
+def test_new_equal_monthly_lot_strips_use_mapping_sizes_and_jkm_frontier():
     as_of = date(2026, 8, 21)
     ttf_context = {
         "asset": "TTF",
@@ -1549,19 +1937,22 @@ def test_new_equal_monthly_lot_strips_use_mapping_specific_sizes_and_identity():
         [black_leg(1, strike=12.0, volatility=0.4)],
         as_of=as_of,
     )
-    jkm_context = {
+    jkm_month_context = {
         "asset": "JKM",
         "exchange_mapping_id": "CME-JKM-JFO",
         "premium_convention": "futures_style",
-        "delivery_shape": "Q1",
-        "delivery_year": 2027,
+        "delivery_shape": "MONTH",
+        "delivery_month": "2027-01-01",
         "forward": 12.0,
         "rate": 0.0,
     }
     jkm = calculate_structure(
         "asian76",
-        jkm_context,
-        sizing(1, default_contract_size("JKM", jkm_context, as_of=as_of)),
+        jkm_month_context,
+        sizing(
+            1,
+            default_contract_size("JKM", jkm_month_context, as_of=as_of),
+        ),
         [black_leg(1, strike=12.0, volatility=0.4)],
         as_of=as_of,
     )
@@ -1569,12 +1960,29 @@ def test_new_equal_monthly_lot_strips_use_mapping_specific_sizes_and_identity():
     assert ttf["context"]["delivery_total_quantity"] == 30_000
     assert ttf["context"]["component_weight_basis"] == "equal_contract_lots"
     assert ttf["sizing"]["contract_multiplier"] == 30_000
-    assert jkm["context"]["delivery_total_quantity"] == 30_000
     assert jkm["context"]["exchange_product_code"] == "JFO"
-    assert {
-        component["exchange_mapping_id"]
-        for component in jkm["context"]["delivery_components"]
-    } == {"CME-JKM-JFO"}
+    assert jkm["context"]["floating_price_determination_date"] == "2026-12-15"
+
+    jkm_strip_context = {
+        **jkm_month_context,
+        "delivery_shape": "Q1",
+        "delivery_year": 2027,
+    }
+    jkm_strip_context.pop("delivery_month")
+    with pytest.raises(
+        StructureValidationError,
+        match="verified publication closures only for 2026",
+    ):
+        calculate_structure(
+            "asian76",
+            jkm_strip_context,
+            sizing(
+                1,
+                default_contract_size("JKM", jkm_strip_context, as_of=as_of),
+            ),
+            [black_leg(1, strike=12.0, volatility=0.4)],
+            as_of=as_of,
+        )
 
 
 def test_hh_january_2028_uses_the_cme_lne_expiry():

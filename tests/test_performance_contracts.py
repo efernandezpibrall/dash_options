@@ -22,6 +22,26 @@ def test_prices_query_transfers_only_the_five_cobs_the_chart_can_render(monkeypa
     assert captured['params']['from_cob'] == pd.Timestamp('2026-06-01').date()
 
 
+def test_price_period_grouping_matches_scalar_labels():
+    maturities = pd.date_range('2026-01-01', periods=18, freq='MS')
+    frame = pd.DataFrame(
+        {
+            'contract': 'JKM',
+            'trade_date': pd.Timestamp('2026-08-27'),
+            'maturity_date': maturities,
+            'settlement_price': range(len(maturities)),
+        }
+    )
+
+    for grouping in ('monthly', 'quarterly', 'season', 'calendar'):
+        expected_labels = {
+            prices._price_period_label(value, grouping)
+            for value in maturities
+        }
+        result = prices.group_data_by_period(frame, grouping)
+        assert set(result['period']) == expected_labels
+
+
 def test_greeks_browser_reference_preserves_payload_and_is_small():
     greeks._clear_greeks_server_cache()
     payload = {

@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from options.option_contract_conventions import get_contract_convention
+
 
 USER_INPUT_FORWARD_SOURCE = "USER_INPUT"
 EXCHANGE_MAPPING_ID_ALIASES = {"ICE-HH-CURRENT": "ICE-HH-PHE"}
@@ -26,10 +28,17 @@ class ExchangeOptionMapping:
     max_surface_extension_days: int = 0
     default_priority: int = 100
     exchange_product_code: str | None = None
+    exchange_product_id: str | None = None
+    exchange_product_name: str | None = None
     price_currency: str | None = None
     price_unit: str | None = None
     price_unit_label: str | None = None
     currency_conversion_factor: float | None = None
+    listing_evidence_status: str = "verified"
+    premium_evidence_status: str = "verified"
+    positive_domain_required: bool = False
+    fixing_schedule_mode: str | None = None
+    pricing_engine_label: str | None = None
 
 
 def _mapping(
@@ -71,6 +80,8 @@ EXCHANGE_OPTION_MAPPINGS = (
         surface_product="TTF",
         volatility_surface_source="ICE_TTF_TFO",
         sizing_mode="ttf_delivery_hours",
+        exchange_product_id="71085679",
+        exchange_product_name="Dutch TTF Natural Gas Options (Futures Style Margin)",
     ),
     _mapping(
         "ICE-JKM-APO",
@@ -86,6 +97,9 @@ EXCHANGE_OPTION_MAPPINGS = (
         surface_product="JKM",
         volatility_surface_source="ICE_JKM_APO",
         sizing_mode="jkm_monthly_lots",
+        exchange_product_id="71090519",
+        exchange_product_name="JKM LNG (Platts) Average Price Options",
+        positive_domain_required=True,
     ),
     _mapping(
         "ICE-JKM-JKZ",
@@ -94,13 +108,16 @@ EXCHANGE_OPTION_MAPPINGS = (
         "black76",
         "futures_style",
         10_000.0,
-        "Ready",
+        "Conditional",
         True,
         contract_convention_code="ICE_JKM_JKZ",
         expiry_convention_code="ICE_JKM_JKZ_VIA_TFO",
         surface_product="JKM",
         volatility_surface_source="ICE_JKM_APO",
         sizing_mode="jkm_monthly_lots",
+        listing_evidence_status="conditional",
+        positive_domain_required=True,
+        exchange_product_name="JKM LNG (Platts) Options",
     ),
     _mapping(
         "ICE-HH-PHE",
@@ -109,7 +126,7 @@ EXCHANGE_OPTION_MAPPINGS = (
         "black76",
         "upfront",
         2_500.0,
-        "Ready",
+        "Conditional",
         True,
         contract_convention_code="ICE_HH_PHE_6590274",
         expiry_convention_code="ICE_HH_PHE_6590274_EXPIRY",
@@ -117,6 +134,9 @@ EXCHANGE_OPTION_MAPPINGS = (
         volatility_surface_source="CME_HH_LNE",
         max_surface_extension_days=1,
         default_priority=10,
+        exchange_product_id="6590274",
+        exchange_product_name="Option on Henry Penultimate Fixed Price Future",
+        premium_evidence_status="conditional",
     ),
     _mapping(
         "ICE-BRENT-B",
@@ -131,6 +151,9 @@ EXCHANGE_OPTION_MAPPINGS = (
         expiry_convention_code="ICE_BRENT_218_EXPIRY",
         surface_product="BRENT",
         volatility_surface_source="ICE_BRENT",
+        exchange_product_id="218",
+        exchange_product_name="Brent Crude American-style Option",
+        pricing_engine_label="Black-76 (American-equivalent futures-style)",
     ),
     _mapping(
         "ICE-NBP-UKF",
@@ -146,6 +169,8 @@ EXCHANGE_OPTION_MAPPINGS = (
         surface_product="NBP",
         volatility_surface_source="ICE_NBP_UKF",
         sizing_mode="nbp_delivery_days",
+        exchange_product_id="71085728",
+        exchange_product_name="UK NBP Natural Gas Options (Futures Style Margin)",
     ),
     _mapping(
         "CME-TTF-TFO",
@@ -250,6 +275,8 @@ EXCHANGE_OPTION_MAPPINGS = (
         volatility_surface_source="ICE_JKM_APO",
         sizing_mode="monthly_contract_lots",
         exchange_product_code="JKO",
+        positive_domain_required=True,
+        fixing_schedule_mode="platts_publication_days",
     ),
     _mapping(
         "CME-JKM-JFO",
@@ -266,6 +293,8 @@ EXCHANGE_OPTION_MAPPINGS = (
         volatility_surface_source="ICE_JKM_APO",
         sizing_mode="monthly_contract_lots",
         exchange_product_code="JFO",
+        positive_domain_required=True,
+        fixing_schedule_mode="platts_publication_days",
     ),
     _mapping(
         "CME-HH-ON",
@@ -310,6 +339,7 @@ EXCHANGE_OPTION_MAPPINGS = (
         expiry_convention_code="CME_BRENT_BE_378_EXPIRY",
         surface_product="BRENT",
         volatility_surface_source="ICE_BRENT",
+        max_surface_extension_days=1,
     ),
     _mapping(
         "CME-BRENT-BZO",
@@ -324,6 +354,8 @@ EXCHANGE_OPTION_MAPPINGS = (
         expiry_convention_code="CME_BRENT_BZO_504_EXPIRY",
         surface_product="BRENT",
         volatility_surface_source="ICE_BRENT",
+        max_surface_extension_days=1,
+        pricing_engine_label="Black-76 (American-equivalent futures-style)",
     ),
     _mapping(
         "CME-NBP-UKO",
@@ -370,6 +402,52 @@ def exchange_option_mapping(mapping_id):
     return EXCHANGE_OPTION_MAPPING_BY_ID.get(canonical_exchange_mapping_id(mapping_id))
 
 
+def exchange_product_metadata(mapping_id_or_mapping):
+    """Return one normalized product-identity payload for UI and snapshots."""
+    mapping = (
+        mapping_id_or_mapping
+        if isinstance(mapping_id_or_mapping, ExchangeOptionMapping)
+        else exchange_option_mapping(mapping_id_or_mapping)
+    )
+    if mapping is None:
+        return {}
+    convention = get_contract_convention(mapping.contract_convention_code)
+    pricer_pricing_model = (
+        convention.pricer_pricing_model or convention.pricing_model
+    )
+    return {
+        "exchange_mapping_id": mapping.mapping_id,
+        "exchange_venue": convention.venue,
+        "exchange_product_code": (
+            mapping.exchange_product_code or convention.product_code
+        ),
+        "exchange_product_id": (
+            mapping.exchange_product_id or convention.product_id
+        ),
+        "exchange_product_name": mapping.exchange_product_name or mapping.product,
+        "exercise_style": convention.exercise_style,
+        "settlement_type": convention.settlement_type,
+        "exchange_expiry_rule": mapping.expiry_convention_code,
+        "contract_source_url": convention.source_url,
+        "legal_pricing_model": convention.pricing_model,
+        "pricer_pricing_model": pricer_pricing_model,
+        "pricing_engine_label": (
+            mapping.pricing_engine_label or pricer_pricing_model
+        ),
+        "listing_evidence_status": mapping.listing_evidence_status,
+        "premium_evidence_status": mapping.premium_evidence_status,
+        "implementation_status": mapping.implementation_status,
+        "pricing_supported": mapping.pricing_supported,
+        "positive_domain_required": mapping.positive_domain_required,
+        "pricing_domain": (
+            "strictly_positive_lognormal"
+            if mapping.positive_domain_required
+            else "standard"
+        ),
+        "fixing_schedule_mode": mapping.fixing_schedule_mode,
+    }
+
+
 def exchange_mapping_for_asset_model(asset, model):
     candidates = [
         mapping
@@ -380,14 +458,35 @@ def exchange_mapping_for_asset_model(asset, model):
 
 
 def exchange_mapping_options():
-    return [
-        {
-            "label": mapping.mapping_id,
-            "value": mapping.mapping_id,
-            "title": f"{mapping.product} · {mapping.implementation_status}",
-        }
-        for mapping in EXCHANGE_OPTION_MAPPINGS
-    ]
+    options = []
+    for mapping in EXCHANGE_OPTION_MAPPINGS:
+        metadata = exchange_product_metadata(mapping)
+        evidence_notes = []
+        if mapping.listing_evidence_status == "conditional":
+            evidence_notes.append("current listing evidence conditional")
+        if mapping.premium_evidence_status == "conditional":
+            evidence_notes.append("current premium evidence conditional")
+        product_identity = (
+            metadata.get("exchange_product_code") or mapping.mapping_id
+        )
+        if metadata.get("exchange_product_id"):
+            product_identity += f" / {metadata['exchange_product_id']}"
+        options.append(
+            {
+                "label": mapping.mapping_id,
+                "value": mapping.mapping_id,
+                "title": " · ".join(
+                    (
+                        mapping.product,
+                        product_identity,
+                        f"{metadata['exercise_style'].title()} exercise",
+                        mapping.implementation_status,
+                        *evidence_notes,
+                    )
+                ),
+            }
+        )
+    return options
 
 
 def exchange_mapping_pricing_supported(mapping_id):

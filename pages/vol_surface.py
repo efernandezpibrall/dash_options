@@ -314,9 +314,28 @@ def _filter_surface_by_expiry_selection(surface_df, selected_expiry):
         selected_date = pd.to_datetime(key).normalize()
         mask = contract_dates.dt.normalize().eq(selected_date)
     elif expiry_type == SURFACE_EXPIRY_QUARTER:
-        mask = contract_dates.apply(_surface_quarter_key).eq(key)
+        key_parts = str(key).split('-Q', 1)
+        if len(key_parts) != 2 or not all(value.isdigit() for value in key_parts):
+            return surface_df.iloc[0:0].copy()
+        year, quarter = map(int, key_parts)
+        mask = contract_dates.dt.year.eq(year) & contract_dates.dt.quarter.eq(
+            quarter
+        )
     else:
-        mask = contract_dates.apply(_surface_season_key).eq(key)
+        key_parts = str(key).rsplit('-', 1)
+        if len(key_parts) != 2 or not key_parts[0].isdigit():
+            return surface_df.iloc[0:0].copy()
+        season_year, season = int(key_parts[0]), key_parts[1]
+        months = contract_dates.dt.month
+        if season == 'Summer':
+            mask = contract_dates.dt.year.eq(season_year) & months.isin(ICE_SUMMER_MONTHS)
+        elif season == 'Winter':
+            mask = (
+                (contract_dates.dt.year.eq(season_year) & months.ge(10))
+                | (contract_dates.dt.year.eq(season_year + 1) & months.le(3))
+            )
+        else:
+            return surface_df.iloc[0:0].copy()
 
     return surface_df.loc[mask].copy()
 
@@ -342,10 +361,9 @@ def _build_surface_expiry_options(surface_df):
         for expiry in expiries
     ]
 
-    quarter_keys = _sort_grouped_period_columns(
-        {_surface_quarter_key(expiry) for expiry in expiries if _surface_quarter_key(expiry)},
-        'quarterly',
-    )
+    quarter_keys = {_surface_quarter_key(expiry) for expiry in expiries}
+    quarter_keys.discard(None)
+    quarter_keys = _sort_grouped_period_columns(quarter_keys, 'quarterly')
     quarter_options = [
         {
             'label': _format_vol_period_header(key),
@@ -354,10 +372,9 @@ def _build_surface_expiry_options(surface_df):
         for key in quarter_keys
     ]
 
-    season_keys = _sort_grouped_period_columns(
-        {_surface_season_key(expiry) for expiry in expiries if _surface_season_key(expiry)},
-        'season',
-    )
+    season_keys = {_surface_season_key(expiry) for expiry in expiries}
+    season_keys.discard(None)
+    season_keys = _sort_grouped_period_columns(season_keys, 'season')
     season_options = [
         {
             'label': _format_vol_period_header(key),
@@ -429,43 +446,6 @@ def load_surface_atm_data(surface_df=None):
     return surface_df[UNIFIED_ATM_COLUMNS]
 
 
-def _normalize_put_call(value):
-    if pd.isna(value):
-        return None
-
-    normalized = str(value).strip().lower()
-    if normalized in ('p', 'put'):
-        return 'put'
-    if normalized in ('c', 'call'):
-        return 'call'
-    return None
-
-
-def _is_atm_delta(delta_abs):
-    return pd.notna(delta_abs) and abs(delta_abs - 0.5) < 1e-8
-
-
-def _build_delta_bucket(row):
-    delta_abs = row['delta_abs']
-    put_call = row['put_call']
-
-    if pd.isna(delta_abs):
-        return pd.Series([None, None])
-
-    if _is_atm_delta(delta_abs):
-        return pd.Series(['ATM', 50.0])
-
-    delta_pct = int(round(delta_abs * 100))
-
-    if put_call == 'put':
-        return pd.Series([f'{delta_pct}P', float(delta_pct)])
-
-    if put_call == 'call':
-        return pd.Series([f'{delta_pct}C', float(100 - delta_pct)])
-
-    return pd.Series([f'{delta_pct}D', float(delta_pct)])
-
-
 def _normalize_surface_data(surface_df):
     if surface_df.empty:
         return _empty_surface_df()
@@ -513,7 +493,13 @@ def _normalize_surface_data(surface_df):
     if 'put_call' not in surface_df.columns:
         surface_df['put_call'] = None
 
-    surface_df['put_call'] = surface_df['put_call'].apply(_normalize_put_call)
+    normalized_side = surface_df['put_call'].astype('string').str.strip().str.lower()
+    normalized_side = normalized_side.map(
+        {'p': 'put', 'put': 'put', 'c': 'call', 'call': 'call'}
+    )
+    surface_df['put_call'] = normalized_side.astype(object).where(
+        normalized_side.notna(), None
+    )
     surface_df['delta_abs'] = surface_df['delta'].abs()
     surface_df.loc[surface_df['delta_abs'] > 1, 'delta_abs'] = surface_df.loc[surface_df['delta_abs'] > 1, 'delta_abs'] / 100.0
 
@@ -531,7 +517,15 @@ def _normalize_surface_data(surface_df):
     if surface_df.empty:
         return _empty_surface_df()
 
-    surface_df[['delta_bucket', 'delta_sort_key']] = surface_df.apply(_build_delta_bucket, axis=1)
+    delta_pct = (surface_df['delta_abs'] * 100).round()
+    delta_label = delta_pct.astype('Int64').astype('string')
+    is_atm = surface_df['delta_abs'].sub(0.5).abs().lt(1e-8)
+    is_put = surface_df['put_call'].eq('put')
+    is_call = surface_df['put_call'].eq('call')
+    delta_bucket = (delta_label + 'D').mask(is_put, delta_label + 'P')
+    delta_bucket = delta_bucket.mask(is_call, delta_label + 'C').mask(is_atm, 'ATM')
+    surface_df['delta_bucket'] = delta_bucket.astype(object).where(delta_bucket.notna(), None)
+    surface_df['delta_sort_key'] = delta_pct.mask(is_call, 100.0 - delta_pct).mask(is_atm, 50.0)
     surface_df['delta_pct'] = surface_df['delta_abs'] * 100.0
     surface_df = surface_df.dropna(subset=['delta_bucket', 'delta_sort_key'])
     surface_df = surface_df.sort_values(['code', 'cob_date', 'contract_date', 'delta_sort_key']).reset_index(drop=True)
@@ -2411,13 +2405,21 @@ def group_data_by_period(data, grouping_mode):
         return data
 
     if grouping_mode == 'quarterly':
-        data['quarter'] = data['contract_date'].dt.quarter
-        data['year'] = data['contract_date'].dt.year
-        data['period'] = data.apply(lambda row: f"{row['year']}-Q{row['quarter']}", axis=1)
+        data['period'] = (
+            data['contract_date'].dt.year.astype(str)
+            + '-Q'
+            + data['contract_date'].dt.quarter.astype(str)
+        )
         return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
 
     if grouping_mode == 'season':
-        data['period'] = data['contract_date'].apply(_surface_season_key)
+        years = data['contract_date'].dt.year
+        months = data['contract_date'].dt.month
+        season_years = years.where(months.isin(ICE_SUMMER_MONTHS) | months.ge(10), years - 1)
+        periods = season_years.astype('Int64').astype('string') + np.where(
+            months.isin(ICE_SUMMER_MONTHS), '-Summer', '-Winter'
+        )
+        data['period'] = periods.astype(object).where(periods.notna(), None)
         return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
 
     if grouping_mode == 'calendar':
@@ -2755,13 +2757,10 @@ def initialize_vol_surface_page(
 
 
 def update_atm_status_line(n_clicks, selected_date, selected_products, grouping_mode):
-    _ensure_cached_data(n_clicks or 0)
     return _build_atm_status_line(selected_date, selected_products, grouping_mode or 'monthly')
 
 
 def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
-    _ensure_cached_data(n_clicks or 0)
-
     if selected_date is None or not selected_products or atm_dataset.empty:
         return html.Div()
 
@@ -2885,7 +2884,6 @@ def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
 
 
 def update_tables(n_clicks, selected_date, prev_selected_date, selected_products, grouping_mode):
-    _ensure_cached_data(n_clicks or 0)
     if selected_date is None or not selected_products:
         return html.Div()
 

@@ -293,6 +293,8 @@ def _cache_greeks_payload(payload, namespace, parts):
 def _resolve_greeks_payload(reference):
     if not reference:
         return _empty_store('No data available')
+    if not isinstance(reference, dict):
+        return _empty_store('Server snapshot expired; refresh the page')
     if 'rows' in reference:
         return reference
     snapshot_id = reference.get('snapshot_id')
@@ -456,6 +458,8 @@ def _ladder_column_sort_key(column):
 
 
 def _to_timestamp(value):
+    if isinstance(value, pd.Timestamp):
+        return value.normalize()
     date_value = pd.to_datetime(value, errors='coerce')
     if pd.isna(date_value):
         return None
@@ -528,8 +532,8 @@ def _resolve_maturity_cutoffs(cob_date, month_through=None, quarter_through=None
 
 
 def _format_date_bucket(value, aggregation='mixed', month_through=None, quarter_through=None, cob_date=None):
-    date_value = pd.to_datetime(value, errors='coerce')
-    if pd.isna(date_value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
         return 'Unknown'
 
     if aggregation == 'mixed':
@@ -655,8 +659,8 @@ def _format_maturity_component(
     cob_date=None,
 ):
     maturity_type = str(maturity_type or '').strip().lower()
-    date_value = pd.to_datetime(value, errors='coerce')
-    if pd.isna(date_value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
         return 'Unknown'
     maturity_bucket = _format_date_bucket(
         date_value,
@@ -696,8 +700,8 @@ def _format_maturity_pair(row, aggregation, month_through=None, quarter_through=
 
 
 def _format_cob_option(value):
-    date_value = pd.to_datetime(value, errors='coerce')
-    if pd.isna(date_value):
+    date_value = _to_timestamp(value)
+    if date_value is None:
         return None
     return date_value.strftime('%Y-%m-%d')
 
@@ -894,7 +898,7 @@ def fetch_filter_values(cob_date):
     )
     pairs = sorted({
         _standard_pair(row['asset_a'], row['asset_b'])
-        for _, row in data[['asset_a', 'asset_b']].dropna(how='all').iterrows()
+        for row in data[['asset_a', 'asset_b']].dropna(how='all').to_dict('records')
         if len(_underlying_sides(row)) == 2
     })
 
@@ -1024,7 +1028,7 @@ def fetch_instrument_unit_map():
         return {}
 
     unit_map = {}
-    for _, row in mapping.iterrows():
+    for row in mapping.to_dict('records'):
         instrument = row.get('instrument')
         if instrument is None or pd.isna(instrument):
             continue
@@ -1060,9 +1064,12 @@ def normalize_greek_contributions(
 
     unit_map = fetch_instrument_unit_map()
     normalized_rows = []
-    data = data.reset_index(drop=True)
+    if aggregation == 'mixed':
+        month_through, quarter_through = _resolve_maturity_cutoffs(
+            cob_date, month_through, quarter_through
+        )
 
-    for source_row_id, row in data.iterrows():
+    for source_row_id, row in enumerate(data.to_dict('records')):
         pair = _standard_pair(row.get('asset_a'), row.get('asset_b'))
         underlying_sides = _underlying_sides(row)
         base = {
@@ -1212,9 +1219,12 @@ def normalize_aspect_contributions(
 
     unit_map = fetch_instrument_unit_map()
     normalized_rows = []
-    data = data.reset_index(drop=True)
+    if aggregation == 'mixed':
+        month_through, quarter_through = _resolve_maturity_cutoffs(
+            cob_date, month_through, quarter_through
+        )
 
-    for source_row_id, row in data.iterrows():
+    for source_row_id, row in enumerate(data.to_dict('records')):
         instrument = str(row.get('instrument') or '').strip()
         if not instrument:
             continue

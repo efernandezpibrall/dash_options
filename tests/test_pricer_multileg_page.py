@@ -863,7 +863,6 @@ def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
         "",
         "pricer-surface-proxy-note",
     )
-
     for asset, model, workflow in (
         ("JKM", "asian76", "exchange"),
         ("TTF", "black76", "exchange"),
@@ -3406,7 +3405,7 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
 
 
 def test_asian76_governed_date_callback_passes_mapping_id():
-    from app import app
+    from index_options import app
 
     app._setup_server()
     callback = next(
@@ -4084,6 +4083,198 @@ def test_exchange_mapping_id_restores_registry_identity_and_contract_size():
     assert contract_size.value == 10_000.0
 
 
+def test_delivery_strip_selector_enables_nbp_only_for_ice_ukf():
+    ukf_field = pricer._build_delivery_shape_field(
+        "black76",
+        "exchange-ukf",
+        "Q1",
+        "NBP",
+        "ICE-NBP-UKF",
+    )
+    uko_field = pricer._build_delivery_shape_field(
+        "black76",
+        "exchange-uko",
+        "Q1",
+        "NBP",
+        "CME-NBP-UKO",
+    )
+    ukf_dropdown = next(
+        component for component in walk(ukf_field) if isinstance(component, dcc.Dropdown)
+    )
+    uko_dropdown = next(
+        component for component in walk(uko_field) if isinstance(component, dcc.Dropdown)
+    )
+    assert [option["value"] for option in ukf_dropdown.options] == list(
+        pricer.SUPPORTED_DELIVERY_SHAPES
+    )
+    assert ukf_dropdown.value == "Q1"
+    assert ukf_dropdown.disabled is False
+    assert uko_dropdown.options == [{"label": "Month", "value": "MONTH"}]
+    assert uko_dropdown.value == "MONTH"
+    assert uko_dropdown.disabled is True
+    assert ukf_field.title == (
+        "Strips use governed monthly expiries and product-specific weights."
+    )
+
+    legacy_ttf = pricer._build_delivery_shape_field(
+        "black76", "legacy-ttf", "Q1", "TTF"
+    )
+    legacy_jkm = pricer._build_delivery_shape_field(
+        "asian76", "legacy-jkm", "Q1", "JKM"
+    )
+    assert legacy_ttf.title == (
+        "Monthly and seasonal strips use exact TTF TFO expiries."
+    )
+    assert legacy_jkm.title == (
+        "Strips use exact JKM exchange expiries selected by pricing model."
+    )
+
+
+def test_exchange_strip_presentation_does_not_change_legacy_result_labels():
+    def snapshot(asset, model, *, mapping_id=None, product_code=None):
+        is_ttf = asset == "TTF"
+        quantity = 744 if is_ttf else 10_000 if asset == "JKM" else 31_000
+        component = {
+            "contract_month": "2026-10-01",
+            "contract_month_label": "Oct-26",
+            "weight": 1.0,
+            "forward": 30.0,
+            "option_expiration_date": "2026-09-25",
+            "expiry_status": "official",
+            "input_volatility": 0.4,
+            "unit_value": 2.0,
+            "weighted_unit_value": 2.0,
+            "greeks": {"delta": 0.5, "vega": 0.1},
+            **(
+                {"delivery_hours": quantity}
+                if is_ttf
+                else {"contract_size": quantity}
+            ),
+            **(
+                {"exchange_product_code": product_code}
+                if product_code
+                else {}
+            ),
+        }
+        context = {
+            "asset": asset,
+            "resolved_premium_convention_label": "Futures-style",
+            "delivery_components": [component],
+            "delivery_period_label": "Q4 2026",
+            "delivery_shape": "Q4",
+            "forward": 30.0,
+            "delivery_component_count": 1,
+            "first_expiration_date": "2026-09-25",
+            "last_expiration_date": "2026-09-25",
+            **(
+                {"delivery_total_hours": quantity}
+                if is_ttf
+                else {"delivery_total_quantity": quantity}
+            ),
+            **({"exchange_mapping_id": mapping_id} if mapping_id else {}),
+            **({"exchange_product_code": product_code} if product_code else {}),
+        }
+        return {
+            "model": model,
+            "model_label": pricer.MODEL_LABELS[model],
+            "calculation_date": "2026-08-28",
+            "context": context,
+            "legs": [
+                {
+                    "leg_id": "leg-1",
+                    "name": "Leg 1",
+                    "components": [component],
+                }
+            ],
+        }
+
+    legacy_ttf = snapshot("TTF", "black76")
+    legacy_jkm = snapshot("JKM", "asian76")
+    exchange_nbp = snapshot(
+        "NBP",
+        "black76",
+        mapping_id="ICE-NBP-UKF",
+        product_code="UKF",
+    )
+
+    legacy_ttf_grid = pricer._build_strip_component_grid(legacy_ttf)
+    legacy_jkm_grid = pricer._build_strip_component_grid(legacy_jkm)
+    exchange_nbp_grid = pricer._build_strip_component_grid(exchange_nbp)
+    legacy_ttf_headers = [
+        column["headerName"] for column in legacy_ttf_grid.columnDefs
+    ]
+    legacy_jkm_headers = [
+        column["headerName"] for column in legacy_jkm_grid.columnDefs
+    ]
+    exchange_nbp_headers = [
+        column["headerName"] for column in exchange_nbp_grid.columnDefs
+    ]
+
+    assert "Product" not in legacy_ttf_headers
+    assert "Hours" in legacy_ttf_headers
+    assert "TFO expiry" in legacy_ttf_headers
+    assert "Product" in legacy_jkm_headers
+    assert "MMBtu" in legacy_jkm_headers
+    assert "APO expiry" in legacy_jkm_headers
+    assert "tooltipField" not in next(
+        column
+        for column in legacy_jkm_grid.columnDefs
+        if column["headerName"] == "Product"
+    )
+    assert "Product" in exchange_nbp_headers
+    assert "Therms" in exchange_nbp_headers
+    assert "UKF expiry" in exchange_nbp_headers
+    assert next(
+        column
+        for column in exchange_nbp_grid.columnDefs
+        if column["headerName"] == "Product"
+    )["tooltipField"] == "product_detail"
+    assert exchange_nbp_grid.rowData[0]["product_code"] == "UKF"
+
+    def summary(snapshot_value):
+        return {
+            card.children[0].children: (
+                card.children[1].children,
+                card.children[2].children if card.children[2] else None,
+            )
+            for card in pricer._model_inputs_summary(snapshot_value)
+        }
+
+    legacy_ttf_summary = summary(legacy_ttf)
+    legacy_jkm_summary = summary(legacy_jkm)
+    exchange_nbp_summary = summary(exchange_nbp)
+    assert legacy_ttf_summary["Monthly components"][1] == "744 delivery hours"
+    assert "TFO expiry range" in legacy_ttf_summary
+    assert legacy_jkm_summary["Monthly components"][1] == "10,000 MMBtu"
+    assert "APO expiry range" in legacy_jkm_summary
+    assert exchange_nbp_summary["Monthly components"][1] == "31,000 therms"
+    assert "UKF expiry range" in exchange_nbp_summary
+
+
+def test_product_result_card_enrichment_requires_an_exchange_mapping():
+    as_of = FrozenDate(2026, 7, 29)
+    context = pricer.default_context("asian76", as_of)
+    context.update(asset="JKM", forward=16.0, premium_convention="futures_style")
+    leg = pricer.default_leg("asian76", 1)
+    leg.update(strike=16.0, quote_value=0.4)
+    snapshot = pricer.calculate_structure(
+        "asian76",
+        context,
+        {"structure_quantity": 1, "contract_multiplier": 10_000},
+        [leg],
+        as_of=as_of,
+    )
+
+    meta = pricer.render_structure_results(snapshot)[0]
+    product = next(
+        card
+        for card in meta
+        if card.children[0].children == "Product"
+    )
+    assert product.children[1] == "JKM"
+    assert product.title == "JKM LNG (Platts) Average Price Options"
+
+
 def test_american_futures_is_not_exposed_in_the_otc_model_selector():
     panel = pricer._build_structure_panel(
         {"structure_id": "otc-structure-1", "label": "O1", "template": None},
@@ -4133,6 +4324,11 @@ def test_cme_bzo_is_ready_with_the_futures_style_brent_proxy_workflow():
     assert mapping.contract_size == 1_000.0
     assert mapping.implementation_status == "Ready"
     assert mapping.pricing_supported
+    assert mapping.max_surface_extension_days == 1
+    assert (
+        pricer.exchange_option_mapping("CME-BRENT-BE").max_surface_extension_days
+        == 1
+    )
 
 
 def test_exchange_registry_premium_and_size_override_asset_defaults(monkeypatch):
@@ -4180,8 +4376,8 @@ def test_exchange_registry_premium_and_size_override_asset_defaults(monkeypatch)
         ("CME-TTF-TTL", "2027-01-01", "futures_style", 744.0),
         ("CME-TTF-TFP", "2027-01-01", "upfront", 10_000.0),
         ("CME-TTF-TFF", "2027-01-01", "futures_style", 10_000.0),
-        ("CME-JKM-JKO", "2027-03-01", "upfront", 10_000.0),
-        ("CME-JKM-JFO", "2027-03-01", "futures_style", 10_000.0),
+        ("CME-JKM-JKO", "2027-01-01", "upfront", 10_000.0),
+        ("CME-JKM-JFO", "2027-01-01", "futures_style", 10_000.0),
         ("CME-HH-ON", "2027-01-01", "upfront", 10_000.0),
     ],
 )

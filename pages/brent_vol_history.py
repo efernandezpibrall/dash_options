@@ -942,6 +942,42 @@ def load_published_surface(
     ).copy()
 
 
+def load_icap_settlement_surface(
+    cob_date: str,
+    *,
+    refresh: bool = False,
+    snapshot_loader=None,
+) -> pd.DataFrame:
+    """Reuse Vol Calibration's governed TTF settlement snapshot contract."""
+    if snapshot_loader is None:
+        from pages.vol_surface import get_operational_surface_snapshot
+
+        snapshot_loader = get_operational_surface_snapshot
+    snapshot = snapshot_loader("TTF", cob_date, refresh=refresh)
+    surface = snapshot.get("data")
+    if not isinstance(surface, pd.DataFrame) or surface.empty:
+        return pd.DataFrame()
+    actual_cob = pd.to_datetime(snapshot.get("actual_cob"), errors="coerce")
+    if pd.isna(actual_cob):
+        return pd.DataFrame()
+    surface = surface.copy()
+    surface["cob_date"] = actual_cob.normalize()
+    surface["forward_value"] = np.nan
+    surface["source_name"] = f"ICAP settlement · COB {actual_cob:%Y-%m-%d}"
+    return surface[
+        [
+            "cob_date",
+            "contract_date",
+            "option_expiration_date",
+            "put_call",
+            "delta",
+            "volatility",
+            "forward_value",
+            "source_name",
+        ]
+    ]
+
+
 def _empty_calibrated_surface(
     status: str,
     **metadata: Any,
@@ -1226,6 +1262,12 @@ def published_strike_nodes(
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(["contract_date", "strike"])
+
+
+def _is_icap_settlement_source(value: Any) -> bool:
+    """Identify rows supplied by the shared ICAP settlement snapshot loader."""
+    source = str(value or "").strip().lower()
+    return source == "icap" or source.startswith(("icap:", "icap_", "icap "))
 
 
 def _numeric_or_none(value: Any) -> float | None:
@@ -2926,6 +2968,7 @@ def build_expiry_figure(
                 ),
                 secondary_y=False,
             )
+    icap_settlement = pd.DataFrame()
     if not published.empty:
         if x_axis == X_AXIS_DELTA:
             published["_axis_x"] = published.apply(
@@ -2937,27 +2980,59 @@ def build_expiry_figure(
                 published["strike"], errors="coerce"
             )
         published = published.loc[published["_axis_x"].notna()].sort_values("_axis_x")
-    if not published.empty:
+        if resolved_product == "TFO" and "source_name" in published:
+            icap_mask = published["source_name"].map(_is_icap_settlement_source)
+            icap_settlement = published.loc[icap_mask].copy()
+            published = published.loc[~icap_mask].copy()
+    surface_traces = (
+        (
+            icap_settlement,
+            "Settlement vol surface (ICAP)",
+            "icap-settlement",
+            28,
+            "lines+markers",
+            {"color": "#0F766E", "width": 2, "dash": "dash"},
+            {
+                "color": "#0F766E",
+                "size": 7,
+                "symbol": "diamond",
+                "line": {"color": "#FFFFFF", "width": 1},
+            },
+        ),
+        (
+            published,
+            f"Published {spec['published_label']} exact COB",
+            "published",
+            30,
+            "lines",
+            {"color": "#EA580C", "width": 2.2},
+            None,
+        ),
+    )
+    for nodes, name, layer, rank, mode, line, marker in surface_traces:
+        if nodes.empty:
+            continue
         figure.add_trace(
             go.Scatter(
-                x=published["_axis_x"],
-                y=100.0 * published["volatility"],
-                mode="lines",
-                name=f"Published {spec['published_label']} exact COB",
-                legendrank=30,
-                meta={"legend_layer": "published"},
-                line={"color": "#EA580C", "width": 2.2},
+                x=nodes["_axis_x"],
+                y=100.0 * nodes["volatility"],
+                mode=mode,
+                name=name,
+                legendrank=rank,
+                meta={"legend_layer": layer},
+                line=line,
+                marker=marker,
                 customdata=np.column_stack(
                     [
-                        published["strike"],
-                        published["put_call"],
-                        published["delta"],
-                        published["source_name"],
-                        published["forward"],
+                        nodes["strike"],
+                        nodes["put_call"],
+                        nodes["delta"],
+                        nodes["source_name"],
+                        nodes["forward"],
                     ]
                 ),
                 hovertemplate=(
-                    f"<b>Published {spec['published_label']} exact COB</b>"
+                    f"<b>{name}</b>"
                     + "<br>Strike %{customdata[0]:.2f}"
                     + axis_hover
                     + " · IV <b>%{y:.2f}%</b>"
@@ -3137,7 +3212,7 @@ def build_expiry_figure(
     quality = _intraday_expiry_quality(raw, expiry_trade_tape, prior_reference)
     figure.update_layout(
         template="plotly_white",
-        height=440,
+        height=308,
         margin={"l": 58, "r": 44, "t": 18, "b": 48},
         barmode="overlay",
         hovermode="closest",
@@ -4548,6 +4623,7 @@ EXPIRY_LEGEND_LAYER_ORDER = (
     "trades",
     "prior-settlement",
     "bloomberg-settlement",
+    "icap-settlement",
     "published",
     "calibrated",
     "pricing-reference",
@@ -4596,6 +4672,15 @@ EXPIRY_LEGEND_LAYER_SPECS = {
         "group": "reference",
         "swatch": "brent-vol-history-legend-bloomberg-settlement",
         "description": "Settlement from Bloomberg",
+    },
+    "icap-settlement": {
+        "label": "ICAP settlement",
+        "group": "reference",
+        "swatch": "brent-vol-history-legend-icap-settlement",
+        "description": (
+            "Show or hide the latest ICAP settlement surface on or before "
+            "the selected date"
+        ),
     },
     "published": {
         "label": "Published",
@@ -5975,15 +6060,16 @@ def render_history(
                     )
                 except Exception:
                     prior_settlement_chain = pd.DataFrame()
-        published = (
-            pd.DataFrame()
-            if snapshot_kind == "INTRADAY"
-            else load_published_surface(
+        if snapshot_kind == "INTRADAY":
+            published = pd.DataFrame()
+        elif product == "TFO":
+            published = load_icap_settlement_surface(selected_date)
+        else:
+            published = load_published_surface(
                 selected_date,
                 product=product,
                 snapshot_kind=snapshot_kind,
             )
-        )
         try:
             calibrated = load_latest_calibrated_surface(
                 selected_date,
@@ -6299,6 +6385,7 @@ __all__ = [
     "load_available_snapshots",
     "load_chain_snapshot",
     "load_latest_calibrated_surface",
+    "load_icap_settlement_surface",
     "load_published_surface",
     "prepare_market_observations",
     "publication_coverage",

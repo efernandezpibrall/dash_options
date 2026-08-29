@@ -1701,14 +1701,15 @@ def build_ttf_intraday_candidate(
         restored_table = [dict(row) for row in table_data]
         if original_params_json:
             original = pd.read_json(StringIO(original_params_json), orient='split')
+            market_data = pd.read_json(StringIO(market_data_json), orient='split')
             original_records = format_params_for_table(
                 original,
-                pd.read_json(StringIO(market_data_json), orient='split'),
+                market_data,
                 commodity=COMMODITY,
             )
             original_records = _apply_published_parameters(
                 original_records,
-                pd.read_json(StringIO(market_data_json), orient='split'),
+                market_data,
                 publication_payload,
             )
             original_index = _find_table_row(original_records, expiry)

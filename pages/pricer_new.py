@@ -16,6 +16,7 @@ from dash import (
     html,
     no_update,
 )
+from dash.exceptions import PreventUpdate
 
 from pages import pricer as pricer_old
 from pricer_exchange_registry import (
@@ -223,15 +224,6 @@ def _workflow_model_style(workflow, asset):
         OTC_WORKFLOW,
         LEGACY_WORKFLOW,
     } or asset == "JKM":
-        return {"display": "flex"}
-    return {"display": "none"}
-
-
-def _workflow_rate_style(workflow, asset):
-    if _normalized_workflow(workflow) in {
-        OTC_WORKFLOW,
-        LEGACY_WORKFLOW,
-    } or asset == "HH":
         return {"display": "flex"}
     return {"display": "none"}
 
@@ -488,8 +480,16 @@ layout = html.Main(
         Output("pricer-exchange-structures-container", "children"),
     ],
     [
-        Input("pricer-exchange-workspace-hydration", "n_intervals"),
-        Input("pricer-exchange-add-structure", "n_clicks"),
+        Input(
+            "pricer-exchange-workspace-hydration",
+            "n_intervals",
+            allow_optional=True,
+        ),
+        Input(
+            "pricer-exchange-add-structure",
+            "n_clicks",
+            allow_optional=True,
+        ),
         Input(
             {"type": "pricer-duplicate-structure", "structure_id": ALL},
             "n_clicks",
@@ -596,6 +596,8 @@ def manage_exchange_workspace(
     calculate_all_clicks=None,
     global_valuation_date=None,
 ):
+    if _hydration is None and _add_clicks is None:
+        raise PreventUpdate
     workspace = _normalize_exchange_workspace(workspace)
     valuation_date = pricer_old.parse_date(
         global_valuation_date,
@@ -782,10 +784,6 @@ def render_exchange_workspace_status(
             {"type": "pricer-model-field", "structure_id": MATCH},
             "style",
         ),
-        Output(
-            {"type": "pricer-rate-field", "structure_id": MATCH},
-            "style",
-        ),
     ],
     [
         Input(
@@ -802,7 +800,6 @@ def configure_pricer_workflow_controls(workflow, mapping_id, asset):
     return (
         _workflow_model_options(workflow, effective_asset, mapping_id),
         _workflow_model_style(workflow, effective_asset),
-        _workflow_rate_style(workflow, effective_asset),
     )
 
 

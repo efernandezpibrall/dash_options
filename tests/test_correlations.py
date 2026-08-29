@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from pages import correlations
 from pages.correlations import (
     MIN_OBSERVATIONS,
     _matrix_figure,
@@ -61,3 +62,70 @@ def test_correlation_requires_overlap_and_non_constant_returns():
     assert pd.isna(analysis['correlations'].loc['JKM', 'HH'])
     assert analysis['overlap'].loc['JKM', 'TTF'] == len(trade_dates) - 1
     assert _matrix_figure(analysis).data[0].type == 'heatmap'
+
+
+def test_overlap_counts_preserve_pairwise_missing_observations():
+    dates = pd.bdate_range('2026-01-01', periods=MIN_OBSERVATIONS + 4)
+    grouped = pd.DataFrame(
+        {
+            'trade_date': np.repeat(dates, 3),
+            'product': np.tile(['JKM', 'TTF', 'HH'], len(dates)),
+            'period': '2027-01',
+            'price': np.tile([10.0, 20.0, 3.0], len(dates)),
+        }
+    )
+    grouped.loc[
+        grouped['product'].eq('TTF')
+        & grouped['trade_date'].isin(dates[[3, 7]]),
+        'price',
+    ] = np.nan
+
+    analysis = calculate_correlation_analysis(
+        grouped,
+        '2027-01',
+        ['JKM', 'TTF', 'HH'],
+        'JKM',
+        'TTF',
+        10,
+    )
+
+    present = analysis['returns'].notna().astype(int)
+    expected = present.T.dot(present).astype('Int64')
+    pd.testing.assert_frame_equal(analysis['overlap'], expected)
+
+
+def test_control_loading_exposes_source_failure_without_callback_error(monkeypatch):
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError('database unavailable')
+
+    monkeypatch.setattr(correlations, '_load_grouped_data', unavailable)
+
+    result = correlations.update_correlation_controls(
+        'monthly', ['JKM', 'TTF'], '1Y', 0, None, None, None
+    )
+
+    assert result[:2] == ([], None)
+    assert result[3] == 'JKM'
+    assert result[5] == 'TTF'
+    assert result[6].children == 'Correlation source is unavailable.'
+
+
+def test_control_loading_clears_cache_only_for_refresh_trigger(monkeypatch):
+    clear_calls = []
+    monkeypatch.setattr(correlations, 'clear_forward_curve_cache', lambda: clear_calls.append(True))
+    monkeypatch.setattr(
+        correlations,
+        '_load_grouped_data',
+        lambda *_args, **_kwargs: (pd.DataFrame(), pd.DataFrame()),
+    )
+    monkeypatch.setattr(correlations, 'triggered_id', lambda: 'correlations-history')
+    correlations.update_correlation_controls('monthly', ['JKM', 'TTF'], '1Y', 3, None, None, None)
+    assert clear_calls == []
+
+    monkeypatch.setattr(correlations, 'triggered_id', lambda: 'refresh-options-data')
+    correlations.update_correlation_controls('monthly', ['JKM', 'TTF'], '1Y', 3, None, None, None)
+    assert clear_calls == [True]
+
+    monkeypatch.setattr(correlations, 'triggered_id', lambda: None)
+    correlations.update_correlation_controls('monthly', ['JKM', 'TTF'], '1Y', 3, None, None, None)
+    assert clear_calls == [True, True]

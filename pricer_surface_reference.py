@@ -32,8 +32,11 @@ from options.option_expiry_engine import (
 )
 from options.ttf_volatility import black76_call_delta, delta_node_to_strike
 from pricer_structure import (
+    PRODUCT_METADATA_FIELDS,
     SUPPORTED_ASSETS,
     StructureValidationError,
+    _asian_determination_time,
+    _asian_fixing_times,
     calculate_structure,
     default_leg,
     volatility_adjustment,
@@ -44,7 +47,7 @@ from vol_calibration.ttf_publication import PUBLICATION_TABLE, SURFACE_TABLE
 
 
 LOGGER = logging.getLogger(__name__)
-REFERENCE_SCHEMA_VERSION = 1
+REFERENCE_SCHEMA_VERSION = 2
 SUPPORTED_SURFACE_ASSETS = {"TTF", "JKM"}
 OPERATIONAL_SURFACE_ASSETS = {"BRENT", "HH", "NBP"}
 PRICER_SURFACE_ASSETS = SUPPORTED_SURFACE_ASSETS | OPERATIONAL_SURFACE_ASSETS
@@ -268,6 +271,12 @@ def _delivery_components(context: Mapping) -> list[dict]:
         "expiry_convention_version",
         "volatility_surface_source",
         "max_surface_extension_days",
+        "averaging_fixing_dates",
+        "averaging_fixing_times",
+        "floating_price_determination_date",
+        "floating_price_determination_calendar_code",
+        "time_to_floating_price_determination",
+        *PRODUCT_METADATA_FIELDS,
     ):
         if context.get(field) is not None:
             component[field] = context[field]
@@ -363,6 +372,8 @@ def _surface_model_call_delta(
             time_to_averaging_start,
             0.0,
             pricing_volatility,
+            fixing_times=_asian_fixing_times(dict(component)),
+            determination_time=_asian_determination_time(dict(component)),
         )[1]
     except Exception as exc:
         raise SurfaceReferenceError(
@@ -630,6 +641,8 @@ def _component_price(
             float(component["time_to_averaging_start"]),
             float(context["rate"]),
             volatility,
+            fixing_times=_asian_fixing_times(dict(component)),
+            determination_time=_asian_determination_time(dict(component)),
         )[0]
     elif model == "american_futures":
         value = american_on_futures_equity_style_price(
@@ -883,6 +896,11 @@ def _comparison_context_payload(snapshot: Mapping) -> dict:
                         "contract_month",
                         "option_expiration_date",
                         "averaging_start_date",
+                        "averaging_fixing_dates",
+                        "averaging_fixing_times",
+                        "floating_price_determination_date",
+                        "floating_price_determination_calendar_code",
+                        "time_to_floating_price_determination",
                         "time_to_expiry",
                         "time_to_averaging_start",
                         "forward",
@@ -946,6 +964,8 @@ def _pricing_model_call_delta(
                 averaging_time,
                 float(context.get("rate") or 0.0),
                 pricing_volatility,
+                fixing_times=_asian_fixing_times(dict(component)),
+                determination_time=_asian_determination_time(dict(component)),
             )[1]
         except Exception as exc:
             raise SurfaceReferenceError(
@@ -1539,9 +1559,7 @@ def build_published_surface_reference(
         }
     )
     current_forward = float(normalized_context["forward"])
-    input_adjustment_factor = float(
-        normalized_context.get("vol_adjustment_factor", 1.0)
-    )
+    prepared_components = None
     for row in normalized_rows:
         leg_id = row.get("leg_id")
         if not leg_id:
@@ -1549,25 +1567,43 @@ def build_published_surface_reference(
         try:
             strike = float(row.get("strike"))
             if not math.isfinite(strike) or strike <= 0:
+                if normalized_context.get("positive_domain_required"):
+                    raise SurfaceReferenceError(
+                        f"{normalized_context.get('exchange_mapping_id')} uses a "
+                        "lognormal surface and requires a strictly positive strike."
+                    )
                 raise SurfaceReferenceError("A positive finite strike is required.")
             call_put = str(row.get("call_put") or "").strip().upper()
             if call_put not in {"C", "P"}:
                 raise SurfaceReferenceError("Option type must be Call or Put.")
+            if prepared_components is None:
+                prepared_components = [
+                    _prepare_component_surface(
+                        points,
+                        component,
+                        asset=normalized_asset,
+                        valuation_date=selected_date,
+                        current_forward=current_forward,
+                    )
+                    for component in components
+                ]
             component_results = [
-                _surface_component_volatility(
-                    points,
-                    component,
-                    asset=normalized_asset,
+                _prepared_component_result(
+                    prepared,
                     model=model,
-                    valuation_date=selected_date,
                     current_forward=current_forward,
                     strike=strike,
                 )
-                for component in components
+                for prepared in prepared_components
             ]
             if len(component_results) == 1:
-                pricing_volatility = component_results[0]["pricing_volatility"]
-                atm_pricing_volatility = component_results[0][
+                component_result = component_results[0]
+                input_volatility = component_result["reference_volatility"]
+                atm_input_volatility = component_result[
+                    "atm_reference_volatility"
+                ]
+                pricing_volatility = component_result["pricing_volatility"]
+                atm_pricing_volatility = component_result[
                     "atm_pricing_volatility"
                 ]
             else:
@@ -1576,6 +1612,22 @@ def build_published_surface_reference(
                         model,
                         normalized_context,
                         component_results,
+                        call_put,
+                        strike,
+                    )
+                )
+                input_component_results = [
+                    {
+                        **item,
+                        "pricing_volatility": item["reference_volatility"],
+                    }
+                    for item in component_results
+                ]
+                input_volatility, _input_target_premium, _input_residual = (
+                    _premium_equivalent_flat_volatility(
+                        model,
+                        normalized_context,
+                        input_component_results,
                         call_put,
                         strike,
                     )
@@ -1596,18 +1648,86 @@ def build_published_surface_reference(
                         strike,
                     )
                 )
-            if (
-                not math.isfinite(input_adjustment_factor)
-                or input_adjustment_factor <= 0
-            ):
-                raise SurfaceReferenceError(
-                    "The Pricer expiry adjustment factor is invalid."
+                atm_input_component_results = [
+                    {
+                        **item,
+                        "pricing_volatility": item[
+                            "atm_reference_volatility"
+                        ],
+                    }
+                    for item in component_results
+                ]
+                (
+                    atm_input_volatility,
+                    _atm_input_target_premium,
+                    _atm_input_residual,
+                ) = _premium_equivalent_flat_volatility(
+                    model,
+                    normalized_context,
+                    atm_input_component_results,
+                    call_put,
+                    strike,
                 )
-            input_volatility = pricing_volatility / input_adjustment_factor
-            atm_input_volatility = (
-                atm_pricing_volatility / input_adjustment_factor
-            )
             skew_input_volatility = input_volatility - atm_input_volatility
+            try:
+                manual_adjustment = 0.01 * sum(
+                    float(row.get(field) or 0.0)
+                    for field in (
+                        "atm_vol_adjustment",
+                        "skew_vol_adjustment",
+                        "smile_vol_adjustment",
+                    )
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise SurfaceReferenceError(
+                    "Volatility adjustments must be finite."
+                ) from exc
+            effective_component_results = [
+                {
+                    **item,
+                    "input_volatility": item["reference_volatility"]
+                    + manual_adjustment,
+                    "pricing_volatility": (
+                        item["reference_volatility"] + manual_adjustment
+                    )
+                    * item["surface_adjustment_factor"],
+                }
+                for item in component_results
+            ]
+            if len(effective_component_results) == 1:
+                effective_input_volatility = effective_component_results[0][
+                    "input_volatility"
+                ]
+                effective_pricing_volatility = effective_component_results[0][
+                    "pricing_volatility"
+                ]
+            else:
+                effective_input_volatility, _target, _residual = (
+                    _premium_equivalent_flat_volatility(
+                        model,
+                        normalized_context,
+                        [
+                            {
+                                **item,
+                                "pricing_volatility": item[
+                                    "input_volatility"
+                                ],
+                            }
+                            for item in effective_component_results
+                        ],
+                        call_put,
+                        strike,
+                    )
+                )
+                effective_pricing_volatility, _target, _residual = (
+                    _premium_equivalent_flat_volatility(
+                        model,
+                        normalized_context,
+                        effective_component_results,
+                        call_put,
+                        strike,
+                    )
+                )
             tooltip = _published_surface_tooltip(
                 publication,
                 component_results,
@@ -1618,8 +1738,21 @@ def build_published_surface_reference(
                 "surface_atm_input_vol": atm_input_volatility,
                 "surface_skew_input_vol": skew_input_volatility,
                 "surface_pricing_vol": pricing_volatility,
+                "surface_effective_input_vol": effective_input_volatility,
+                "surface_effective_pricing_vol": effective_pricing_volatility,
                 "surface_input_tooltip": tooltip,
                 "surface_pricing_tooltip": tooltip,
+                "surface_component_volatilities": [
+                    {
+                        "contract_month": item["contract_month"].isoformat(),
+                        "input_volatility": item["reference_volatility"],
+                        "pricing_volatility": item["pricing_volatility"],
+                        "expiry_adjustment_factor": item[
+                            "surface_adjustment_factor"
+                        ],
+                    }
+                    for item in component_results
+                ],
                 "surface_expiry_adjustments": [
                     {
                         "contract_month": item["contract_month"].isoformat(),

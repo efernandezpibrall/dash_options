@@ -11,10 +11,11 @@ from typing import Any
 import dash_ag_grid as dag
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Input, Output, State, callback, dcc, html
+from dash import Input, Output, callback, dcc, html, no_update
 from plotly.subplots import make_subplots
 from sqlalchemy import text
 
+from dash_utils import triggered_id
 from runtime_config import get_database_engine
 
 
@@ -1139,12 +1140,10 @@ def update_quote_filter_options(snapshot):
     def options(column, label_column=None):
         values = frame[[column] + ([label_column] if label_column else [])].dropna()
         values = values.drop_duplicates(column).sort_values(column)
+        labels = values[label_column] if label_column else values[column]
         return [
-            {
-                "value": row[column],
-                "label": row[label_column] if label_column else row[column],
-            }
-            for _, row in values.iterrows()
+            {"value": value, "label": label}
+            for value, label in zip(values[column], labels)
         ]
 
     return (
@@ -1224,12 +1223,13 @@ def render_quote_dashboard(
         table_status = f"{len(frame):,} quote events{suffix}"
     visible_rows = min(len(frame), 11)
     grid_height = min(420, max(180, 88 + 30 * visible_rows))
+    selection_only = triggered_id() == "ice-chat-quote-grid"
     return (
-        status_strip,
+        no_update if selection_only else status_strip,
         figure,
-        frame.to_dict("records"),
-        {"height": f"{grid_height}px"},
-        table_status,
+        no_update if selection_only else frame.to_dict("records"),
+        no_update if selection_only else {"height": f"{grid_height}px"},
+        no_update if selection_only else table_status,
         chart_title,
         chart_hint,
     )

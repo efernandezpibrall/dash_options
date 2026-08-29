@@ -9,12 +9,12 @@ import pandas as pd
 from options.calibration_engine.config.defaults import get_defaults
 
 from vol_calibration.ttf_hybrid_surface import (
-    build_ttf_pchip_core as build_jkm_pchip_core,
+    build_ttf_pchip_core as build_jkm_pchip_core,  # noqa: F401 - public alias
     evaluate_ttf_hybrid_candidate,
     fit_ttf_hybrid_candidate,
-    hybrid_iv,
-    operational_surface_frame,
-    validate_ttf_hybrid as validate_jkm_hybrid,
+    hybrid_iv,  # noqa: F401 - public facade export
+    operational_surface_frame,  # noqa: F401 - public facade export
+    validate_ttf_hybrid as validate_jkm_hybrid,  # noqa: F401 - public alias
 )
 
 
