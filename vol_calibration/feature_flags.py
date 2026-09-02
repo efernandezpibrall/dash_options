@@ -18,6 +18,16 @@ def calibration_enabled() -> bool:
     return _enabled("VOL_CALIBRATION_ENABLED", "ENABLED", True)
 
 
+def inline_calibration_enabled() -> bool:
+    """Expose the lazy Vol Trades calibration mount without changing routes."""
+
+    return calibration_enabled() and _enabled(
+        "VOL_TRADES_INLINE_CALIBRATION_ENABLED",
+        "VOL_TRADES_INLINE_CALIBRATION_ENABLED",
+        False,
+    )
+
+
 def writes_enabled() -> bool:
     return calibration_enabled() and _enabled(
         "VOL_CALIBRATION_WRITES_ENABLED", "WRITES_ENABLED", False
@@ -66,5 +76,53 @@ def jkm_publication_enabled() -> bool:
     return jkm_writes_enabled() and _enabled(
         "VOL_CALIBRATION_JKM_PUBLICATION_ENABLED",
         "JKM_PUBLICATION_ENABLED",
+        False,
+    )
+
+
+def nbp_writes_enabled() -> bool:
+    return calibration_enabled() and _enabled(
+        "VOL_CALIBRATION_NBP_WRITES_ENABLED",
+        "NBP_WRITES_ENABLED",
+        False,
+    )
+
+
+def nbp_publication_enabled() -> bool:
+    return nbp_writes_enabled() and _enabled(
+        "VOL_CALIBRATION_NBP_PUBLICATION_ENABLED",
+        "NBP_PUBLICATION_ENABLED",
+        False,
+    )
+
+
+def brent_writes_enabled() -> bool:
+    return calibration_enabled() and _enabled(
+        "VOL_CALIBRATION_BRENT_WRITES_ENABLED",
+        "BRENT_WRITES_ENABLED",
+        False,
+    )
+
+
+def brent_publication_enabled() -> bool:
+    return brent_writes_enabled() and _enabled(
+        "VOL_CALIBRATION_BRENT_PUBLICATION_ENABLED",
+        "BRENT_PUBLICATION_ENABLED",
+        False,
+    )
+
+
+def hh_writes_enabled() -> bool:
+    return calibration_enabled() and _enabled(
+        "VOL_CALIBRATION_HH_WRITES_ENABLED",
+        "HH_WRITES_ENABLED",
+        False,
+    )
+
+
+def hh_publication_enabled() -> bool:
+    return hh_writes_enabled() and _enabled(
+        "VOL_CALIBRATION_HH_PUBLICATION_ENABLED",
+        "HH_PUBLICATION_ENABLED",
         False,
     )

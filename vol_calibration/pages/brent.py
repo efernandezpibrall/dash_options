@@ -190,22 +190,56 @@ register_operational_surface_callback(COMMODITY, get_default_date)
      Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'title')],
     [Input(f'{COMMODITY_LOWER}-date-picker', 'date'),
      Input(f'{COMMODITY_LOWER}-reload-btn', 'n_clicks')],
+    State('brent-vol-history-calibration-context', 'data', allow_optional=True),
     prevent_initial_call=False
 )
 @cached_workspace_callback(COMMODITY, get_default_date)
-def load_data(trade_date, reload_clicks):
+def load_data(trade_date, reload_clicks, inline_context=None):
     """Load market data and parameters."""
     if trade_date is None:
         trade_date = get_default_date()
     else:
         trade_date = pd.to_datetime(trade_date).date()
 
-    # Load market data with metadata
-    load_result = load_market_data_with_metadata(
-        COMMODITY,
-        trade_date,
-        allow_synthetic_fallback=False,
-    )
+    if (
+        isinstance(inline_context, dict)
+        and inline_context.get('market_product') == 'BRENT'
+        and inline_context.get('market_snapshot_id')
+    ):
+        from pages.brent_vol_history import load_chain_snapshot, prepare_market_observations
+
+        snapshot_id = str(inline_context['market_snapshot_id'])
+        snapshot_kind = str(inline_context.get('market_snapshot_kind') or 'SETTLEMENT')
+        chain = load_chain_snapshot(
+            snapshot_id,
+            product='BRENT',
+            snapshot_kind=snapshot_kind,
+        )
+        exact_market = prepare_market_observations(chain, product='BRENT')
+        if exact_market.empty:
+            raise ValueError('The pinned Brent snapshot has no eligible calibration observations.')
+        observed_at = pd.to_datetime(
+            inline_context.get('market_as_of'), errors='coerce', utc=True
+        )
+        load_result = {
+            'data': exact_market,
+            'source': 'Bloomberg immutable snapshot',
+            'is_synthetic': False,
+            'last_update': None if pd.isna(observed_at) else observed_at,
+            'message': f"Pinned Bloomberg snapshot {snapshot_id}",
+            'error': None,
+            'calibration_mode': 'inline_exact_snapshot',
+            'snapshot_id': snapshot_id,
+            'observed_at': None if pd.isna(observed_at) else observed_at,
+            'provenance_complete': not pd.isna(observed_at),
+        }
+    else:
+        # Standalone Vol Calibration retains its existing date-based behavior.
+        load_result = load_market_data_with_metadata(
+            COMMODITY,
+            trade_date,
+            allow_synthetic_fallback=False,
+        )
     market_data = load_result['data']
     data_source = load_result['source']
     is_synthetic = load_result['is_synthetic']

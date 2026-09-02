@@ -30,6 +30,8 @@ from options.options_library import (
 )
 from options.option_contract_conventions import FlatDiscountCurve
 from options.option_expiry_engine import (
+    ASIAN_AVERAGING_CONTINUOUS_16_TO_EXPIRY,
+    ASIAN_AVERAGING_PLATTS_PUBLICATION_DAYS,
     PLATTS_ASIA_LNG_PUBLICATION,
     PLATTS_ASIA_LNG_PUBLICATION_VERSION,
     UnsupportedCalendarError,
@@ -37,6 +39,7 @@ from options.option_expiry_engine import (
     get_business_calendar,
     get_surface_calendar_mapping,
     require_platts_asia_lng_publication_year,
+    resolve_asian_averaging_schedule,
     resolve_option_expiry,
     resolve_surface_expiry,
     validate_expiry_records,
@@ -515,10 +518,13 @@ def _roll_following(calendar_code: str, value: date) -> date:
 
 def _jkm_apo_averaging_start(contract_month: date) -> date:
     anchor_month = _add_months(contract_month, -2)
-    return _roll_following(
-        JKM_VARIANCE_CALENDAR,
-        date(anchor_month.year, anchor_month.month, 16),
+    next_month = _add_months(anchor_month, 1)
+    schedule = resolve_asian_averaging_schedule(
+        ASIAN_AVERAGING_CONTINUOUS_16_TO_EXPIRY,
+        contract_month,
+        date(next_month.year, next_month.month, 15),
     )
+    return schedule.averaging_start_date
 
 
 def _jkm_publication_schedule(
@@ -526,30 +532,16 @@ def _jkm_publication_schedule(
 ) -> tuple[tuple[date, ...], date]:
     """Return reviewed JKM publication fixings and Floating Price determination."""
     anchor_month = _add_months(contract_month, -2)
-    first_day = date(anchor_month.year, anchor_month.month, 16)
     next_month = _add_months(anchor_month, 1)
-    last_day = date(next_month.year, next_month.month, 15)
     try:
-        for year in range(first_day.year, last_day.year + 1):
-            require_platts_asia_lng_publication_year(year)
-        calendar = get_business_calendar(PLATTS_ASIA_LNG_PUBLICATION)
+        schedule = resolve_asian_averaging_schedule(
+            ASIAN_AVERAGING_PLATTS_PUBLICATION_DAYS,
+            contract_month,
+            date(next_month.year, next_month.month, 15),
+        )
     except UnsupportedCalendarError as exc:
         raise StructureValidationError(str(exc)) from exc
-    fixing_dates = []
-    candidate = first_day
-    while candidate <= last_day:
-        if calendar.is_business_day(candidate):
-            fixing_dates.append(candidate)
-        candidate += timedelta(days=1)
-    if not fixing_dates:
-        raise StructureValidationError(
-            f"{contract_month.strftime('%b-%y')} has no governed JKM publication days."
-        )
-    determination_date = _roll_following(
-        JKM_DETERMINATION_CALENDAR,
-        fixing_dates[-1],
-    )
-    return tuple(fixing_dates), determination_date
+    return schedule.fixing_dates, schedule.floating_price_determination_date
 
 
 def _jkm_publication_fixing_dates(contract_month: date) -> tuple[date, ...]:
@@ -1981,12 +1973,14 @@ def _normalize_context(
         raise StructureValidationError(f"Unsupported pricing model: {model}.")
 
     if model == "asian76":
+        averaging_start_value = context.get("averaging_start_date")
+        if governed_month_component is not None:
+            averaging_start_value = governed_month_component.get(
+                "averaging_start_date",
+                averaging_start_value,
+            )
         averaging_start_date = _as_date(
-            (
-                governed_month_component["averaging_start_date"]
-                if governed_month_component
-                else context.get("averaging_start_date")
-            ),
+            averaging_start_value,
             "Averaging start date",
         )
         if averaging_start_date < as_of:

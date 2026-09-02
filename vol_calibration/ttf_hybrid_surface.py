@@ -31,15 +31,59 @@ from vol_calibration.calibration_inputs import calibration_eligibility_error
 
 
 DAYS_PER_YEAR = 365.0
-TTF_HYBRID_POLICY_VERSION = "ttf_pchip_core_wing_tail_hybrid_v1"
-TTF_HYBRID_METHOD = "PCHIP-core/Wing-v2-tail hybrid"
+GAS_HYBRID_METHOD = "PCHIP-core/Wing-v2-tail hybrid"
+GAS_HYBRID_POLICY_VERSIONS = {
+    "TTF": "ttf_pchip_core_wing_tail_hybrid_v1",
+    "JKM": "jkm_pchip_core_wing_tail_hybrid_v1",
+    "NBP": "nbp_pchip_core_wing_tail_hybrid_v1",
+}
+BRENT_HYBRID_METHOD = (
+    "SVI anchor + PCHIP-core/Wing-v2-tail hybrid "
+    "(bounded to governed 1%-99% delta range)"
+)
+BRENT_HYBRID_POLICY_VERSION = "brent_svi_projected_pchip_core_hybrid_v2"
+HH_HYBRID_METHOD = (
+    "SVI-body/seasonal-relative LNE settlement + "
+    "PCHIP-core/Wing-v2-tail hybrid (bounded to governed 1%-99% delta range)"
+)
+HH_HYBRID_POLICY_VERSION = "hh_lne_projected_pchip_core_hybrid_v2"
+HYBRID_POLICIES = {
+    "BRENT": (BRENT_HYBRID_METHOD, BRENT_HYBRID_POLICY_VERSION),
+    "HH": (HH_HYBRID_METHOD, HH_HYBRID_POLICY_VERSION),
+    **{
+        product: (GAS_HYBRID_METHOD, version)
+        for product, version in GAS_HYBRID_POLICY_VERSIONS.items()
+    },
+}
+TTF_HYBRID_POLICY_VERSION = GAS_HYBRID_POLICY_VERSIONS["TTF"]
+TTF_HYBRID_METHOD = GAS_HYBRID_METHOD
 TTF_CORE_SAMPLE_COUNT = 201
+CANONICAL_SURFACE_POINT_COUNT = 401
 TTF_VALIDATION_POINT_COUNT = 4001
 TTF_BLEND_WIDTHS = (0.10, 0.15, 0.20, 0.30)
 TTF_BUTTERFLY_MARGIN = 0.006
 TTF_VALIDATION_EXTENSION = 0.30
 TTF_VALIDATION_FLOOR = -0.50
 TTF_VALIDATION_CEILING = 0.50
+
+
+def gas_hybrid_policy(commodity: str) -> tuple[str, str]:
+    """Return the common method and explicit product policy version."""
+    product = str(commodity).strip().upper()
+    if product not in GAS_HYBRID_POLICY_VERSIONS:
+        raise ValueError(f"Unsupported governed gas hybrid product: {commodity}.")
+    return hybrid_policy(product)
+
+
+def hybrid_policy(commodity: str) -> tuple[str, str]:
+    """Return the finalizer method and policy for any governed product."""
+    product = str(commodity).strip().upper()
+    try:
+        return HYBRID_POLICIES[product]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported governed hybrid product: {commodity}."
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -56,6 +100,7 @@ class TTFPchipCore:
     source_name: str
     calibration_basis: str
     interpolator: PchipInterpolator
+    commodity: str = "TTF"
 
     @property
     def time_to_expiry(self) -> float:
@@ -76,13 +121,24 @@ class TTFPchipCore:
         return float(self.interpolator.derivative()(x))
 
 
-def build_ttf_pchip_core(observations: pd.DataFrame) -> TTFPchipCore:
+def build_ttf_pchip_core(
+    observations: pd.DataFrame,
+    *,
+    commodity: str = "TTF",
+) -> TTFPchipCore:
     """Validate governed observations and build the authoritative PCHIP core."""
-    eligibility_error = calibration_eligibility_error(observations)
+    product = str(commodity).strip().upper()
+    hybrid_policy(product)
+    eligibility_error = calibration_eligibility_error(
+        observations,
+        commodity=product,
+    )
     if eligibility_error:
         raise ValueError(eligibility_error)
     if "strike" not in observations.columns:
-        raise ValueError("TTF hybrid inputs require original official strikes.")
+        raise ValueError(
+            f"{product} hybrid inputs require original governed strikes."
+        )
 
     strikes = pd.to_numeric(observations["strike"], errors="coerce").to_numpy()
     if (
@@ -91,7 +147,7 @@ def build_ttf_pchip_core(observations: pd.DataFrame) -> TTFPchipCore:
         or np.unique(np.round(strikes, decimals=12)).size != len(strikes)
     ):
         raise ValueError(
-            "TTF hybrid inputs require distinct, finite, positive official strikes."
+            f"{product} hybrid inputs require distinct, finite, positive official strikes."
         )
 
     forwards = pd.to_numeric(observations["forward"], errors="coerce").to_numpy()
@@ -105,9 +161,13 @@ def build_ttf_pchip_core(observations: pd.DataFrame) -> TTFPchipCore:
     total_variance = time_to_expiry * ivs**2
 
     if not np.all(np.isfinite(x)) or np.unique(np.round(x, 12)).size != len(x):
-        raise ValueError("TTF hybrid log-moneyness nodes must be finite and distinct.")
+        raise ValueError(
+            f"{product} hybrid log-moneyness nodes must be finite and distinct."
+        )
     if not np.all(np.isfinite(total_variance)) or np.any(total_variance <= 0):
-        raise ValueError("TTF hybrid total-variance nodes must be finite and positive.")
+        raise ValueError(
+            f"{product} hybrid total-variance nodes must be finite and positive."
+        )
 
     order = np.argsort(x)
     x = x[order]
@@ -118,12 +178,16 @@ def build_ttf_pchip_core(observations: pd.DataFrame) -> TTFPchipCore:
     interpolator = PchipInterpolator(x, total_variance, extrapolate=False)
     reproduced = np.asarray(interpolator(x), dtype=float)
     if not np.allclose(reproduced, total_variance, rtol=0.0, atol=1e-13):
-        raise ValueError("TTF PCHIP core did not reproduce the governed nodes exactly.")
+        raise ValueError(
+            f"{product} PCHIP core did not reproduce the governed nodes exactly."
+        )
 
     source_names = observations["source_name"].astype(str).str.strip().unique()
     bases = observations["calibration_basis"].astype(str).str.strip().str.lower().unique()
     if len(source_names) != 1 or len(bases) != 1:
-        raise ValueError("TTF hybrid inputs require homogeneous source provenance.")
+        raise ValueError(
+            f"{product} hybrid inputs require homogeneous source provenance."
+        )
 
     return TTFPchipCore(
         x_nodes=x,
@@ -136,6 +200,24 @@ def build_ttf_pchip_core(observations: pd.DataFrame) -> TTFPchipCore:
         source_name=str(source_names[0]),
         calibration_basis=str(bases[0]),
         interpolator=interpolator,
+        commodity=product,
+    )
+
+
+def _hybrid_validation_range(core: TTFPchipCore) -> tuple[float, float]:
+    """Return the governed strike range for complete-smile validation.
+
+    Brent and HH already supply 1%-99% source-specific fixed-delta tails, whose
+    long-dated log-moneyness can be much wider than the Wing-v2 cutoff domain.
+    Their dense authority is bounded to those governed endpoints. The three
+    same-source gas products retain the established Wing-v2 extension.
+    """
+
+    if core.commodity in {"BRENT", "HH"}:
+        return core.xmin, core.xmax
+    return (
+        min(TTF_VALIDATION_FLOOR, core.xmin - TTF_VALIDATION_EXTENSION),
+        max(TTF_VALIDATION_CEILING, core.xmax + TTF_VALIDATION_EXTENSION),
     )
 
 
@@ -313,8 +395,7 @@ def validate_ttf_hybrid(
     butterfly_margin: float = TTF_BUTTERFLY_MARGIN,
 ) -> dict[str, Any]:
     """Fail-closed validation of the complete operational smile."""
-    x_min = min(TTF_VALIDATION_FLOOR, core.xmin - TTF_VALIDATION_EXTENSION)
-    x_max = max(TTF_VALIDATION_CEILING, core.xmax + TTF_VALIDATION_EXTENSION)
+    x_min, x_max = _hybrid_validation_range(core)
     x = np.linspace(x_min, x_max, int(n_points))
     try:
         total_variance = hybrid_total_variance(
@@ -426,8 +507,14 @@ def _effective_bounds() -> dict[str, tuple[float, float]]:
     return bounds
 
 
-def _full_initial_params(initial_params: Mapping[str, float]) -> dict[str, float]:
-    params = get_defaults("TTF")
+def _full_initial_params(
+    initial_params: Mapping[str, float],
+    *,
+    commodity: str = "TTF",
+) -> dict[str, float]:
+    product = str(commodity).strip().upper()
+    hybrid_policy(product)
+    params = get_defaults(product)
     params.update({key: value for key, value in initial_params.items() if key in PARAM_ORDER})
     bounds = _effective_bounds()
     for name in PARAM_ORDER:
@@ -435,7 +522,7 @@ def _full_initial_params(initial_params: Mapping[str, float]) -> dict[str, float
         lower, upper = bounds[name]
         if not np.isfinite(value) or not lower <= value <= upper:
             raise ValueError(
-                f"Initial TTF Wing parameter {name}={value!r} is outside "
+                f"Initial {product} Wing parameter {name}={value!r} is outside "
                 f"[{lower}, {upper}]."
             )
         params[name] = value
@@ -500,19 +587,72 @@ def fit_ttf_hybrid_candidate(
     *,
     n_starts: int = 1,
     seed: int = 42,
+    commodity: str = "TTF",
 ) -> dict[str, Any]:
     """Fit Wing-v2 to the PCHIP target in total-variance/log-K space."""
-    core = build_ttf_pchip_core(observations)
-    params0 = _full_initial_params(initial_params)
+    product = str(commodity).strip().upper()
+    method, policy_version = hybrid_policy(product)
+    core = build_ttf_pchip_core(observations, commodity=product)
+    params0 = _full_initial_params(initial_params, commodity=product)
+    if product in {"BRENT", "HH"}:
+        # These source-specific builders have already performed the joint
+        # butterfly/calendar projection on the full 1%-99% delta range. No
+        # ungoverned strike is added beyond those wide governed endpoints.
+        validation = validate_ttf_hybrid(
+            core,
+            params0,
+            left_blend_width=TTF_BLEND_WIDTHS[0],
+            right_blend_width=TTF_BLEND_WIDTHS[0],
+        )
+        if not validation["is_valid"]:
+            raise ValueError(
+                f"{product} jointly projected PCHIP core failed the complete arbitrage gate."
+            )
+        return {
+            "success": True,
+            "params": params0,
+            "core": core,
+            "core_tv_rmse": 0.0,
+            "tail_fit_tv_rmse": 0.0,
+            "iv_rmse": 0.0,
+            "left_blend_width": float(TTF_BLEND_WIDTHS[0]),
+            "right_blend_width": float(TTF_BLEND_WIDTHS[0]),
+            "validation": validation,
+            "solver_converged": True,
+            "accepted_feasible_candidate": False,
+            "start": 0,
+            "rmse": 0.0,
+            "butterfly": {
+                "is_valid": True,
+                "min_g": validation.get("min_g"),
+                "margin": TTF_BUTTERFLY_MARGIN,
+            },
+            "starts": 1,
+            "attempts": [
+                {
+                    "start": 0,
+                    "solver_success": True,
+                    "accepted_feasible": False,
+                    "objective": 0.0,
+                    "iterations": 0,
+                    "message": (
+                        f"jointly projected {product} core; external tail disabled"
+                    ),
+                }
+            ],
+            "calibration_method": method,
+            "calibration_policy_version": policy_version,
+        }
     bounds_by_name = _effective_bounds()
     free_names = tuple(TTF_WING_V2_FREE_PARAMS)
     bounds = [bounds_by_name[name] for name in free_names]
     x0 = np.asarray([params0[name] for name in free_names], dtype=float)
     x_core = np.linspace(core.xmin, core.xmax, TTF_CORE_SAMPLE_COUNT)
     target_total_variance = core.total_variance(x_core)
+    validation_min, validation_max = _hybrid_validation_range(core)
     x_gate = np.linspace(
-        min(TTF_VALIDATION_FLOOR, core.xmin - TTF_VALIDATION_EXTENSION),
-        max(TTF_VALIDATION_CEILING, core.xmax + TTF_VALIDATION_EXTENSION),
+        validation_min,
+        validation_max,
         int(TTF_WING_V2_OPTIMIZER_OPTIONS.get("butterfly_n_points", 1001)),
     )
 
@@ -531,7 +671,7 @@ def fit_ttf_hybrid_candidate(
 
     count = int(n_starts)
     if count < 1:
-        raise ValueError("TTF hybrid n_starts must be at least one.")
+        raise ValueError(f"{product} hybrid n_starts must be at least one.")
     rng = np.random.default_rng(int(seed))
     starts = [x0]
     starts.extend(
@@ -585,14 +725,8 @@ def fit_ttf_hybrid_candidate(
             hybrid_validation = None
             selected_width = None
             x_validation = np.linspace(
-                min(
-                    TTF_VALIDATION_FLOOR,
-                    core.xmin - TTF_VALIDATION_EXTENSION,
-                ),
-                max(
-                    TTF_VALIDATION_CEILING,
-                    core.xmax + TTF_VALIDATION_EXTENSION,
-                ),
+                validation_min,
+                validation_max,
                 TTF_VALIDATION_POINT_COUNT,
             )
             for blend_width in TTF_BLEND_WIDTHS:
@@ -688,7 +822,9 @@ def fit_ttf_hybrid_candidate(
             )
 
     if not candidates:
-        raise ValueError("TTF tail fit produced no complete hybrid that passed validation.")
+        raise ValueError(
+            f"{product} tail fit produced no complete hybrid that passed validation."
+        )
     best = min(candidates, key=lambda item: item["tail_fit_tv_rmse"])
     best.update(
         {
@@ -701,8 +837,8 @@ def fit_ttf_hybrid_candidate(
             },
             "starts": len(starts),
             "attempts": attempts,
-            "calibration_method": TTF_HYBRID_METHOD,
-            "calibration_policy_version": TTF_HYBRID_POLICY_VERSION,
+            "calibration_method": method,
+            "calibration_policy_version": policy_version,
         }
     )
     return best
@@ -714,10 +850,13 @@ def evaluate_ttf_hybrid_candidate(
     *,
     left_blend_width: float | None = None,
     right_blend_width: float | None = None,
+    commodity: str = "TTF",
 ) -> dict[str, Any]:
     """Evaluate an existing tail parameter row against its authoritative core."""
-    core = build_ttf_pchip_core(observations)
-    full_params = _full_initial_params(params)
+    product = str(commodity).strip().upper()
+    method, policy_version = hybrid_policy(product)
+    core = build_ttf_pchip_core(observations, commodity=product)
+    full_params = _full_initial_params(params, commodity=product)
     if left_blend_width is None or right_blend_width is None:
         left_width, right_width, validation = select_valid_blend(core, full_params)
     else:
@@ -730,7 +869,9 @@ def evaluate_ttf_hybrid_candidate(
             right_blend_width=right_width,
         )
         if not validation["is_valid"]:
-            raise ValueError("The edited TTF hybrid failed the complete arbitrage gate.")
+            raise ValueError(
+                f"The edited {product} hybrid failed the complete arbitrage gate."
+            )
     x_core = np.linspace(core.xmin, core.xmax, TTF_CORE_SAMPLE_COUNT)
     target_w = core.total_variance(x_core)
     wing_w = _wing_total_variance(x_core, core, full_params)
@@ -759,9 +900,107 @@ def evaluate_ttf_hybrid_candidate(
             "min_g": validation.get("min_g"),
             "margin": TTF_BUTTERFLY_MARGIN,
         },
-        "calibration_method": TTF_HYBRID_METHOD,
-        "calibration_policy_version": TTF_HYBRID_POLICY_VERSION,
+        "calibration_method": method,
+        "calibration_policy_version": policy_version,
     }
+
+
+def fit_gas_hybrid_candidate(
+    observations: pd.DataFrame,
+    initial_params: Mapping[str, float],
+    *,
+    commodity: str,
+    n_starts: int = 1,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Product-aware facade for the shared TTF/JKM/NBP hybrid fit."""
+    gas_hybrid_policy(commodity)
+    return fit_hybrid_candidate(
+        observations,
+        initial_params,
+        commodity=commodity,
+        n_starts=n_starts,
+        seed=seed,
+    )
+
+
+def evaluate_gas_hybrid_candidate(
+    observations: pd.DataFrame,
+    params: Mapping[str, float],
+    *,
+    commodity: str,
+    left_blend_width: float | None = None,
+    right_blend_width: float | None = None,
+) -> dict[str, Any]:
+    """Product-aware facade for an existing TTF/JKM/NBP hybrid row."""
+    gas_hybrid_policy(commodity)
+    return evaluate_hybrid_candidate(
+        observations,
+        params,
+        commodity=commodity,
+        left_blend_width=left_blend_width,
+        right_blend_width=right_blend_width,
+    )
+
+
+def fit_hybrid_candidate(
+    observations: pd.DataFrame,
+    initial_params: Mapping[str, float],
+    *,
+    commodity: str,
+    n_starts: int = 1,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Fit the common finalizer while retaining product-specific provenance."""
+    return fit_ttf_hybrid_candidate(
+        observations,
+        initial_params,
+        n_starts=n_starts,
+        seed=seed,
+        commodity=commodity,
+    )
+
+
+def evaluate_hybrid_candidate(
+    observations: pd.DataFrame,
+    params: Mapping[str, float],
+    *,
+    commodity: str,
+    left_blend_width: float | None = None,
+    right_blend_width: float | None = None,
+) -> dict[str, Any]:
+    """Evaluate one common-finalizer row with product-specific provenance."""
+    return evaluate_ttf_hybrid_candidate(
+        observations,
+        params,
+        left_blend_width=left_blend_width,
+        right_blend_width=right_blend_width,
+        commodity=commodity,
+    )
+
+
+def _canonical_surface_grid(core: TTFPchipCore, n_points: int) -> np.ndarray:
+    """Return a stable dense grid that contains every governed core node."""
+    count = int(n_points)
+    if count < len(core.x_nodes):
+        raise ValueError(
+            "Dense hybrid output cannot contain every governed anchor with fewer "
+            f"than {len(core.x_nodes)} points."
+        )
+    x_min, x_max = _hybrid_validation_range(core)
+    grid = np.linspace(x_min, x_max, count)
+    reserved: set[int] = set()
+    for node in core.x_nodes:
+        for index in np.argsort(np.abs(grid - node)):
+            candidate = int(index)
+            if candidate not in reserved:
+                grid[candidate] = float(node)
+                reserved.add(candidate)
+                break
+    grid.sort()
+    if len(grid) != count or np.any(np.diff(grid) <= 0):
+        raise ValueError("Could not build a distinct canonical hybrid surface grid.")
+    return grid
 
 
 def operational_surface_frame(
@@ -770,13 +1009,14 @@ def operational_surface_frame(
     *,
     left_blend_width: float,
     right_blend_width: float,
-    n_points: int = 401,
+    n_points: int = CANONICAL_SURFACE_POINT_COUNT,
+    commodity: str = "TTF",
 ) -> pd.DataFrame:
     """Create an export/chart-ready sample of one complete hybrid smile."""
-    core = build_ttf_pchip_core(observations)
-    x_min = min(TTF_VALIDATION_FLOOR, core.xmin - TTF_VALIDATION_EXTENSION)
-    x_max = max(TTF_VALIDATION_CEILING, core.xmax + TTF_VALIDATION_EXTENSION)
-    x = np.linspace(x_min, x_max, int(n_points))
+    product = str(commodity).strip().upper()
+    hybrid_policy(product)
+    core = build_ttf_pchip_core(observations, commodity=product)
+    x = _canonical_surface_grid(core, n_points)
     strikes = core.forward * np.exp(x)
     total_variance = hybrid_total_variance(
         x,
@@ -788,6 +1028,11 @@ def operational_surface_frame(
     iv = np.sqrt(total_variance / core.time_to_expiry)
     sqrt_w = np.sqrt(total_variance)
     call_delta = norm.cdf(-x / sqrt_w + 0.5 * sqrt_w)
+    for node_index, node in enumerate(core.x_nodes):
+        dense_index = int(np.flatnonzero(x == node)[0])
+        total_variance[dense_index] = core.total_variance_nodes[node_index]
+        iv[dense_index] = core.iv_nodes[node_index]
+        call_delta[dense_index] = core.delta_nodes[node_index]
     left_tail_end = core.xmin - left_blend_width
     right_tail_end = core.xmax + right_blend_width
     core_or_tail = np.where(
@@ -820,4 +1065,100 @@ def operational_surface_frame(
             "blend_classification": blend_classification,
             "source_name": core.source_name,
         }
+    )
+
+
+def densify_bounded_source_surface(
+    source_surface: pd.DataFrame,
+    *,
+    commodity: str,
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Convert validated BRENT/HH 11-node term structures to 401-point slices."""
+
+    product = str(commodity).strip().upper()
+    if product not in {"BRENT", "HH"}:
+        raise ValueError("Bounded source densification is supported for BRENT and HH.")
+    required = {
+        "contract_date",
+        "option_expiration_date",
+        "delta",
+        "strike",
+        "volatility",
+        "total_variance",
+        "working_forward",
+        "calibration_basis",
+        "source_name",
+    }
+    missing = sorted(required - set(source_surface.columns))
+    if missing:
+        raise ValueError(
+            f"{product} bounded source surface is missing: " + ", ".join(missing)
+        )
+
+    dense_slices: list[pd.DataFrame] = []
+    expiry_results: list[dict[str, Any]] = []
+    for contract_date, group in source_surface.groupby("contract_date", sort=True):
+        group = group.sort_values("delta").copy()
+        volatility = group["volatility"].to_numpy(dtype=float)
+        total_variance = group["total_variance"].to_numpy(dtype=float)
+        time_to_expiry = total_variance / volatility**2
+        observations = pd.DataFrame(
+            {
+                "expiry": pd.Timestamp(contract_date),
+                "option_expiration_date": pd.to_datetime(
+                    group["option_expiration_date"], errors="coerce"
+                ),
+                "forward": group["working_forward"].to_numpy(dtype=float),
+                "dte": time_to_expiry * DAYS_PER_YEAR,
+                "delta": group["delta"].to_numpy(dtype=float),
+                "iv": volatility,
+                "strike": group["strike"].to_numpy(dtype=float),
+                "source_name": group["source_name"].astype(str).to_numpy(),
+                "calibration_basis": group["calibration_basis"].astype(str).to_numpy(),
+                "weight": np.ones(len(group), dtype=float),
+            }
+        )
+        result = fit_hybrid_candidate(
+            observations,
+            get_defaults(product),
+            commodity=product,
+            n_starts=1,
+        )
+        dense = operational_surface_frame(
+            observations,
+            result["params"],
+            left_blend_width=result["left_blend_width"],
+            right_blend_width=result["right_blend_width"],
+            commodity=product,
+        )
+        dense["contract_date"] = pd.Timestamp(contract_date).normalize()
+        dense["option_expiration_date"] = pd.to_datetime(
+            group["option_expiration_date"].iloc[0]
+        ).normalize()
+        dense["working_forward"] = float(group["working_forward"].iloc[0])
+        dense_slices.append(dense)
+        expiry_results.append(
+            {
+                "option_expiration_date": dense["option_expiration_date"].iloc[0].date(),
+                "parameters": result["params"],
+                "diagnostics": {
+                    "point_count": len(dense),
+                    "calibration_basis": str(group["calibration_basis"].iloc[0]),
+                    "min_g": result["validation"].get("min_g"),
+                    "bounded_source_range": True,
+                },
+                "validation": result["validation"],
+                "weighted_rmse": 0.0,
+                "unweighted_rmse": 0.0,
+                "max_error": None,
+                "optimizer_success": True,
+            }
+        )
+    if not dense_slices:
+        raise ValueError(f"{product} bounded source surface is empty.")
+    return (
+        pd.concat(dense_slices, ignore_index=True).sort_values(
+            ["contract_date", "strike"]
+        ).reset_index(drop=True),
+        expiry_results,
     )

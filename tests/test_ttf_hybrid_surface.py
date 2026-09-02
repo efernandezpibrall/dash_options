@@ -12,10 +12,20 @@ from vol_calibration.calibration_inputs import (
     UNDISCOUNTED_CALL_DELTA,
 )
 from vol_calibration.ttf_hybrid_surface import (
+    BRENT_HYBRID_METHOD,
+    BRENT_HYBRID_POLICY_VERSION,
+    CANONICAL_SURFACE_POINT_COUNT,
+    GAS_HYBRID_METHOD,
+    GAS_HYBRID_POLICY_VERSIONS,
+    HH_HYBRID_METHOD,
+    HH_HYBRID_POLICY_VERSION,
     TTF_CORE_SAMPLE_COUNT,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
     build_ttf_pchip_core,
+    densify_bounded_source_surface,
+    fit_gas_hybrid_candidate,
+    fit_hybrid_candidate,
     fit_ttf_hybrid_candidate,
     hybrid_total_variance,
     operational_surface_frame,
@@ -138,6 +148,95 @@ def test_operational_surface_labels_core_blends_tails_and_preserves_source():
     }.issubset(set(surface["blend_classification"]))
     assert np.all(np.isfinite(surface[["delta", "strike", "iv", "total_variance"]]))
     assert np.all(surface["total_variance"] > 0)
+    for x, iv, delta in zip(
+        result["core"].x_nodes,
+        result["core"].iv_nodes,
+        result["core"].delta_nodes,
+    ):
+        anchor = surface.loc[surface["log_moneyness"] == x]
+        assert len(anchor) == 1
+        assert anchor.iloc[0]["iv"] == iv
+        assert anchor.iloc[0]["delta"] == delta
+
+
+def test_nbp_uses_explicit_ttf_seeded_shared_gas_policy():
+    result = fit_gas_hybrid_candidate(
+        _hybrid_observations(),
+        get_defaults("NBP"),
+        commodity="NBP",
+        n_starts=1,
+    )
+    surface = operational_surface_frame(
+        _hybrid_observations(),
+        result["params"],
+        left_blend_width=result["left_blend_width"],
+        right_blend_width=result["right_blend_width"],
+    )
+
+    assert result["calibration_method"] == GAS_HYBRID_METHOD
+    assert (
+        result["calibration_policy_version"]
+        == GAS_HYBRID_POLICY_VERSIONS["NBP"]
+    )
+    assert len(surface) == CANONICAL_SURFACE_POINT_COUNT
+    assert set(result["core"].x_nodes).issubset(set(surface["log_moneyness"]))
+
+
+@pytest.mark.parametrize(
+    ("product", "expected_method", "expected_policy"),
+    [
+        ("BRENT", BRENT_HYBRID_METHOD, BRENT_HYBRID_POLICY_VERSION),
+        ("HH", HH_HYBRID_METHOD, HH_HYBRID_POLICY_VERSION),
+    ],
+)
+def test_product_specific_anchor_methods_share_the_dense_finalizer(
+    product,
+    expected_method,
+    expected_policy,
+):
+    result = fit_hybrid_candidate(
+        _hybrid_observations(),
+        get_defaults(product),
+        commodity=product,
+        n_starts=1,
+    )
+    surface = operational_surface_frame(
+        _hybrid_observations(),
+        result["params"],
+        left_blend_width=result["left_blend_width"],
+        right_blend_width=result["right_blend_width"],
+        commodity=product,
+    )
+
+    assert result["calibration_method"] == expected_method
+    assert result["calibration_policy_version"] == expected_policy
+    assert len(surface) == CANONICAL_SURFACE_POINT_COUNT
+    assert set(result["core"].x_nodes).issubset(set(surface["log_moneyness"]))
+
+
+@pytest.mark.parametrize("product", ["BRENT", "HH"])
+def test_bounded_source_densifier_returns_authoritative_401_point_slice(product):
+    observations = _hybrid_observations()
+    source = observations.rename(
+        columns={
+            "expiry": "contract_date",
+            "iv": "volatility",
+            "forward": "working_forward",
+        }
+    ).copy()
+    source["total_variance"] = (
+        source["volatility"] ** 2 * source["dte"] / 365.0
+    )
+    source["surface_region"] = "source_anchor"
+    source["blend_classification"] = "source_anchor"
+
+    dense, results = densify_bounded_source_surface(source, commodity=product)
+
+    assert len(dense) == CANONICAL_SURFACE_POINT_COUNT
+    assert len(results) == 1
+    assert results[0]["validation"]["is_valid"] is True
+    for delta in TTF_CALL_DELTA_NODES:
+        assert np.isclose(dense["delta"], delta, rtol=0.0, atol=1e-10).any()
 
 
 def test_smile_grid_legend_toggles_each_series_across_all_expiries():

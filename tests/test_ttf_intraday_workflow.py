@@ -878,7 +878,7 @@ def test_sep_26_trade_derives_iv_from_premium_without_confirmation_toggle():
         )
 
 
-def test_publication_normalization_requires_full_hybrid_provenance():
+def test_publication_normalization_requires_full_hybrid_provenance(monkeypatch):
     frame = pd.DataFrame(
         {
             "expiry": [pd.Timestamp("2026-10-01")],
@@ -909,15 +909,39 @@ def test_publication_normalization_requires_full_hybrid_provenance():
             trading_date="2026-08-06",
         )
 
-
-def test_publication_rejects_self_approval_before_touching_storage():
+    monkeypatch.setattr(
+        "vol_calibration.ttf_publication.ttf_publication_storage_available",
+        lambda _engine: True,
+    )
     identity = Identity(
         subject="owner@example.com",
         roles=frozenset({Role.APPROVER}),
         authenticated=True,
         auth_source="test",
     )
-    with pytest.raises(PermissionError, match="their own run"):
+    with pytest.raises(TTFPublicationError, match="exactly 401 dense points"):
+        publish_ttf_surface(
+            None,
+            frame,
+            [],
+            trading_date="2026-08-06",
+            settlement_cob="2026-08-06",
+            identity=identity,
+            created_by=identity.subject,
+            base_publication_id=None,
+            expected_current_publication_id=None,
+            idempotency_key="incomplete-surface",
+        )
+
+
+def test_publication_allows_controlled_self_publication_but_requires_storage():
+    identity = Identity(
+        subject="owner@example.com",
+        roles=frozenset({Role.APPROVER}),
+        authenticated=True,
+        auth_source="test",
+    )
+    with pytest.raises(TTFPublicationError, match="storage is not migrated"):
         publish_ttf_surface(
             None,
             pd.DataFrame(),

@@ -37,6 +37,13 @@ def _default_ready_worker(monkeypatch):
         "get_worker_readiness",
         lambda product: _worker_readiness(product),
     )
+    monkeypatch.setattr(
+        history,
+        "get_worker_readiness_many",
+        lambda products: {
+            product: _worker_readiness(product) for product in products
+        },
+    )
 
 
 def test_intraday_refresh_flag_defaults_off_and_accepts_explicit_env(monkeypatch):
@@ -64,6 +71,11 @@ class _Rows:
 
     def first(self):
         return self.row
+
+    def all(self):
+        if self.row is None:
+            return []
+        return self.row if isinstance(self.row, list) else [self.row]
 
 
 class _Connection:
@@ -98,13 +110,19 @@ class _Engine:
         return _ConnectionContext(self.connection)
 
 
-def _job_row(request_kind):
+def _job_row(
+    request_kind,
+    *,
+    product="BRENT",
+    job_id="00000000-0000-0000-0000-000000000010",
+    status="queued",
+):
     return {
-        "job_id": "00000000-0000-0000-0000-000000000010",
-        "product": "BRENT",
+        "job_id": job_id,
+        "product": product,
         "business_date": date(2026, 8, 17),
-        "status": "queued",
-        "stage": "queued",
+        "status": status,
+        "stage": "complete" if status == "succeeded" else status,
         "requested_by": "cal",
         "request_kind": request_kind,
         "result_snapshot_id": None,
@@ -122,6 +140,7 @@ def test_worker_readiness_is_product_scoped_and_uses_database_time():
     engine = _Engine(
         [
             {
+                "product": "TFO",
                 "worker_id": "worker-1",
                 "lifecycle_status": "idle",
                 "bloomberg_session_status": "not_started",
@@ -138,10 +157,10 @@ def test_worker_readiness_is_product_scoped_and_uses_database_time():
     assert readiness.product == "TFO"
     assert readiness.worker_id == "worker-1"
     sql, parameters = engine.connection.calls[0]
-    assert ":product = ANY(enabled_products)" in sql
+    assert "requested.product = ANY(enabled_products)" in sql
     assert "CURRENT_TIMESTAMP" in sql
-    assert "('starting', 'idle', 'running')" in sql
-    assert parameters == {"product": "TFO", "freshness_seconds": 30}
+    assert "'starting', 'idle', 'running'" in sql
+    assert parameters == {"products": ["TFO"], "freshness_seconds": 30}
 
 
 def test_worker_readiness_fails_closed_when_registry_is_missing():
@@ -184,6 +203,8 @@ def test_worker_readiness_fails_closed_when_registry_is_missing():
     ],
 )
 def test_worker_readiness_requires_eligible_fresh_running_worker(row, reason):
+    if row is not None:
+        row = {"product": "BRENT", **row}
     readiness = gateway.get_worker_readiness("BRENT", engine=_Engine([row]))
 
     assert readiness.ready is False
@@ -209,7 +230,7 @@ def test_submit_refresh_job_coalesces_only_with_the_correct_job_family(
 ):
     monkeypatch.setattr(gateway, "intraday_refresh_enabled", lambda _product: True)
     monkeypatch.setattr(gateway, "settlement_refresh_enabled", lambda _product: True)
-    engine = _Engine([None, _job_row(active_kind)])
+    engine = _Engine([None, None, None, _job_row(active_kind)])
 
     job, created = gateway.submit_refresh_job(
         "cal",
@@ -221,11 +242,194 @@ def test_submit_refresh_job_coalesces_only_with_the_correct_job_family(
 
     assert created is False
     assert job.request_kind == active_kind
-    assert engine.connection.calls[0][1]["request_kind"] == request_kind
-    assert engine.connection.calls[1][1]["request_family"] == request_family
-    active_sql = engine.connection.calls[1][0]
+    assert "pg_advisory_xact_lock" in engine.connection.calls[0][0]
+    assert engine.connection.calls[2][1]["request_kind"] == request_kind
+    assert engine.connection.calls[3][1]["request_family"] == request_family
+    active_sql = engine.connection.calls[3][0]
     assert "request_kind = 'settlement_refresh'" in active_sql
     assert "request_kind IN ('user_refresh', 'daily_tape_seed')" in active_sql
+
+
+def test_worker_readiness_many_reads_all_products_in_one_query():
+    heartbeat = pd.Timestamp("2026-08-24T12:00:00Z").to_pydatetime()
+    engine = _Engine(
+        [
+            [
+                {
+                    "product": "BRENT",
+                    "worker_id": "worker-1",
+                    "lifecycle_status": "idle",
+                    "bloomberg_session_status": "started",
+                    "heartbeat_at": heartbeat,
+                    "lifecycle_is_available": True,
+                    "heartbeat_is_fresh": True,
+                },
+                {
+                    "product": "TFO",
+                    "worker_id": None,
+                    "lifecycle_status": None,
+                    "bloomberg_session_status": None,
+                    "heartbeat_at": None,
+                    "lifecycle_is_available": None,
+                    "heartbeat_is_fresh": None,
+                },
+            ]
+        ]
+    )
+
+    readiness = gateway.get_worker_readiness_many(
+        ["BRENT", "TFO"],
+        engine=engine,
+    )
+
+    assert readiness["BRENT"].ready is True
+    assert readiness["TFO"].reason == "no_eligible_worker"
+    assert len(engine.connection.calls) == 1
+    sql, parameters = engine.connection.calls[0]
+    assert "LEFT JOIN LATERAL" in sql
+    assert parameters == {
+        "products": ["BRENT", "TFO"],
+        "freshness_seconds": 30,
+    }
+
+
+def test_settlement_batch_atomically_inserts_or_joins_all_products(monkeypatch):
+    products = gateway.SETTLEMENT_REFRESH_PRODUCTS
+    rows = [
+        _job_row(
+            gateway.SETTLEMENT_REQUEST_KIND,
+            product=product,
+            job_id=f"00000000-0000-0000-0000-{index:012d}",
+        )
+        for index, product in enumerate(products, start=1)
+    ]
+    engine = _Engine(
+        [None, None, None, None, [], [rows[0], rows[2]], rows]
+    )
+    monkeypatch.setattr(gateway, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(
+        gateway,
+        "get_worker_readiness_many",
+        lambda requested, *, engine: {
+            product: _worker_readiness(product) for product in requested
+        },
+    )
+
+    jobs = gateway.submit_settlement_refresh_jobs(
+        "cal",
+        engine=engine,
+        business_date=date(2026, 8, 17),
+    )
+
+    assert tuple(jobs) == products
+    assert [jobs[product][1] for product in products] == [True, False, True, False]
+    assert len(engine.connection.calls) == 7
+    assert [
+        call[1]["lock_key"] for call in engine.connection.calls[:4]
+    ] == [
+        "bbg_option_chain_refresh:BRENT",
+        "bbg_option_chain_refresh:TFO",
+        "bbg_option_chain_refresh:ON",
+        "bbg_option_chain_refresh:LNE",
+    ]
+    assert "request_kind IN ('user_refresh', 'daily_tape_seed')" in (
+        engine.connection.calls[4][0]
+    )
+    assert "INSERT INTO" in engine.connection.calls[5][0]
+    assert "ON CONFLICT DO NOTHING" in engine.connection.calls[5][0]
+    assert engine.connection.calls[6][1]["products"] == list(products)
+
+
+def test_settlement_batch_rejects_active_intraday_before_inserting(monkeypatch):
+    engine = _Engine(
+        [None, None, None, None, [{"product": "TFO"}]]
+    )
+    monkeypatch.setattr(gateway, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(
+        gateway,
+        "get_worker_readiness_many",
+        lambda requested, *, engine: {
+            product: _worker_readiness(product) for product in requested
+        },
+    )
+
+    with pytest.raises(
+        gateway.SettlementRefreshBatchError,
+        match="intraday refresh is already active for TFO",
+    ):
+        gateway.submit_settlement_refresh_jobs(
+            "cal",
+            engine=engine,
+            business_date=date(2026, 8, 17),
+        )
+
+    assert len(engine.connection.calls) == 5
+    assert not any(
+        "INSERT INTO" in sql for sql, _parameters in engine.connection.calls
+    )
+
+
+def test_intraday_submission_rejects_active_settlement_under_product_lock(
+    monkeypatch,
+):
+    engine = _Engine(
+        [
+            None,
+            {
+                "product": "BRENT",
+                "request_kind": gateway.SETTLEMENT_REQUEST_KIND,
+            },
+        ]
+    )
+    monkeypatch.setattr(gateway, "intraday_refresh_enabled", lambda _product: True)
+
+    with pytest.raises(
+        gateway.SettlementRefreshBatchError,
+        match="settlement refresh is already active for BRENT",
+    ):
+        gateway.submit_refresh_job(
+            "cal",
+            product="BRENT",
+            engine=engine,
+            business_date=date(2026, 8, 17),
+        )
+
+    assert len(engine.connection.calls) == 2
+    assert "pg_advisory_xact_lock" in engine.connection.calls[0][0]
+    assert "request_kind = 'settlement_refresh'" in engine.connection.calls[1][0]
+    assert not any(
+        "INSERT INTO" in sql for sql, _parameters in engine.connection.calls
+    )
+
+
+def test_get_refresh_jobs_reads_product_job_pairs_in_one_query():
+    rows = [
+        _job_row(
+            gateway.SETTLEMENT_REQUEST_KIND,
+            product="BRENT",
+            job_id="00000000-0000-0000-0000-000000000001",
+        ),
+        _job_row(
+            gateway.SETTLEMENT_REQUEST_KIND,
+            product="TFO",
+            job_id="00000000-0000-0000-0000-000000000002",
+        ),
+    ]
+    engine = _Engine([rows])
+
+    jobs = gateway.get_refresh_jobs(
+        {
+            "BRENT": rows[0]["job_id"],
+            "TFO": rows[1]["job_id"],
+        },
+        engine=engine,
+    )
+
+    assert tuple(jobs) == ("BRENT", "TFO")
+    assert len(engine.connection.calls) == 1
+    sql, parameters = engine.connection.calls[0]
+    assert "requested.job_id = jobs.job_id" in sql
+    assert parameters["products"] == ["BRENT", "TFO"]
 
 
 def test_only_calibrator_role_can_refresh_bloomberg():
@@ -327,7 +531,7 @@ def test_refresh_poll_reports_fresh_reuse_and_selects_reused_snapshot(monkeypatc
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
 
     result = history.manage_bloomberg_refresh(
@@ -364,7 +568,7 @@ def test_capacity_failure_preserves_displayed_snapshot_and_recovers_polling(monk
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
 
     result = history.manage_bloomberg_refresh(
@@ -387,13 +591,6 @@ def test_capacity_failure_preserves_displayed_snapshot_and_recovers_polling(monk
 
 def test_settlement_click_uses_shared_job_store_and_disables_both_buttons(monkeypatch):
     submitted = []
-    job = SimpleNamespace(
-        as_dict=lambda: {
-            "job_id": "settlement-job",
-            "request_kind": gateway.SETTLEMENT_REQUEST_KIND,
-            "status": "queued",
-        }
-    )
     monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
     monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
     monkeypatch.setattr(
@@ -409,18 +606,65 @@ def test_settlement_click_uses_shared_job_store_and_disables_both_buttons(monkey
         ),
     )
 
-    def _submit(requested_by, *, product, request_kind):
-        submitted.append((requested_by, product, request_kind))
-        return job, True
+    def _submit(requested_by, *, products):
+        submitted.append((requested_by, products))
+        return {
+            product: (
+                SimpleNamespace(
+                    as_dict=lambda product=product: {
+                        "job_id": f"settlement-job-{product}",
+                        "product": product,
+                        "request_kind": gateway.SETTLEMENT_REQUEST_KIND,
+                        "status": "queued",
+                    }
+                ),
+                True,
+            )
+            for product in products
+        }
 
-    monkeypatch.setattr(history, "submit_refresh_job", _submit)
+    monkeypatch.setattr(history, "submit_settlement_refresh_jobs", _submit)
     result = history.manage_bloomberg_refresh(0, 1, 0, 0, "BRENT", None, None)
 
-    assert submitted == [("cal", "BRENT", gateway.SETTLEMENT_REQUEST_KIND)]
-    assert result[0]["BRENT"]["job_id"] == "settlement-job"
+    assert submitted == [("cal", ("BRENT", "TFO", "ON", "LNE"))]
+    assert set(result[0]) == {"BRENT", "TFO", "ON", "LNE"}
+    assert result[0]["BRENT"]["job_id"] == "settlement-job-BRENT"
     assert result[1] == {}
     assert result[2:5] == (False, True, True)
-    assert result[5] == "Settlement refresh queued."
+    assert result[5] == "Settlement refresh queued for BRENT, TFO, ON, and LNE."
+
+
+def test_settlement_click_surfaces_safe_batch_preflight_rejection(monkeypatch):
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(
+        history,
+        "_authorize_refresh",
+        lambda: SimpleNamespace(subject="cal"),
+    )
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(
+            triggered_id="brent-vol-history-settlement-refresh-button"
+        ),
+    )
+    monkeypatch.setattr(
+        history,
+        "submit_settlement_refresh_jobs",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            gateway.SettlementRefreshBatchError(
+                "An intraday refresh is already active for TFO."
+            )
+        ),
+    )
+
+    result = history.manage_bloomberg_refresh(0, 1, 0, 0, "BRENT", None, None)
+
+    assert result[0] == {}
+    assert result[2:5] == (True, False, False)
+    assert result[5] == "An intraday refresh is already active for TFO."
+    assert result[6].endswith("brent-vol-history-refresh-status-danger")
 
 
 def test_settlement_completion_selects_result_and_reports_pending_oi(monkeypatch):
@@ -450,7 +694,7 @@ def test_settlement_completion_selects_result_and_reports_pending_oi(monkeypatch
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
 
     result = history.manage_bloomberg_refresh(
@@ -469,6 +713,296 @@ def test_settlement_completion_selects_result_and_reports_pending_oi(monkeypatch
     assert result[5] == (
         "Settlements refreshed through 14 Aug · OI pending for 14 Aug."
     )
+
+
+def _page_job(
+    product,
+    status,
+    *,
+    stage="queued",
+    result_status=None,
+    metrics=None,
+):
+    payload = {
+        "job_id": f"job-{product}",
+        "product": product,
+        "business_date": "2026-08-17",
+        "status": status,
+        "stage": stage,
+        "requested_by": "cal",
+        "request_kind": gateway.SETTLEMENT_REQUEST_KIND,
+        "result_snapshot_id": (
+            f"snapshot-{product}" if status == "succeeded" else None
+        ),
+        "result_status": result_status,
+        "previous_snapshot_id": None,
+        "metrics": dict(metrics or {}),
+        "last_error": "provider failure" if status == "failed" else None,
+        "created_at": "2026-08-17T08:30:00Z",
+        "updated_at": "2026-08-17T08:30:15Z",
+    }
+    return SimpleNamespace(**payload, as_dict=lambda: dict(payload))
+
+
+def test_settlement_batch_poll_reports_every_product_and_keeps_polling(monkeypatch):
+    jobs = {
+        "BRENT": _page_job("BRENT", "succeeded", result_status="refreshed"),
+        "TFO": _page_job("TFO", "failed"),
+        "ON": _page_job("ON", "queued"),
+        "LNE": _page_job("LNE", "running", stage="settlement_history"),
+    }
+    calls = []
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+
+    def _get_jobs(job_ids):
+        calls.append(dict(job_ids))
+        return jobs
+
+    monkeypatch.setattr(history, "get_refresh_jobs", _get_jobs)
+    active = {product: job.as_dict() for product, job in jobs.items()}
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        1,
+        3,
+        0,
+        "BRENT",
+        active,
+        {"TFO": {"result_snapshot_id": "old-tfo"}},
+    )
+
+    assert len(calls) == 1
+    assert set(calls[0]) == {"BRENT", "TFO", "ON", "LNE"}
+    assert result[1]["BRENT"]["result_snapshot_id"] == "snapshot-BRENT"
+    assert result[1]["TFO"]["result_snapshot_id"] == "old-tfo"
+    assert result[2:5] == (False, True, True)
+    assert result[5].startswith("Settlements 2/4 finished")
+    assert all(f"{product}:" in result[5] for product in jobs)
+    assert result[6].endswith("brent-vol-history-refresh-status-warning")
+
+
+def test_settlement_batch_is_danger_only_when_every_product_failed():
+    jobs = {
+        product: _page_job(product, "failed")
+        for product in gateway.SETTLEMENT_REFRESH_PRODUCTS
+    }
+
+    message, status_class = history._settlement_batch_status(jobs)
+
+    assert message.startswith("Settlements 4/4 finished")
+    assert status_class.endswith("brent-vol-history-refresh-status-danger")
+
+
+def test_nonselected_settlement_completion_does_not_trigger_page_reload(monkeypatch):
+    jobs = {
+        "BRENT": _page_job("BRENT", "running", stage="settlement_history"),
+        "TFO": _page_job("TFO", "succeeded", result_status="refreshed"),
+        "ON": _page_job("ON", "running", stage="queued"),
+        "LNE": _page_job("LNE", "running", stage="queued"),
+    }
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(history, "get_refresh_jobs", lambda _job_ids: jobs)
+    active = {
+        product: {**job.as_dict(), "status": "queued"}
+        for product, job in jobs.items()
+    }
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        1,
+        3,
+        0,
+        "BRENT",
+        active,
+        {"BRENT": {"result_snapshot_id": "displayed-brent"}},
+    )
+
+    assert result[0] is not history.no_update
+    assert result[1] is history.no_update
+    assert result[2] is False
+
+
+def test_selecting_completed_product_emits_only_its_completion(monkeypatch):
+    jobs = {
+        product: _page_job(product, "succeeded", result_status="refreshed")
+        for product in gateway.SETTLEMENT_REFRESH_PRODUCTS
+    }
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-product"),
+    )
+    monkeypatch.setattr(history, "get_refresh_jobs", lambda _job_ids: jobs)
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        1,
+        4,
+        0,
+        "TFO",
+        {product: job.as_dict() for product, job in jobs.items()},
+        {"BRENT": {"result_snapshot_id": "snapshot-BRENT"}},
+    )
+
+    assert result[1]["TFO"]["result_snapshot_id"] == "snapshot-TFO"
+    assert set(result[1]) == {"BRENT", "TFO"}
+    assert result[2] is True
+    assert result[5].startswith("Settlements 4/4 finished")
+
+
+def test_intraday_after_completed_batch_clears_stale_settlement_jobs(monkeypatch):
+    completed_settlements = {
+        product: _page_job(product, "succeeded", result_status="refreshed")
+        for product in gateway.SETTLEMENT_REFRESH_PRODUCTS
+    }
+    intraday_payload = {
+        "job_id": "intraday-BRENT",
+        "product": "BRENT",
+        "status": "queued",
+        "stage": "queued",
+        "request_kind": gateway.INTRADAY_REQUEST_KIND,
+        "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+    }
+    intraday_job = SimpleNamespace(
+        **intraday_payload,
+        as_dict=lambda: dict(intraday_payload),
+    )
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(
+        history,
+        "_authorize_refresh",
+        lambda: SimpleNamespace(subject="cal"),
+    )
+    monkeypatch.setattr(
+        history,
+        "submit_refresh_job",
+        lambda *_args, **_kwargs: (intraday_job, True),
+    )
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-button"),
+    )
+    completions = {
+        product: {"result_snapshot_id": f"snapshot-{product}"}
+        for product in gateway.SETTLEMENT_REFRESH_PRODUCTS
+    }
+
+    submitted = history.manage_bloomberg_refresh(
+        1,
+        1,
+        4,
+        0,
+        "BRENT",
+        {
+            product: job.as_dict()
+            for product, job in completed_settlements.items()
+        },
+        completions,
+    )
+
+    assert set(submitted[0]) == {"BRENT"}
+    assert submitted[1] == completions
+
+    running_payload = {
+        **intraday_payload,
+        "status": "running",
+        "stage": "market_data",
+    }
+    running_job = SimpleNamespace(
+        **running_payload,
+        result_status=None,
+        metrics={},
+        last_error=None,
+        as_dict=lambda: dict(running_payload),
+    )
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(
+        history,
+        "get_refresh_jobs",
+        lambda _job_ids: {"BRENT": running_job},
+    )
+
+    polled = history.manage_bloomberg_refresh(
+        1,
+        1,
+        5,
+        0,
+        "BRENT",
+        submitted[0],
+        submitted[1],
+    )
+
+    assert polled[5] == "Fetching market data…"
+    assert not polled[5].startswith("Settlements")
+    assert polled[2] is False
+
+
+def test_missing_batch_job_becomes_terminal_failure_without_losing_snapshot(
+    monkeypatch,
+):
+    jobs = {
+        product: _page_job(product, "succeeded", result_status="refreshed")
+        for product in gateway.SETTLEMENT_REFRESH_PRODUCTS
+    }
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _product: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: object())
+    monkeypatch.setattr(
+        history,
+        "ctx",
+        SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
+    )
+    monkeypatch.setattr(
+        history,
+        "get_refresh_jobs",
+        lambda _job_ids: {
+            product: job for product, job in jobs.items() if product != "TFO"
+        },
+    )
+    prior_completion = {
+        "TFO": {
+            "job_id": "old-tfo-job",
+            "result_snapshot_id": "old-tfo-snapshot",
+        }
+    }
+
+    result = history.manage_bloomberg_refresh(
+        0,
+        1,
+        4,
+        0,
+        "BRENT",
+        {product: job.as_dict() for product, job in jobs.items()},
+        prior_completion,
+    )
+
+    assert result[0]["TFO"]["status"] == "failed"
+    assert result[1]["TFO"]["result_snapshot_id"] == "old-tfo-snapshot"
+    assert result[2] is True
+    assert "TFO: failed" in result[5]
 
 
 def test_offline_worker_disables_refresh_and_does_not_submit(monkeypatch):
@@ -553,7 +1087,7 @@ def test_active_poll_does_not_reemit_unchanged_job_or_completion(monkeypatch):
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
 
     result = history.manage_bloomberg_refresh(
@@ -594,7 +1128,7 @@ def test_queued_job_over_30_seconds_reports_ready_worker_as_busy(monkeypatch):
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
 
     result = history.manage_bloomberg_refresh(
@@ -640,7 +1174,7 @@ def test_fresh_queued_job_briefly_reports_waiting_for_ready_worker(monkeypatch):
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
 
     result = history.manage_bloomberg_refresh(
@@ -681,14 +1215,17 @@ def test_offline_queued_job_remains_under_active_polling(monkeypatch):
         SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"),
     )
     monkeypatch.setattr(
-        history, "get_refresh_job", lambda _job_id, *, product: job
+        history, "get_refresh_jobs", lambda _job_ids: {"BRENT": job}
     )
     monkeypatch.setattr(
         history,
-        "get_worker_readiness",
-        lambda product: _worker_readiness(
-            product, ready=False, reason="stale_heartbeat"
-        ),
+        "get_worker_readiness_many",
+        lambda products: {
+            product: _worker_readiness(
+                product, ready=False, reason="stale_heartbeat"
+            )
+            for product in products
+        },
     )
 
     result = history.manage_bloomberg_refresh(
@@ -740,6 +1277,102 @@ def test_partial_settlement_message_reports_only_persisted_through_date():
         "Settlements partially refreshed through 13 Aug · 14 Aug unavailable · "
         "OI pending for 13 Aug."
     )
+
+
+def _calibrated_catalog(publication_id):
+    return pd.DataFrame(
+        [
+            {
+                "publication_id": publication_id,
+                "run_id": "run-1",
+                "commodity": "BRENT",
+                "publication_cob_date": "2026-08-14",
+                "published_at": "2026-08-14T18:00:00Z",
+                "published_by": "cal",
+            }
+        ]
+    )
+
+
+def _calibrated_points(volatility=0.30):
+    return pd.DataFrame(
+        [
+            {
+                "contract_date": "2026-12-01",
+                "option_expiration_date": "2026-10-25",
+                "strike": 75.0,
+                "delta": 0.25,
+                "put_call": "C",
+                "volatility": volatility,
+                "forward_value": 78.0,
+                "source_name": "exchange",
+                "calibration_basis": "settlement",
+                "surface_region": "market",
+                "blend_classification": "observed",
+                "calibration_method": "spline",
+                "calibration_policy_version": "v1",
+                "input_fingerprint": "fingerprint",
+                "created_at": "2026-08-14T18:00:00Z",
+            }
+        ]
+    )
+
+
+def test_calibrated_points_cache_is_bounded_copied_and_publication_keyed(monkeypatch):
+    history._cached_calibrated_surface_points.cache_clear()
+    publication_ids = iter(["publication-1", "publication-1", "publication-2"])
+    calls = {"catalog": 0, "points": 0}
+    engine = object()
+    monkeypatch.setattr(history, "get_database_engine", lambda **_kwargs: engine)
+
+    def _read_sql(query, _engine, params):
+        sql = str(query)
+        if history.CALIBRATED_PUBLICATION_TABLE in sql:
+            calls["catalog"] += 1
+            return _calibrated_catalog(next(publication_ids))
+        calls["points"] += 1
+        assert params["contract_dates"] == (date(2026, 12, 1),)
+        return _calibrated_points()
+
+    monkeypatch.setattr(history.pd, "read_sql", _read_sql)
+
+    first = history.load_latest_calibrated_surface(
+        "2026-08-14",
+        ["2026-12-01", "2026-12-01"],
+    )
+    first.loc[first.index[0], "volatility"] = 9.0
+    second = history.load_latest_calibrated_surface(
+        "2026-08-14",
+        ["2026-12-01"],
+    )
+    third = history.load_latest_calibrated_surface(
+        "2026-08-14",
+        ["2026-12-01"],
+    )
+
+    assert calls == {"catalog": 3, "points": 2}
+    assert second.iloc[0]["volatility"] == pytest.approx(0.30)
+    assert history.calibrated_publication_metadata(second)["publication_id"] == (
+        "publication-1"
+    )
+    assert history.calibrated_publication_metadata(third)["publication_id"] == (
+        "publication-2"
+    )
+    assert history._cached_calibrated_surface_points.cache_info().maxsize == 8
+
+
+def test_calibrated_cache_preserves_invalid_points_status(monkeypatch):
+    reads = iter([_calibrated_catalog("publication-1"), _calibrated_points(-1.0)])
+    monkeypatch.setattr(history.pd, "read_sql", lambda *_args, **_kwargs: next(reads))
+
+    surface = history.load_latest_calibrated_surface(
+        "2026-08-14",
+        ["2026-12-01"],
+        engine=object(),
+    )
+
+    assert surface.empty
+    assert surface.attrs["publication_status"] == "invalid_points"
 
 
 def _intraday_chain() -> pd.DataFrame:
@@ -982,7 +1615,7 @@ def test_layout_orders_primary_and_trade_controls_in_sticky_toolbar():
     assert toolbar.children[0].children[1].id == "brent-vol-history-product"
     assert [
         item["value"] for item in toolbar.children[0].children[1].options
-    ] == ["BRENT", "TFO", "ON", "LNE"]
+    ] == ["BRENT", "TFO", "ON", "LNE", "JKM"]
     assert gateway.SUPPORTED_PRODUCTS == frozenset({"BRENT", "TFO", "ON", "LNE"})
     assert toolbar.children[1].children[1].id == "brent-vol-history-x-axis"
     refresh_row = toolbar.children[2].children[1]

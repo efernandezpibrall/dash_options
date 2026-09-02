@@ -376,6 +376,51 @@ def test_explicit_ttf_mode_reweights_only_approved_extrapolated_rows():
     assert calibration_eligibility_error(selected) is None
 
 
+@pytest.mark.parametrize("product", ["TTF", "JKM", "NBP"])
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        "official_surface_euro_gas_lng_v1_smile_template_v4:extrap",
+        "official_surface_euro_gas_lng_v12_smile_template_v103:extrap",
+    ],
+)
+def test_shared_gas_mode_accepts_versioned_euro_gas_lng_lineage(
+    product,
+    source_name,
+):
+    selected = select_expiry_observations(
+        _valid_extrapolated_observations().assign(source_name=source_name),
+        "Apr-29",
+        include_extrapolated=True,
+        commodity=product,
+    )
+
+    assert len(selected) == 11
+    assert set(selected["calibration_basis"]) == {"extrapolated"}
+    assert set(selected["source_name"]) == {source_name}
+    assert selected["weight"].tolist() == [1.0] * 11
+    assert calibration_eligibility_error(selected, commodity=product) is None
+
+
+@pytest.mark.parametrize(
+    "source_name",
+    [
+        "official_surface_euro_gas_lng_v_smile_template_v4:extrap",
+        "official_surface_euro_gas_lng_v1_smile_template_v:extrap",
+        "official_surface_euro_gas_lng_v1_smile_template_v4:extrap:manual",
+        "official_surface_other_v1_smile_template_v4:extrap",
+    ],
+)
+def test_shared_gas_mode_rejects_near_miss_source_lineage(source_name):
+    with pytest.raises(ValueError, match="Unsupported extrapolated NBP"):
+        select_expiry_observations(
+            _valid_extrapolated_observations().assign(source_name=source_name),
+            "Apr-29",
+            include_extrapolated=True,
+            commodity="NBP",
+        )
+
+
 def test_explicit_ttf_mode_rejects_mixed_and_unsupported_provenance():
     mixed = pd.concat(
         [

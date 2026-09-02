@@ -189,7 +189,7 @@ def _register_expiry_selection_callback(product: str):
     @callback(
         Output(f"{product}-param-table", "selected_rows", allow_duplicate=True),
         Input(f"{product}-param-table", "data"),
-        State("vol-calibration-requested-expiry", "data"),
+        State("vol-calibration-requested-expiry", "data", allow_optional=True),
         prevent_initial_call=True,
     )
     def select_requested_expiry(rows, requested_expiry):

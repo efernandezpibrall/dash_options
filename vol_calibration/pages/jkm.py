@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import hashlib
 from io import StringIO, BytesIO
 import json
+import os
 from uuid import uuid4
 
 import pandas as pd
@@ -1659,6 +1660,26 @@ def publish_jkm_calibrated_surface(
                 f"Complete JKM publication requires {len(rows_by_period)} "
                 f"expiries; built {actual_expiries}."
             )
+        input_manifest = {
+            'commodity': 'JKM',
+            'cob_date': pd.Timestamp(trading_date).date().isoformat(),
+            'source_snapshots': [
+                {
+                    'source': 'ICAP official smile plus ICE_JKM_MO forward',
+                    'revision': pd.Timestamp(trading_date).date().isoformat(),
+                }
+            ],
+            'raw_observations': json.loads(
+                market_data.to_json(orient='records', date_format='iso')
+            ),
+            'manual_trade_ids': [],
+            'base_publication_id': (current_publication or {}).get(
+                'publication_id'
+            ),
+            'model_version': DEFAULT_CALIBRATION_MODEL_VERSION,
+            'policy_version': JKM_HYBRID_POLICY_VERSION,
+            'code_revision': os.getenv('APP_CODE_REVISION', 'unknown'),
+        }
         payload = publish_hybrid_surface(
             get_database_engine(),
             complete_surface,
@@ -1681,6 +1702,7 @@ def publish_jkm_calibrated_surface(
                 "Published from the governed JKM settlement nodes after complete "
                 "PCHIP-core/Wing-tail batch calibration."
             ),
+            input_manifest=input_manifest,
         )
     except Exception as exc:
         return (

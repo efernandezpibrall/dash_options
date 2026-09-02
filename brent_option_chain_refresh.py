@@ -18,7 +18,8 @@ JOB_TABLE = "at_lng.bbg_option_chain_refresh_jobs"
 WORKER_TABLE = "at_lng.bbg_option_chain_workers"
 WORKER_FRESHNESS_SECONDS = 30
 DEFAULT_PRODUCT = "BRENT"
-SUPPORTED_PRODUCTS = frozenset({"BRENT", "TFO", "ON", "LNE"})
+SETTLEMENT_REFRESH_PRODUCTS = ("BRENT", "TFO", "ON", "LNE")
+SUPPORTED_PRODUCTS = frozenset(SETTLEMENT_REFRESH_PRODUCTS)
 DUBAI = ZoneInfo("Asia/Dubai")
 TERMINAL_STATUSES = frozenset({"succeeded", "failed"})
 INTRADAY_REQUEST_KIND = "user_refresh"
@@ -26,6 +27,10 @@ SETTLEMENT_REQUEST_KIND = "settlement_refresh"
 SUPPORTED_REQUEST_KINDS = frozenset(
     {INTRADAY_REQUEST_KIND, SETTLEMENT_REQUEST_KIND}
 )
+
+
+class SettlementRefreshBatchError(RuntimeError):
+    """Safe, user-actionable rejection of an all-product settlement batch."""
 
 
 def enabled_products() -> frozenset[str]:
@@ -85,6 +90,30 @@ def settlement_refresh_enabled(product: str = DEFAULT_PRODUCT) -> bool:
 
 def dubai_business_date() -> date:
     return datetime.now(DUBAI).date()
+
+
+def _lock_refresh_products(connection, products: tuple[str, ...]) -> None:
+    """Serialize cross-family dashboard submissions in canonical product order."""
+
+    canonical_positions = {
+        product: position
+        for position, product in enumerate(SETTLEMENT_REFRESH_PRODUCTS)
+    }
+    ordered_products = sorted(
+        dict.fromkeys(products),
+        key=lambda product: canonical_positions[product],
+    )
+    for product in ordered_products:
+        connection.execute(
+            text(
+                """
+                SELECT pg_advisory_xact_lock(
+                    hashtextextended(:lock_key, 0)
+                )
+                """
+            ),
+            {"lock_key": f"bbg_option_chain_refresh:{product}"},
+        )
 
 
 @dataclass(frozen=True)
@@ -166,73 +195,126 @@ def get_worker_readiness(
     """
 
     normalized_product = normalize_product(product)
+    return get_worker_readiness_many(
+        (normalized_product,),
+        engine=engine,
+        freshness_seconds=freshness_seconds,
+    )[normalized_product]
+
+
+def get_worker_readiness_many(
+    products: tuple[str, ...] | list[str] = SETTLEMENT_REFRESH_PRODUCTS,
+    *,
+    engine=None,
+    freshness_seconds: int = WORKER_FRESHNESS_SECONDS,
+) -> dict[str, WorkerReadiness]:
+    """Return worker readiness for several products with one registry query."""
+
+    normalized_products = tuple(
+        dict.fromkeys(normalize_product(product) for product in products)
+    )
+    if not normalized_products:
+        return {}
     if freshness_seconds <= 0:
         raise ValueError("Worker freshness must be positive")
     db_engine = engine or get_database_engine(required=False)
     if db_engine is None:
-        return WorkerReadiness(
-            product=normalized_product,
-            ready=False,
-            reason="registry_unavailable",
-        )
+        return {
+            product: WorkerReadiness(
+                product=product,
+                ready=False,
+                reason="registry_unavailable",
+            )
+            for product in normalized_products
+        }
     try:
         with db_engine.connect() as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 text(
                     f"""
-                    SELECT worker_id,
-                           lifecycle_status,
-                           bloomberg_session_status,
-                           heartbeat_at,
-                           lifecycle_status IN ('starting', 'idle', 'running')
-                               AS lifecycle_is_available,
-                           heartbeat_at >= CURRENT_TIMESTAMP
-                               - CAST(:freshness_seconds AS integer)
-                                 * INTERVAL '1 second'
-                               AS heartbeat_is_fresh
-                    FROM {WORKER_TABLE}
-                    WHERE :product = ANY(enabled_products)
-                    ORDER BY heartbeat_at DESC NULLS LAST, worker_id
-                    LIMIT 1
+                    WITH requested_products AS (
+                        SELECT product, position
+                        FROM unnest(CAST(:products AS text[]))
+                             WITH ORDINALITY AS requested(product, position)
+                    )
+                    SELECT requested.product,
+                           worker.worker_id,
+                           worker.lifecycle_status,
+                           worker.bloomberg_session_status,
+                           worker.heartbeat_at,
+                           worker.lifecycle_is_available,
+                           worker.heartbeat_is_fresh
+                    FROM requested_products AS requested
+                    LEFT JOIN LATERAL (
+                        SELECT worker_id,
+                               lifecycle_status,
+                               bloomberg_session_status,
+                               heartbeat_at,
+                               lifecycle_status IN (
+                                   'starting', 'idle', 'running'
+                               ) AS lifecycle_is_available,
+                               heartbeat_at >= CURRENT_TIMESTAMP
+                                   - CAST(:freshness_seconds AS integer)
+                                     * INTERVAL '1 second'
+                                   AS heartbeat_is_fresh
+                        FROM {WORKER_TABLE}
+                        WHERE requested.product = ANY(enabled_products)
+                        ORDER BY heartbeat_at DESC NULLS LAST, worker_id
+                        LIMIT 1
+                    ) AS worker ON TRUE
+                    ORDER BY requested.position
                     """
                 ),
                 {
-                    "product": normalized_product,
+                    "products": list(normalized_products),
                     "freshness_seconds": int(freshness_seconds),
                 },
-            ).mappings().first()
+            ).mappings().all()
     except Exception:
-        return WorkerReadiness(
-            product=normalized_product,
-            ready=False,
-            reason="registry_unavailable",
-        )
+        return {
+            product: WorkerReadiness(
+                product=product,
+                ready=False,
+                reason="registry_unavailable",
+            )
+            for product in normalized_products
+        }
 
-    if row is None:
-        return WorkerReadiness(
-            product=normalized_product,
-            ready=False,
-            reason="no_eligible_worker",
+    readiness_by_product = {}
+    for row in rows:
+        value = dict(row)
+        product = normalize_product(value["product"])
+        if not value.get("worker_id"):
+            reason = "no_eligible_worker"
+        elif not bool(value.get("lifecycle_is_available")):
+            reason = "worker_not_running"
+        elif not bool(value.get("heartbeat_is_fresh")):
+            reason = "stale_heartbeat"
+        else:
+            reason = "ready"
+        heartbeat_at = value.get("heartbeat_at")
+        readiness_by_product[product] = WorkerReadiness(
+            product=product,
+            ready=reason == "ready",
+            reason=reason,
+            worker_id=(
+                str(value["worker_id"]) if value.get("worker_id") else None
+            ),
+            lifecycle_status=value.get("lifecycle_status"),
+            bloomberg_session_status=value.get("bloomberg_session_status"),
+            heartbeat_at=(heartbeat_at.isoformat() if heartbeat_at else None),
         )
-    value = dict(row)
-    lifecycle_available = bool(value.get("lifecycle_is_available"))
-    heartbeat_is_fresh = bool(value.get("heartbeat_is_fresh"))
-    if not lifecycle_available:
-        reason = "worker_not_running"
-    elif not heartbeat_is_fresh:
-        reason = "stale_heartbeat"
-    else:
-        reason = "ready"
-    heartbeat_at = value.get("heartbeat_at")
-    return WorkerReadiness(
-        product=normalized_product,
-        ready=reason == "ready",
-        reason=reason,
-        worker_id=(str(value["worker_id"]) if value.get("worker_id") else None),
-        lifecycle_status=value.get("lifecycle_status"),
-        bloomberg_session_status=value.get("bloomberg_session_status"),
-        heartbeat_at=(heartbeat_at.isoformat() if heartbeat_at else None),
-    )
+    return {
+        product: readiness_by_product.get(
+            product,
+            WorkerReadiness(
+                product=product,
+                ready=False,
+                reason="no_eligible_worker",
+            ),
+        )
+        for product in normalized_products
+    }
 
 
 def submit_refresh_job(
@@ -252,12 +334,12 @@ def submit_refresh_job(
         if normalized_kind == SETTLEMENT_REQUEST_KIND
         else intraday_refresh_enabled(normalized_product)
     )
+    refresh_name = (
+        "settlement"
+        if normalized_kind == SETTLEMENT_REQUEST_KIND
+        else "intraday"
+    )
     if not enabled:
-        refresh_name = (
-            "settlement"
-            if normalized_kind == SETTLEMENT_REQUEST_KIND
-            else "intraday"
-        )
         raise PermissionError(
             f"Bloomberg {refresh_name} refresh is disabled by configuration."
         )
@@ -280,6 +362,46 @@ def submit_refresh_job(
         ),
     }
     with db_engine.begin() as connection:
+        _lock_refresh_products(connection, (normalized_product,))
+        conflicting_kind = (
+            "intraday"
+            if normalized_kind == SETTLEMENT_REQUEST_KIND
+            else "settlement"
+        )
+        conflicting = connection.execute(
+            text(
+                f"""
+                SELECT product, request_kind
+                FROM {JOB_TABLE}
+                WHERE product = :product
+                  AND status IN ('queued', 'running')
+                  AND (
+                    (
+                      :conflicting_kind = 'settlement'
+                      AND request_kind = 'settlement_refresh'
+                    )
+                    OR (
+                      :conflicting_kind = 'intraday'
+                      AND request_kind IN ('user_refresh', 'daily_tape_seed')
+                    )
+                  )
+                ORDER BY created_at, job_id
+                LIMIT 1
+                """
+            ),
+            {**parameters, "conflicting_kind": conflicting_kind},
+        ).mappings().first()
+        if conflicting is not None:
+            active_name = (
+                "settlement"
+                if conflicting_kind == "settlement"
+                else "intraday"
+            )
+            raise SettlementRefreshBatchError(
+                f"A Bloomberg {active_name} refresh is already active for "
+                f"{normalized_product}. Wait for it to finish before starting "
+                f"a {refresh_name} refresh."
+            )
         inserted = connection.execute(
             text(
                 f"""
@@ -327,6 +449,138 @@ def submit_refresh_job(
     return RefreshJobView.from_mapping(active), False
 
 
+def submit_settlement_refresh_jobs(
+    requested_by: str,
+    *,
+    products: tuple[str, ...] | list[str] = SETTLEMENT_REFRESH_PRODUCTS,
+    engine=None,
+    business_date: date | None = None,
+) -> dict[str, tuple[RefreshJobView, bool]]:
+    """Atomically insert or join settlement jobs for every requested product."""
+
+    normalized_products = tuple(
+        dict.fromkeys(normalize_product(product) for product in products)
+    )
+    if not normalized_products:
+        raise ValueError("At least one settlement product is required.")
+    disabled = [
+        product
+        for product in normalized_products
+        if not settlement_refresh_enabled(product)
+    ]
+    if disabled:
+        raise SettlementRefreshBatchError(
+            "Bloomberg settlement refresh is disabled for " + ", ".join(disabled) + "."
+        )
+    if not requested_by.strip():
+        raise PermissionError("An authenticated user is required.")
+
+    db_engine = engine or get_database_engine(required=True)
+    readiness = get_worker_readiness_many(
+        normalized_products,
+        engine=db_engine,
+    )
+    unavailable = [
+        product for product in normalized_products if not readiness[product].ready
+    ]
+    if unavailable:
+        reasons = ", ".join(
+            f"{product} ({readiness[product].reason})" for product in unavailable
+        )
+        raise SettlementRefreshBatchError(
+            f"Bloomberg workers are unavailable for {reasons}."
+        )
+
+    requested_date = business_date or dubai_business_date()
+    batch_id = uuid.uuid4()
+    parameters = {
+        "products": list(normalized_products),
+        "business_date": requested_date,
+        "requested_by": requested_by.strip(),
+        "batch_id": str(batch_id),
+    }
+    with db_engine.begin() as connection:
+        _lock_refresh_products(connection, normalized_products)
+        active_intraday = connection.execute(
+            text(
+                f"""
+                SELECT product
+                FROM {JOB_TABLE}
+                WHERE product = ANY(CAST(:products AS text[]))
+                  AND status IN ('queued', 'running')
+                  AND request_kind IN ('user_refresh', 'daily_tape_seed')
+                ORDER BY array_position(
+                    CAST(:products AS text[]), product
+                ), created_at, job_id
+                """
+            ),
+            parameters,
+        ).mappings().all()
+        if active_intraday:
+            busy_products = tuple(
+                dict.fromkeys(str(row["product"]) for row in active_intraday)
+            )
+            raise SettlementRefreshBatchError(
+                "An intraday refresh is already active for "
+                + ", ".join(busy_products)
+                + ". Wait for it to finish before refreshing settlements."
+            )
+
+        inserted = connection.execute(
+            text(
+                f"""
+                INSERT INTO {JOB_TABLE} (
+                    product, business_date, requested_by, idempotency_key,
+                    request_kind
+                )
+                SELECT target.product,
+                       :business_date,
+                       :requested_by,
+                       'dashboard:' || target.product
+                           || ':settlement_refresh:'
+                           || CAST(:business_date AS text)
+                           || ':' || :batch_id,
+                       'settlement_refresh'
+                FROM unnest(CAST(:products AS text[]))
+                     WITH ORDINALITY AS target(product, position)
+                ORDER BY target.position
+                ON CONFLICT DO NOTHING
+                RETURNING *
+                """
+            ),
+            parameters,
+        ).mappings().all()
+        inserted_ids = {str(row["job_id"]) for row in inserted}
+        active = connection.execute(
+            text(
+                f"""
+                SELECT *
+                FROM {JOB_TABLE}
+                WHERE product = ANY(CAST(:products AS text[]))
+                  AND status IN ('queued', 'running')
+                  AND request_kind = 'settlement_refresh'
+                ORDER BY array_position(
+                    CAST(:products AS text[]), product
+                ), created_at, job_id
+                """
+            ),
+            parameters,
+        ).mappings().all()
+        jobs = {
+            normalize_product(row["product"]): RefreshJobView.from_mapping(row)
+            for row in active
+        }
+        missing = [product for product in normalized_products if product not in jobs]
+        if missing:
+            raise RuntimeError(
+                "Settlement jobs could not be queued for " + ", ".join(missing) + "."
+            )
+        return {
+            product: (jobs[product], jobs[product].job_id in inserted_ids)
+            for product in normalized_products
+        }
+
+
 def get_refresh_job(
     job_id: str,
     *,
@@ -347,3 +601,46 @@ def get_refresh_job(
             {"job_id": job_id, "product": normalized_product},
         ).mappings().first()
     return RefreshJobView.from_mapping(row) if row is not None else None
+
+
+def get_refresh_jobs(
+    job_ids_by_product: dict[str, str],
+    *,
+    engine=None,
+) -> dict[str, RefreshJobView]:
+    """Read product-scoped refresh jobs with one database query."""
+
+    normalized = {
+        normalize_product(product): str(job_id)
+        for product, job_id in job_ids_by_product.items()
+        if job_id
+    }
+    if not normalized:
+        return {}
+    db_engine = engine or get_database_engine(required=True)
+    products = list(normalized)
+    job_ids = [normalized[product] for product in products]
+    with db_engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                f"""
+                WITH requested_jobs AS (
+                    SELECT product, job_id
+                    FROM unnest(
+                        CAST(:products AS text[]),
+                        CAST(:job_ids AS uuid[])
+                    ) AS requested(product, job_id)
+                )
+                SELECT jobs.*
+                FROM {JOB_TABLE} AS jobs
+                JOIN requested_jobs AS requested
+                  ON requested.job_id = jobs.job_id
+                 AND requested.product = jobs.product
+                """
+            ),
+            {"products": products, "job_ids": job_ids},
+        ).mappings().all()
+    return {
+        normalize_product(row["product"]): RefreshJobView.from_mapping(row)
+        for row in rows
+    }

@@ -16,7 +16,13 @@ import pandas as pd
 from sqlalchemy import inspect, text
 
 from vol_calibration.auth import Identity, Permission, authorize
+from vol_calibration.calibration_inputs import TTF_CALL_DELTA_NODES
 from vol_calibration.ttf_hybrid_surface import (
+    BRENT_HYBRID_METHOD,
+    BRENT_HYBRID_POLICY_VERSION,
+    GAS_HYBRID_POLICY_VERSIONS,
+    HH_HYBRID_METHOD,
+    HH_HYBRID_POLICY_VERSION,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
 )
@@ -31,6 +37,11 @@ RUN_TRADE_TABLE = "at_lng.vol_calibration_run_trade_inputs"
 PUBLICATION_ENGINE_VERSION = "ttf-intraday-pchip-wing-v1"
 JKM_HYBRID_POLICY_VERSION = "jkm_pchip_core_wing_tail_hybrid_v1"
 _HYBRID_PUBLICATION_POLICIES = {
+    "BRENT": {
+        "method": BRENT_HYBRID_METHOD,
+        "policy_version": BRENT_HYBRID_POLICY_VERSION,
+        "engine_version": "brent-svi-projected-pchip-core-v2",
+    },
     "TTF": {
         "method": TTF_HYBRID_METHOD,
         "policy_version": TTF_HYBRID_POLICY_VERSION,
@@ -38,8 +49,18 @@ _HYBRID_PUBLICATION_POLICIES = {
     },
     "JKM": {
         "method": TTF_HYBRID_METHOD,
-        "policy_version": JKM_HYBRID_POLICY_VERSION,
+        "policy_version": GAS_HYBRID_POLICY_VERSIONS["JKM"],
         "engine_version": "jkm-pchip-wing-v1",
+    },
+    "NBP": {
+        "method": TTF_HYBRID_METHOD,
+        "policy_version": GAS_HYBRID_POLICY_VERSIONS["NBP"],
+        "engine_version": "nbp-pchip-wing-v1",
+    },
+    "HH": {
+        "method": HH_HYBRID_METHOD,
+        "policy_version": HH_HYBRID_POLICY_VERSION,
+        "engine_version": "hh-lne-projected-pchip-core-v2",
     },
 }
 
@@ -303,6 +324,9 @@ def load_latest_ttf_publication(
         "publication_date": pd.Timestamp(publication["cob_date"]).date().isoformat(),
         "settlement_cob": configuration.get("settlement_cob"),
         "base_publication_id": configuration.get("base_publication_id"),
+        "input_manifest_fingerprint": configuration.get(
+            "input_manifest_fingerprint"
+        ),
         "published_at": pd.Timestamp(publication["published_at"]).isoformat(),
         "published_by": publication["published_by"],
         "row_count": int(len(points)),
@@ -466,6 +490,20 @@ def ttf_surface_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def input_manifest_fingerprint(input_manifest: Mapping) -> str:
+    """Fingerprint normalized raw inputs, never the generated surface."""
+
+    if not isinstance(input_manifest, Mapping) or not input_manifest:
+        raise TTFPublicationError("A complete canonical input manifest is required.")
+    payload = json.dumps(
+        _json_ready(dict(input_manifest)),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _audit(connection, run_id, event_type, actor, details, from_status=None, to_status=None):
     connection.execute(
         text(
@@ -504,10 +542,14 @@ def publish_ttf_surface(
     expected_expiries: Iterable | None = None,
     notes: str | None = None,
     commodity: str = "TTF",
+    input_manifest: Mapping | None = None,
 ) -> dict:
     """Atomically supersede and publish one complete hybrid surface revision."""
     product, policy = _publication_policy(commodity)
-    authorize(identity, Permission.PUBLISH, resource_creator=created_by)
+    # This workflow is explicitly controlled self-publication: the server still
+    # requires a publish-capable authenticated identity, but the candidate
+    # creator and publisher may intentionally be the same operator.
+    authorize(identity, Permission.PUBLISH)
     if not ttf_publication_storage_available(engine):
         raise TTFPublicationError(f"{product} publication storage is not migrated.")
     if not str(idempotency_key or "").strip():
@@ -522,7 +564,34 @@ def publish_ttf_surface(
         trading_date=trading,
         commodity=product,
     )
-    fingerprint = ttf_surface_fingerprint(prepared, commodity=product)
+    maturity_counts = prepared.groupby("contract_date").size()
+    if not maturity_counts.eq(401).all():
+        raise TTFPublicationError(
+            f"Every governed {product} maturity must contain exactly 401 dense points."
+        )
+    missing_anchor_months = []
+    for contract_date, group in prepared.groupby("contract_date", sort=True):
+        published_delta = group["delta"].to_numpy(dtype=float)
+        if any(
+            not np.isclose(
+                published_delta,
+                expected_delta,
+                rtol=0.0,
+                atol=1e-10,
+            ).any()
+            for expected_delta in TTF_CALL_DELTA_NODES
+        ):
+            missing_anchor_months.append(pd.Timestamp(contract_date).date().isoformat())
+    if missing_anchor_months:
+        raise TTFPublicationError(
+            f"Every governed {product} maturity must retain the complete 11-node "
+            "delta grid; missing=" + ", ".join(missing_anchor_months[:10])
+        )
+    fingerprint = (
+        input_manifest_fingerprint(input_manifest)
+        if input_manifest is not None
+        else ttf_surface_fingerprint(prepared, commodity=product)
+    )
     prepared["input_fingerprint"] = fingerprint
     results = [dict(item) for item in expiry_results]
     trade_ids = [str(trade_id) for trade_id in manual_trade_ids]
@@ -566,6 +635,12 @@ def publish_ttf_surface(
         "manual_trade_ids": trade_ids,
         "expiry_count": len(surface_expiries),
         "point_count": len(prepared),
+        "input_manifest": (
+            _json_ready(dict(input_manifest))
+            if input_manifest is not None
+            else None
+        ),
+        "input_manifest_fingerprint": fingerprint,
     }
     with engine.begin() as connection:
         connection.execute(
@@ -834,6 +909,13 @@ def publish_ttf_surface(
     if (
         readback.get("publication_id") != publication_id
         or int(readback.get("row_count") or 0) != len(prepared)
+        or int(readback.get("expiry_count") or 0) != len(surface_expiries)
+        or len(readback.get("expiry_results") or []) != len(results)
+        or any(
+            not (item.get("validation") or {}).get("is_valid", False)
+            for item in (readback.get("expiry_results") or [])
+        )
+        or readback.get("input_manifest_fingerprint") != fingerprint
     ):
         raise TTFPublicationError(
             f"Published {product} surface failed post-commit readback."

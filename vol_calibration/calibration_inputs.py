@@ -16,9 +16,20 @@ TTF_CALL_DELTA_NODES = np.asarray(
     dtype=float,
 )
 TTF_OBSERVED_SOURCE = "official"
-TTF_EXTRAPOLATED_SOURCE_PATTERN = re.compile(
-    r"^official_surface_ttf_shape_smile_template_v\d+:extrap$",
-    flags=re.IGNORECASE,
+GOVERNED_GAS_PRODUCTS = frozenset({"TTF", "JKM", "NBP"})
+SUPPORTED_HYBRID_PRODUCTS = frozenset({"BRENT", "HH", *GOVERNED_GAS_PRODUCTS})
+TTF_EXTRAPOLATED_SOURCE_PATTERNS = (
+    re.compile(
+        r"^official_surface_euro_gas_lng_v\d+_smile_template_v\d+:extrap$",
+        flags=re.IGNORECASE,
+    ),
+    # Historical governed publications used this TTF-shaped lineage. Keep it
+    # readable while requiring new shared gas publications to use the explicit
+    # EURO_GAS_LNG family above.
+    re.compile(
+        r"^official_surface_ttf_shape_smile_template_v\d+:extrap$",
+        flags=re.IGNORECASE,
+    ),
 )
 
 
@@ -41,14 +52,18 @@ def select_expiry_observations(
     expiry_label,
     *,
     include_extrapolated: bool = False,
+    commodity: str = "TTF",
 ) -> pd.DataFrame:
     """Select one delivery month under the governed calibration contract.
 
-    The default path preserves the historical observed-only behavior. TTF and
-    JKM opt into ``include_extrapolated`` explicitly; that path validates a
+    The default path preserves the historical observed-only behavior. TTF, JKM,
+    and NBP opt into ``include_extrapolated`` explicitly; that path validates a
     complete homogeneous official smile before assigning positive optimizer
     weights to an approved extrapolated copy.
     """
+    product = str(commodity).strip().upper()
+    if product not in GOVERNED_GAS_PRODUCTS:
+        raise ValueError(f"Unsupported governed gas calibration product: {commodity}.")
     if market_data is None or market_data.empty or "expiry" not in market_data:
         return pd.DataFrame()
     target = expiry_month(expiry_label)
@@ -70,7 +85,7 @@ def select_expiry_observations(
     missing_provenance = sorted(required_provenance.difference(selected.columns))
     if missing_provenance:
         raise ValueError(
-            "TTF calibration provenance is missing: "
+            f"{product} calibration provenance is missing: "
             + ", ".join(missing_provenance)
             + "."
         )
@@ -89,7 +104,7 @@ def select_expiry_observations(
     }
     if len(quote_classes) != 1 or len(source_names) != 1:
         raise ValueError(
-            "TTF calibration requires one homogeneous quote class and source "
+            f"{product} calibration requires one homogeneous quote class and source "
             "per expiry."
         )
 
@@ -98,26 +113,36 @@ def select_expiry_observations(
     if basis == "observed":
         if source_name.lower() != TTF_OBSERVED_SOURCE:
             raise ValueError(
-                f"Unsupported observed TTF calibration source: {source_name}."
+                f"Unsupported observed {product} calibration source: {source_name}."
             )
         if "weight" not in selected.columns:
-            raise ValueError("Observed TTF calibration rows require source weights.")
+            raise ValueError(
+                f"Observed {product} calibration rows require source weights."
+            )
         source_weights = pd.to_numeric(selected["weight"], errors="coerce")
         if not np.all(np.isfinite(source_weights)) or np.any(source_weights <= 0):
             raise ValueError(
-                "Observed TTF calibration weights must be finite and positive."
+                f"Observed {product} calibration weights must be finite and positive."
             )
     elif basis == "extrapolated":
-        if TTF_EXTRAPOLATED_SOURCE_PATTERN.fullmatch(source_name) is None:
+        if not any(
+            pattern.fullmatch(source_name)
+            for pattern in TTF_EXTRAPOLATED_SOURCE_PATTERNS
+        ):
             raise ValueError(
-                f"Unsupported extrapolated TTF calibration source: {source_name}."
+                f"Unsupported extrapolated {product} calibration source: {source_name}."
             )
         selected["weight"] = 1.0
     else:
-        raise ValueError(f"Unsupported TTF calibration quote class: {basis}.")
+        raise ValueError(
+            f"Unsupported {product} calibration quote class: {basis}."
+        )
 
     selected["calibration_basis"] = basis
-    eligibility_error = calibration_eligibility_error(selected)
+    eligibility_error = calibration_eligibility_error(
+        selected,
+        commodity=product,
+    )
     if eligibility_error:
         raise ValueError(eligibility_error)
     return selected.reset_index(drop=True)
@@ -125,10 +150,15 @@ def select_expiry_observations(
 
 def calibration_eligibility_error(
     observations: pd.DataFrame,
+    *,
+    commodity: str = "TTF",
 ) -> str | None:
     """Return the first reason a real-market calibration must be blocked."""
+    product = str(commodity).strip().upper()
+    if product not in SUPPORTED_HYBRID_PRODUCTS:
+        return f"Unsupported governed hybrid calibration product: {commodity}."
     if observations is None or observations.empty:
-        return "No observed TTF smile is available for the selected COB and expiry."
+        return f"No observed {product} smile is available for the selected COB and expiry."
     if len(observations) < MIN_OBSERVED_POINTS:
         return (
             f"Only {len(observations)} observed quotes are available; "
@@ -177,7 +207,7 @@ def calibration_eligibility_error(
             .str.lower()
         )
         if bases not in ({"observed"}, {"extrapolated"}):
-            return "TTF calibration inputs must have one governed calibration basis."
+            return f"{product} calibration inputs must have one governed calibration basis."
         ordered_delta = np.sort(delta.to_numpy(dtype=float))
         if (
             len(ordered_delta) != len(TTF_CALL_DELTA_NODES)
@@ -188,18 +218,18 @@ def calibration_eligibility_error(
                 atol=1e-10,
             )
         ):
-            return "TTF calibration requires the complete governed 11-node delta grid."
+            return f"{product} calibration requires the complete governed 11-node delta grid."
 
         if "weight" not in observations.columns:
-            return "TTF calibration inputs require optimizer weights."
+            return f"{product} calibration inputs require optimizer weights."
         weights = pd.to_numeric(observations["weight"], errors="coerce")
         if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
-            return "TTF calibration weights must be finite and positive."
+            return f"{product} calibration weights must be finite and positive."
         if (
             bases == {"extrapolated"}
             and not np.allclose(weights, 1.0, rtol=0.0, atol=1e-12)
         ):
-            return "Extrapolated TTF calibration weights must be uniformly 1.0."
+            return f"Extrapolated {product} calibration weights must be uniformly 1.0."
 
     iv = pd.to_numeric(observations["iv"], errors="coerce")
     if not np.all(np.isfinite(iv)) or np.any(iv <= 0):
@@ -208,7 +238,7 @@ def calibration_eligibility_error(
     if "delta_convention" in observations.columns:
         conventions = set(observations["delta_convention"].dropna().astype(str))
         if conventions != {UNDISCOUNTED_CALL_DELTA}:
-            return "The TTF surface must use the undiscounted call-delta convention."
+            return f"The {product} surface must use the undiscounted call-delta convention."
     return None
 
 
@@ -216,10 +246,12 @@ def calibration_readiness(
     market_data: pd.DataFrame,
     *,
     include_extrapolated: bool = False,
+    commodity: str = "TTF",
 ) -> tuple[bool, str]:
     """Return whether at least one observed expiry is eligible."""
+    product = str(commodity).strip().upper()
     if market_data is None or market_data.empty:
-        return False, "No exact-COB TTF volatility surface is available."
+        return False, f"No exact-COB {product} volatility surface is available."
     errors = []
     for expiry in sorted(market_data["expiry"].dropna().unique()):
         try:
@@ -227,13 +259,14 @@ def calibration_readiness(
                 market_data,
                 expiry,
                 include_extrapolated=include_extrapolated,
+                commodity=product,
             )
         except ValueError as exc:
             errors.append(str(exc))
             continue
-        error = calibration_eligibility_error(observations)
+        error = calibration_eligibility_error(observations, commodity=product)
         if error is None:
             return True, "Calibrate selected expiry"
         errors.append(error)
-    reason = errors[0] if errors else "No eligible TTF expiry is available."
+    reason = errors[0] if errors else f"No eligible {product} expiry is available."
     return False, reason

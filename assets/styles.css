@@ -63,6 +63,134 @@
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
 }
 
+/* Vol Trades inline calibration: all rules remain page scoped. */
+.brent-vol-history-page .brent-vol-history-calibration-control {
+    align-self: end;
+    min-width: 148px;
+}
+
+.brent-vol-history-page .brent-vol-history-calibration-toggle {
+    width: 100%;
+    min-height: 32px;
+    padding: 6px 12px;
+    border: 1px solid #0b5cab;
+    border-radius: 4px;
+    background: #0b5cab;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.brent-vol-history-page .brent-vol-history-calibration-toggle:hover {
+    background: #084b8a;
+}
+
+.brent-vol-history-page .brent-vol-history-calibration-toggle:focus-visible {
+    outline: 3px solid rgba(11, 92, 171, 0.28);
+    outline-offset: 2px;
+}
+
+.brent-vol-history-page .brent-vol-history-calibration-panel:empty {
+    display: none;
+}
+
+.brent-vol-history-page .vol-trades-inline-calibration {
+    margin-top: 14px;
+    border-top: 4px solid #0b5cab;
+}
+
+.brent-vol-history-page .vol-trades-inline-calibration-heading,
+.brent-vol-history-page .vol-trades-inline-calibration-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.brent-vol-history-page .vol-trades-inline-calibration-heading {
+    margin-bottom: 14px;
+}
+
+.brent-vol-history-page .vol-trades-inline-calibration-heading h2,
+.brent-vol-history-page .vol-trades-inline-calibration h3 {
+    margin: 0;
+}
+
+.brent-vol-history-page .vol-trades-inline-provenance-list {
+    display: grid;
+    grid-template-columns: minmax(150px, 0.34fr) minmax(0, 1fr);
+    gap: 6px 14px;
+    margin: 0;
+    font-size: 12px;
+}
+
+.brent-vol-history-page .vol-trades-inline-provenance-list dt {
+    color: #475569;
+    font-weight: 650;
+}
+
+.brent-vol-history-page .vol-trades-inline-provenance-list dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+    color: #0f172a;
+}
+
+.brent-vol-history-page .vol-trades-inline-product-workspace {
+    min-width: 0;
+    overflow-x: auto;
+}
+
+.brent-vol-history-page .vol-trades-inline-product-workspace > .container-fluid {
+    padding-right: 0;
+    padding-left: 0;
+}
+
+.brent-vol-history-page .vol-trades-inline-calibration .card-header h3 {
+    font-size: 14px;
+    font-weight: 650;
+}
+
+.brent-vol-history-page .brent-vol-history-jkm-source-note,
+.brent-vol-history-page .brent-vol-history-jkm-unavailable-note {
+    margin: 10px 12px;
+    font-size: 12px;
+}
+
+@media (max-width: 768px) {
+    .brent-vol-history-page .vol-trades-inline-provenance-list {
+        grid-template-columns: 1fr;
+        gap: 2px;
+    }
+
+    .brent-vol-history-page .vol-trades-inline-provenance-list dd {
+        margin-bottom: 8px;
+    }
+
+    .brent-vol-history-page .vol-trades-inline-calibration-actions > * {
+        flex: 1 1 180px;
+    }
+}
+
+@media (max-width: 560px) {
+    .brent-vol-history-page .vol-trades-inline-calibration {
+        padding-right: 8px;
+        padding-left: 8px;
+    }
+
+    .brent-vol-history-page .vol-trades-inline-calibration-heading,
+    .brent-vol-history-page .vol-trades-inline-calibration-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .brent-vol-history-page .vol-trades-inline-calibration-actions > * {
+        width: 100%;
+    }
+}
+
 /* Base Styles */
 body {
     font-family: var(--font-family-primary);
@@ -8302,7 +8430,7 @@ button:hover {
 /* Bloomberg Brent option-chain settlement and intraday history */
 .options-dashboard-container.brent-vol-history-page {
     min-height: calc(100vh - var(--dashboard-top-bar-height));
-    padding: 10px 16px 24px;
+    padding: 10px 4px 24px;
     background: #f6f8fb;
 }
 
@@ -8325,7 +8453,7 @@ button:hover {
     z-index: 1100;
     min-height: 42px;
     padding: 7px 5px;
-    margin: -10px -16px 12px;
+    margin: -10px -4px 12px;
     background: linear-gradient(180deg, #fbfdff 0%, #eef3f8 100%);
     border: 0;
     border-bottom: 1px solid #cbd5e1;
@@ -8702,7 +8830,9 @@ button:hover {
 }
 
 .brent-vol-history-section {
+    margin-right: 0;
     margin-bottom: var(--spacing-xl);
+    margin-left: 0;
 }
 
 .brent-vol-history-trade-presets {
@@ -8794,9 +8924,16 @@ button:hover {
 
 .brent-vol-history-expiry-section {
     overflow: visible;
+    padding: 0;
     border: 1px solid #d8dee8;
     border-radius: 6px;
     background: #ffffff;
+}
+
+.brent-vol-history-expiry-section.greeks-monitor-section.main-section-container.supply-dest-section {
+    width: 100%;
+    margin: 0 0 var(--spacing-xl) !important;
+    padding: 0;
 }
 
 .brent-vol-history-expiry-section-header {
@@ -8808,6 +8945,12 @@ button:hover {
     padding: 8px 11px;
     background: #f1f5f9;
     border-bottom: 1px solid #d8dee8;
+}
+
+.brent-vol-history-expiry-section.greeks-monitor-section.main-section-container.supply-dest-section
+    > .brent-vol-history-expiry-section-header.greeks-monitor-section-header.inline-section-header.supply-dest-section-header {
+    margin: 0;
+    padding: 8px 11px;
 }
 
 .brent-vol-history-section-title {
@@ -9112,12 +9255,11 @@ button:hover {
 
 .brent-vol-history-plot-grid {
     display: grid;
-    width: 75%;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
+    width: 100%;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
     align-items: start;
-    margin-inline: auto;
-    padding: 8px;
+    padding: 4px;
 }
 
 .brent-vol-history-expiry-card {
@@ -9472,9 +9614,9 @@ button:hover {
 }
 
 .brent-vol-history-table-section {
-    width: calc(100% - 6px);
+    width: 100%;
     min-width: 0;
-    margin: 8px 3px 18px;
+    margin: 8px 0 18px;
     overflow: hidden;
     box-sizing: border-box;
     border: 1px solid #d9e2ec;
@@ -9852,14 +9994,11 @@ button:hover {
         justify-content: end;
     }
 
-    .brent-vol-history-plot-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
 }
 
 @media (max-width: 1024px) {
     .brent-vol-history-plot-grid {
-        width: 100%;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 }
 
@@ -9921,13 +10060,13 @@ button:hover {
 
 @media (max-width: 768px) {
     .options-dashboard-container.brent-vol-history-page {
-        padding: 10px 12px 20px;
+        padding: 10px 4px 20px;
     }
 
     .professional-section-header.brent-vol-history-sticky-filter-bar {
         position: static;
-        margin: -10px -12px 12px;
-        padding: 7px 12px;
+        margin: -10px -4px 12px;
+        padding: 7px 4px;
     }
 
     .brent-vol-history-detail-header {
@@ -9986,20 +10125,26 @@ button:hover {
     }
 
     .brent-vol-history-plot-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 560px) {
+    .brent-vol-history-plot-grid {
         grid-template-columns: minmax(0, 1fr);
     }
 }
 
 @media (max-width: 360px) {
     .options-dashboard-container.brent-vol-history-page {
-        padding: 10px 8px 16px;
+        padding: 10px 4px 16px;
     }
 
     .professional-section-header.brent-vol-history-sticky-filter-bar {
-        margin-right: -8px;
-        margin-left: -8px;
-        padding-right: 8px;
-        padding-left: 8px;
+        margin-right: -4px;
+        margin-left: -4px;
+        padding-right: 4px;
+        padding-left: 4px;
     }
 
     .brent-vol-history-toolbar {

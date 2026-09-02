@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from options.options_library import asian_76, black_76_futures_style
-from options.ttf_volatility import black76_call_delta
+from options.ttf_volatility import black76_call_delta, delta_node_to_strike
 from pages import pricer
 import pricer_surface_reference as surface_reference
 from pricer_structure import (
@@ -53,11 +53,18 @@ def _loader(vol_by_month, *, saved_forward=80.0):
         for month in months:
             expiry = _surface_expiry(asset, month)
             volatility = vol_by_month[(month.year, month.month)]
+            time_to_expiry = (expiry - AS_OF).days / 365.25
             for delta in (0.02, 0.10, 0.25, 0.50, 0.75, 0.90, 0.98):
                 rows.append(
                     {
                         "contract_date": month,
                         "option_expiration_date": expiry,
+                        "strike": delta_node_to_strike(
+                            saved_forward,
+                            time_to_expiry,
+                            delta,
+                            volatility,
+                        ),
                         "delta": delta,
                         "volatility": volatility,
                         "working_forward": saved_forward,
@@ -114,9 +121,9 @@ def _comparison_item(snapshot, structure_id="structure-1", label="S1"):
     }
 
 
-def _operational_loader(volatility, *, cob_date="2026-07-30"):
-    def load(asset, _valuation_date, months, *, force_refresh=False):
-        del force_refresh
+def _governed_loader(volatility, *, cob_date="2026-07-30", saved_forward=100.0):
+    def load(asset, _valuation_date, months, *, force_refresh=False, engine=None):
+        del force_refresh, engine
         pricing_asset = "Brent" if asset == "BRENT" else asset
         rows = []
         for month in months:
@@ -129,25 +136,31 @@ def _operational_loader(volatility, *, cob_date="2026-07-30"):
                     100.0,
                 )["option_expiration_date"]
             )
+            time_to_expiry = (expiry - AS_OF).days / 365.25
             for delta in (0.02, 0.10, 0.25, 0.50, 0.75, 0.90, 0.98):
                 rows.append(
                     {
                         "contract_date": month,
                         "option_expiration_date": expiry,
+                        "strike": delta_node_to_strike(
+                            saved_forward,
+                            time_to_expiry,
+                            delta,
+                            volatility,
+                        ),
                         "delta": delta,
                         "put_call": "call",
                         "volatility": volatility,
+                        "working_forward": saved_forward,
                     }
                 )
         return {
-            "publication_id": None,
+            "publication_id": "00000000-0000-0000-0000-000000000031",
+            "run_id": "00000000-0000-0000-0000-000000000032",
             "commodity": asset,
             "cob_date": cob_date,
-            "published_at": None,
-            "source": "raw.icap.implied_volatility_surface_from_prices",
-            "source_kind": "operational",
-            "date_fallback_used": cob_date < AS_OF.isoformat(),
-            "source_fallback_used": False,
+            "published_at": "2026-07-30T20:00:00+00:00",
+            "published_by": "tester",
             "points": pd.DataFrame(rows),
         }
 
@@ -163,14 +176,10 @@ def _leaf_columns(definitions):
 
 
 def _assert_compact_surface_tooltip(value, model):
-    parts = value.split(" · ")
-    assert parts[0] == "Published: 2026-08-24 12:00 UTC"
-    assert len(parts) in {2, 3}
+    assert value.startswith("Surface COB: 2026-07-30 · Published: ")
+    assert "Publication: 00000000-0000-0000-0000-000000000001" in value
     model_label = "Asian-76" if model == "asian76" else "Black-76"
-    assert parts[1].startswith(f"Surface call delta ({model_label}): ")
-    assert parts[1].endswith("%")
-    if len(parts) == 3:
-        assert parts[2].startswith("Expiry adjustment: ")
+    assert f"Surface call delta ({model_label}): " in value
 
 
 def test_only_black_and_asian_add_two_read_only_surface_columns():
@@ -471,7 +480,7 @@ def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor(monkeyp
         )
 
 
-def test_hh_pricer_uses_operational_cme_lne_surface_as_the_unit_vol_source():
+def test_hh_pricer_uses_governed_cme_lne_publication_as_the_unit_vol_source():
     month = "2026-12-01"
     context, component = _monthly_context(
         "HH",
@@ -482,9 +491,6 @@ def test_hh_pricer_uses_operational_cme_lne_surface_as_the_unit_vol_source():
     context["premium_convention"] = "upfront"
     context["rate"] = 0.04
 
-    def governed_loader(*_args, **_kwargs):
-        raise AssertionError("HH must use the operational LNE surface loader")
-
     rows = [_leg(strike=3.25)]
     payload = surface_reference.build_published_surface_reference(
         "HH",
@@ -492,24 +498,21 @@ def test_hh_pricer_uses_operational_cme_lne_surface_as_the_unit_vol_source():
         context,
         rows,
         AS_OF,
-        surface_loader=governed_loader,
-        operational_loader=_operational_loader(0.55),
+        surface_loader=_governed_loader(0.55, saved_forward=3.25),
     )
 
     result = payload["rows"]["leg-1"]
     assert component["expiry_convention_code"] == "CME_HH_LNE_560_EXPIRY"
     assert component["variance_calendar_code"] == "CME_NYMEX_HH_OPTION_TRADING"
-    assert payload["source_kind"] == "operational"
+    assert payload["source_kind"] == "governed"
     assert payload["source_revision"]
-    assert payload["publication_id"] is None
+    assert payload["publication_id"] is not None
     assert payload["publication_cob"] == AS_OF.isoformat()
     assert result["surface_input_vol"] == pytest.approx(0.55)
     assert result["surface_pricing_vol"] == pytest.approx(0.55)
     assert result["surface_atm_input_vol"] == pytest.approx(0.55)
     assert result["surface_skew_input_vol"] == pytest.approx(0.0)
-    assert result["surface_input_tooltip"].startswith(
-        "Surface COB: 2026-07-30 · Source: raw.icap."
-    )
+    assert result["surface_input_tooltip"].startswith("Surface COB: 2026-07-30")
     expected_signature = pricer._surface_reference_input_signature(
         "HH",
         "black76",
@@ -526,20 +529,50 @@ def test_hh_pricer_uses_operational_cme_lne_surface_as_the_unit_vol_source():
         expected_signature,
     )
     assert resolved_rows[0]["quote_value"] == pytest.approx(0.55)
-    assert source_signature["source_kind"] == "operational"
-    assert source_signature["source_revision"] == payload["source_revision"]
+    assert source_signature["publication_id"] == payload["publication_id"]
 
 
-def test_brent_pricer_uses_the_operational_surface_for_unit_analytics():
+def test_hh_asian_pricer_uses_ui_averaging_start_when_month_metadata_omits_it():
+    month = "2026-12-01"
+    component = build_delivery_month_component(
+        "HH",
+        "asian76",
+        month,
+        AS_OF,
+        3.25,
+    )
+    assert "averaging_start_date" not in component
+    context = {
+        "premium_convention": "upfront",
+        "delivery_shape": "MONTH",
+        "delivery_month": month,
+        "forward": 3.25,
+        "rate": 0.04,
+        "expiration_date": component["option_expiration_date"],
+        "contract_expiration_date": component["contract_expiration_date"],
+        "averaging_start_date": AS_OF.isoformat(),
+    }
+
+    payload = surface_reference.build_published_surface_reference(
+        "HH",
+        "asian76",
+        context,
+        [_leg(strike=3.25)],
+        AS_OF,
+        surface_loader=_governed_loader(0.55, saved_forward=3.25),
+    )
+
+    assert payload["source_kind"] == "governed"
+    assert payload["rows"]["leg-1"]["surface_input_vol"] == pytest.approx(0.55)
+
+
+def test_brent_pricer_uses_the_governed_surface_for_unit_analytics():
     context, _component = _monthly_context(
         "Brent",
         "black76",
         "2026-12-01",
         forward=80.0,
     )
-
-    def governed_loader(*_args, **_kwargs):
-        raise AssertionError("Brent must use the operational surface loader")
 
     rows = [_leg(strike=80.0)]
     payload = surface_reference.build_published_surface_reference(
@@ -548,13 +581,12 @@ def test_brent_pricer_uses_the_operational_surface_for_unit_analytics():
         context,
         rows,
         AS_OF,
-        surface_loader=governed_loader,
-        operational_loader=_operational_loader(0.42),
+        surface_loader=_governed_loader(0.42, saved_forward=80.0),
     )
 
     result = payload["rows"]["leg-1"]
     assert payload["asset"] == "Brent"
-    assert payload["source_kind"] == "operational"
+    assert payload["source_kind"] == "governed"
     assert payload["source_revision"]
     assert payload["publication_cob"] == AS_OF.isoformat()
     assert result["surface_input_vol"] == pytest.approx(0.42)
@@ -589,11 +621,11 @@ def test_cme_bzo_uses_user_forward_and_ice_brent_surface_with_target_expiry():
         context,
         rows,
         AS_OF,
-        operational_loader=_operational_loader(0.42),
+        surface_loader=_governed_loader(0.42, saved_forward=80.0),
     )
     snapshot = _snapshot("Brent", "black76", context, rows)
 
-    assert payload["source_kind"] == "operational"
+    assert payload["source_kind"] == "governed"
     assert payload["rows"]["leg-1"]["surface_input_vol"] == pytest.approx(0.42)
     assert snapshot["context"]["exchange_mapping_id"] == "CME-BRENT-BZO"
     assert (
@@ -636,7 +668,7 @@ def test_cme_brent_allows_only_the_governed_one_day_surface_extension(mapping_id
         context,
         [_leg(strike=80.0)],
         AS_OF,
-        operational_loader=_operational_loader(0.42),
+        surface_loader=_governed_loader(0.42, saved_forward=80.0),
     )
     adjustment = payload["rows"]["leg-1"]["surface_expiry_adjustments"][0]
 
@@ -644,7 +676,7 @@ def test_cme_brent_allows_only_the_governed_one_day_surface_extension(mapping_id
     assert adjustment["factor"] > 1.0
     assert payload["rows"]["leg-1"]["surface_pricing_vol"] > 0.42
 
-    publication = _operational_loader(0.42)(
+    publication = _governed_loader(0.42, saved_forward=80.0)(
         "BRENT",
         AS_OF,
         [date.fromisoformat(month)],
@@ -690,7 +722,7 @@ def test_phe_allows_the_governed_one_day_january_2033_surface_extension():
         context,
         [_leg(strike=3.0)],
         AS_OF,
-        operational_loader=_operational_loader(0.5),
+        surface_loader=_governed_loader(0.5, saved_forward=3.0),
     )
     result = payload["rows"]["leg-1"]
 
@@ -743,7 +775,7 @@ def test_remaining_mappings_apply_and_disclose_governed_expiry_factors(
     loader = (
         {"surface_loader": _loader({(year, month_number): 0.4})}
         if asset in {"TTF", "JKM"}
-        else {"operational_loader": _operational_loader(0.4)}
+        else {"surface_loader": _governed_loader(0.4, saved_forward=forward)}
     )
 
     payload = surface_reference.build_published_surface_reference(
@@ -822,13 +854,21 @@ def test_ttf_usd_surface_selection_is_unit_independent_at_equal_moneyness(
         rows = []
         for contract_month in months:
             expiry = _surface_expiry(asset, contract_month)
+            time_to_expiry = (expiry - AS_OF).days / 365.25
             for delta in (0.10, 0.25, 0.50, 0.75, 0.90):
+                volatility = 0.30 + 0.15 * abs(delta - 0.50)
                 rows.append(
                     {
                         "contract_date": contract_month,
                         "option_expiration_date": expiry,
+                        "strike": delta_node_to_strike(
+                            999.0,
+                            time_to_expiry,
+                            delta,
+                            volatility,
+                        ),
                         "delta": delta,
-                        "volatility": 0.30 + 0.15 * abs(delta - 0.50),
+                        "volatility": volatility,
                         "working_forward": 999.0,
                     }
                 )
@@ -910,7 +950,7 @@ def test_cme_ttf_nbp_pairs_use_ice_surface_with_target_expiry_adjustment(
     kwargs = (
         {"surface_loader": _loader({(2028, 1): 0.4})}
         if asset == "TTF"
-        else {"operational_loader": _operational_loader(0.4)}
+        else {"surface_loader": _governed_loader(0.4, saved_forward=forward)}
     )
 
     payload = surface_reference.build_published_surface_reference(
@@ -936,7 +976,7 @@ def test_cme_ttf_nbp_pairs_use_ice_surface_with_target_expiry_adjustment(
 
 def test_surface_extension_rejects_more_than_the_mapping_allowance():
     month = date(2033, 1, 1)
-    publication = _operational_loader(0.5)("HH", AS_OF, [month])
+    publication = _governed_loader(0.5, saved_forward=3.0)("HH", AS_OF, [month])
     component = {
         "contract_month": month.isoformat(),
         "option_expiration_date": "2032-12-30",
@@ -979,13 +1019,21 @@ def test_surface_input_vol_decomposes_exactly_into_atm_and_skew():
         rows = []
         for contract_month in months:
             expiry = _surface_expiry(asset, contract_month)
+            time_to_expiry = (expiry - AS_OF).days / 365.25
             for delta in (0.02, 0.10, 0.25, 0.50, 0.75, 0.90, 0.98):
+                volatility = 0.4 + 0.2 * abs(delta - 0.5)
                 rows.append(
                     {
                         "contract_date": contract_month,
                         "option_expiration_date": expiry,
+                        "strike": delta_node_to_strike(
+                            100.0,
+                            time_to_expiry,
+                            delta,
+                            volatility,
+                        ),
                         "delta": delta,
-                        "volatility": 0.4 + 0.2 * abs(delta - 0.5),
+                        "volatility": volatility,
                         "working_forward": 100.0,
                     }
                 )
@@ -1481,7 +1529,10 @@ def test_failure_cells_are_advisory_and_explain_the_reason():
     kirk = surface_reference.build_published_surface_reference(
         "TTF", "kirk", {}, [_leg()], AS_OF
     )
-    assert kirk["rows"] == {}
+    assert kirk["rows"]["leg-1"]["surface_input_vol"] is None
+    assert "Asset 1 is required for Kirk" in kirk["rows"]["leg-1"][
+        "surface_input_tooltip"
+    ]
 
 
 def test_catalog_and_immutable_month_slice_are_cached(monkeypatch):
@@ -1501,7 +1552,19 @@ def test_catalog_and_immutable_month_slice_are_cached(monkeypatch):
 
     def fake_points(_engine, _publication_id, months):
         calls["points"] += 1
-        return pd.DataFrame({"contract_date": list(months)})
+        return pd.DataFrame(
+            {
+                "run_id": ["00000000-0000-0000-0000-000000000011"] * len(months),
+                "commodity": ["TTF"] * len(months),
+                "cob_date": [AS_OF] * len(months),
+                "contract_date": list(months),
+                "option_expiration_date": [AS_OF + timedelta(days=30)] * len(months),
+                "strike": [100.0] * len(months),
+                "delta": [0.5] * len(months),
+                "volatility": [0.4] * len(months),
+                "working_forward": [100.0] * len(months),
+            }
+        )
 
     monkeypatch.setattr(surface_reference, "_load_publication_catalog", fake_catalog)
     monkeypatch.setattr(surface_reference, "_load_publication_points", fake_points)
@@ -1833,7 +1896,7 @@ def test_duplicate_contexts_share_one_card_and_source_batch_unions_months():
     assert len(december_view["quote_points"]) == 2
 
 
-def test_operational_nbp_route_is_exact_and_prior_cob_is_visible():
+def test_governed_nbp_route_is_exact_and_prior_cob_is_visible():
     context, _component = _monthly_context(
         "NBP", "black76", "2026-11-01", forward=100.0
     )
@@ -1841,17 +1904,13 @@ def test_operational_nbp_route_is_exact_and_prior_cob_is_visible():
         "NBP", "black76", context, [_leg(strike=100.0, basis="VOL")]
     )
 
-    def governed_loader(*_args, **_kwargs):
-        raise AssertionError("NBP must not use the governed publication loader")
-
     view = surface_reference.build_surface_comparison_views(
         [_comparison_item(snapshot)],
-        surface_loader=governed_loader,
-        operational_loader=_operational_loader(0.45, cob_date="2026-07-29"),
+        surface_loader=_governed_loader(0.45, cob_date="2026-07-29"),
     )[0]
 
     assert view["status"] == "ready"
-    assert view["source_kind"] == "operational"
+    assert view["source_kind"] == "governed"
     assert view["surface_cob"] == "2026-07-29"
     assert any("Prior COB" in warning for warning in view["warnings"])
     assert view["quote_points"][0]["reference_volatility"] == pytest.approx(0.45)
@@ -1909,3 +1968,159 @@ def test_out_of_range_quote_failure_is_isolated_inside_ready_card():
     assert view["status"] == "ready"
     assert view["quote_points"] == []
     assert any("outside the rebased published range" in warning for warning in view["warnings"])
+
+
+def test_surface_rebases_the_stored_strike_moneyness_not_the_delta_coordinate():
+    expiry = date(2026, 11, 20)
+    points = pd.DataFrame(
+        [
+            {
+                "contract_date": date(2026, 12, 1),
+                "option_expiration_date": expiry,
+                "strike": strike,
+                "delta": delta,
+                "put_call": "C",
+                "volatility": volatility,
+                "working_forward": 100.0,
+            }
+            for strike, delta, volatility in (
+                (80.0, 0.90, 0.20),
+                (100.0, 0.50, 0.30),
+                (120.0, 0.10, 0.50),
+            )
+        ]
+    )
+    prepared = surface_reference._prepare_component_surface(
+        points,
+        {
+            "contract_month": "2026-12-01",
+            "option_expiration_date": expiry.isoformat(),
+            "max_surface_extension_days": 0,
+            "weight": 1.0,
+        },
+        asset="TTF",
+        valuation_date=AS_OF,
+        current_forward=200.0,
+    )
+    resolved = surface_reference._prepared_component_result(
+        prepared,
+        model="black76",
+        current_forward=200.0,
+        strike=240.0,
+    )
+
+    assert resolved["reference_volatility"] == pytest.approx(0.50)
+    assert prepared["saved_forward"] == pytest.approx(100.0)
+    assert prepared["maximum_strike"] == pytest.approx(240.0)
+
+
+def test_kirk_resolves_both_governed_50_call_delta_anchors_independently():
+    reference_expiry = "2026-12-15"
+    context = {
+        "asset_1_code": "JKM",
+        "asset_2_code": "HH",
+        "asset_1_forward": 14.0,
+        "asset_2_forward": 3.0,
+        "asset_1_reference_expiry": reference_expiry,
+        "asset_2_reference_expiry": reference_expiry,
+        "contractual_expiry": "2026-12-10",
+        "correlation": 0.4,
+        "premium_convention": "futures_style",
+    }
+    requested = []
+
+    def expiry_loader(
+        asset,
+        valuation_date,
+        selected_expiry,
+        *,
+        force_refresh=False,
+        engine=None,
+    ):
+        del valuation_date, force_refresh, engine
+        requested.append((asset, str(selected_expiry)))
+        anchor = 0.56 if asset == "JKM" else 0.44
+        publication_suffix = "41" if asset == "JKM" else "42"
+        return {
+            "publication_id": f"00000000-0000-0000-0000-0000000000{publication_suffix}",
+            "run_id": f"10000000-0000-0000-0000-0000000000{publication_suffix}",
+            "commodity": asset,
+            "cob_date": "2026-07-29" if asset == "JKM" else AS_OF.isoformat(),
+            "published_at": "2026-07-30T20:00:00+00:00",
+            "points": pd.DataFrame(
+                [
+                    {
+                        "contract_date": date(2027, 1, 1),
+                        "option_expiration_date": date.fromisoformat(reference_expiry),
+                        "strike": 10.0 + index,
+                        "delta": delta,
+                        "put_call": "C",
+                        "volatility": anchor + offset,
+                        "working_forward": 10.0,
+                    }
+                    for index, (delta, offset) in enumerate(
+                        ((0.25, 0.02), (0.50, 0.0), (0.75, 0.02))
+                    )
+                ]
+            ),
+        }
+
+    row = {
+        **_leg(strike=2.0),
+        "volatility_asset_1": 1.25,
+        "volatility_asset_2": 1.25,
+    }
+    payload = surface_reference.build_published_surface_reference(
+        "JKM",
+        "kirk",
+        context,
+        [row],
+        AS_OF,
+        expiry_surface_loader=expiry_loader,
+    )
+    signature = pricer._surface_reference_input_signature(
+        "JKM", "kirk", [row], context, AS_OF.isoformat()
+    )
+    payload["_ui_reference_signature"] = signature
+    resolved_rows, source_signature = pricer._published_surface_calculation_rows(
+        "JKM", "kirk", [row], payload, signature
+    )
+    snapshot = calculate_structure(
+        "kirk",
+        context,
+        {"structure_quantity": 1, "contract_multiplier": 1.0},
+        resolved_rows,
+        as_of=AS_OF,
+    )
+
+    assert requested == [("JKM", reference_expiry), ("HH", reference_expiry)]
+    assert resolved_rows[0]["volatility_asset_1"] == pytest.approx(0.56)
+    assert resolved_rows[0]["volatility_asset_2"] == pytest.approx(0.44)
+    assert snapshot["legs"][0]["raw_volatility_asset_1"] == pytest.approx(0.56)
+    assert snapshot["legs"][0]["raw_volatility_asset_2"] == pytest.approx(0.44)
+    assert set(source_signature["asset_publications"]) == {"asset_1", "asset_2"}
+    assert source_signature["asset_publications"]["asset_1"]["asset"] == "JKM"
+    assert any("Prior COB" in warning for warning in source_signature["warnings"])
+
+
+def test_current_pricer_kirk_volatility_columns_are_governed_and_read_only():
+    columns = {
+        column.get("field") or column.get("colId"): column
+        for column in _leaf_columns(
+            pricer._leg_column_defs(
+                "kirk",
+                signed_lots=True,
+                use_published_surface=True,
+            )
+        )
+    }
+
+    assert "volatility_asset_1" not in columns
+    assert "volatility_asset_2" not in columns
+    for asset_number in (1, 2):
+        column = columns[f"surface_volatility_asset_{asset_number}"]
+        assert column["editable"] is False
+        assert "surfaceRows" in column["valueGetter"]["function"]
+        assert f"surface_asset_{asset_number}_tooltip" in column[
+            "tooltipValueGetter"
+        ]["function"]

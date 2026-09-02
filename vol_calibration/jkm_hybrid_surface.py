@@ -49,6 +49,7 @@ def fit_jkm_hybrid_candidate(
             _jkm_initial_params(initial_params),
             n_starts=n_starts,
             seed=seed,
+            commodity="JKM",
         )
     )
 
@@ -67,5 +68,6 @@ def evaluate_jkm_hybrid_candidate(
             _jkm_initial_params(params),
             left_blend_width=left_blend_width,
             right_blend_width=right_blend_width,
+            commodity="JKM",
         )
     )

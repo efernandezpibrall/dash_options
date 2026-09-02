@@ -1,10 +1,11 @@
-"""Bloomberg Brent, TTF, and Henry Hub option-chain history."""
+"""Bloomberg option-chain history plus the official JKM market view."""
 
 from __future__ import annotations
 
 import json
 import math
 from functools import lru_cache
+from types import SimpleNamespace
 from typing import Any
 
 import dash_ag_grid as dag
@@ -12,7 +13,19 @@ import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import ALL, Input, Output, Patch, State, callback, ctx, dcc, html, no_update
+from dash import (
+    ALL,
+    Input,
+    Output,
+    Patch,
+    State,
+    callback,
+    clientside_callback,
+    ctx,
+    dcc,
+    html,
+    no_update,
+)
 from flask import has_request_context, request
 from plotly.subplots import make_subplots
 from sqlalchemy import bindparam, text
@@ -38,12 +51,17 @@ from options.ttf_volatility import (
 from runtime_config import get_database_engine
 from brent_option_chain_refresh import (
     INTRADAY_REQUEST_KIND,
+    SETTLEMENT_REFRESH_PRODUCTS,
     SETTLEMENT_REQUEST_KIND,
+    SUPPORTED_PRODUCTS,
     WORKER_FRESHNESS_SECONDS,
-    get_refresh_job,
+    SettlementRefreshBatchError,
+    get_refresh_jobs,
     get_worker_readiness,
+    get_worker_readiness_many,
     intraday_refresh_enabled,
     settlement_refresh_enabled,
+    submit_settlement_refresh_jobs,
     submit_refresh_job,
 )
 from vol_calibration.auth import (
@@ -51,10 +69,14 @@ from vol_calibration.auth import (
     authorize,
     resolve_request_identity,
 )
+from vol_calibration.feature_flags import inline_calibration_enabled
+from vol_calibration.inline_workspace import (
+    create_inline_workspace,
+    resolve_inline_context,
+)
 
 
 PRODUCT = "BRENT"
-SUPPORTED_PRODUCTS = frozenset({"BRENT", "TFO", "ON", "LNE"})
 PRODUCT_SPECS = {
     "BRENT": {
         "label": "Brent",
@@ -100,6 +122,17 @@ PRODUCT_SPECS = {
         "anchor_months": (3, 6, 9, 12),
         "through_year_offset": 2,
     },
+    "JKM": {
+        "label": "JKM",
+        "price_unit": "USD/MMBtu",
+        "published_product": "JKM",
+        "published_label": "JKM",
+        "underlying_label": "ICE JKM MO",
+        "intraday_policy_version": "jkm-official-icap-ice-forward-v1",
+        "front_count": 0,
+        "anchor_months": (),
+        "through_year_offset": 0,
+    },
 }
 SNAPSHOT_LIMIT = 20
 CHAIN_TABLE = "at_lng.bbg_option_chain"
@@ -120,7 +153,7 @@ BRENT_INTRADAY_THROUGH_YEAR_OFFSET = 2
 
 def _normalize_product(product: Any) -> str:
     normalized = str(product or PRODUCT).strip().upper()
-    return normalized if normalized in SUPPORTED_PRODUCTS else PRODUCT
+    return normalized if normalized in PRODUCT_SPECS else PRODUCT
 
 
 def _product_spec(product: Any) -> dict[str, Any]:
@@ -221,6 +254,87 @@ def load_available_snapshots(
             "intraday_kind": "INTRADAY",
         },
     )
+
+
+def load_available_jkm_cobs(engine=None, *, limit: int = SNAPSHOT_LIMIT) -> pd.DataFrame:
+    """Return only COBs having both official JKM nodes and ICE_JKM_MO forwards."""
+
+    db_engine = engine or get_database_engine(required=False)
+    if db_engine is None:
+        return pd.DataFrame()
+    return pd.read_sql(
+        text(
+            f"""
+            SELECT s.cob_date AS business_date,
+                   MAX(COALESCE(s.vendor_published_at, s.ingested_at)) AS observed_at,
+                   COUNT(*)::integer AS option_quote_count,
+                   (
+                       SELECT COUNT(*)::integer
+                       FROM at_lng.curve AS c
+                       WHERE c.code = 'ICE_JKM_MO'
+                         AND c.cob = s.cob_date
+                         AND c.value IS NOT NULL
+                   ) AS forward_count
+            FROM {PUBLISHED_TABLE} AS s
+            WHERE s.product = 'JKM'
+              AND EXISTS (
+                  SELECT 1
+                  FROM at_lng.curve AS c
+                  WHERE c.code = 'ICE_JKM_MO'
+                    AND c.cob = s.cob_date
+                    AND c.value IS NOT NULL
+              )
+            GROUP BY s.cob_date
+            ORDER BY s.cob_date DESC
+            LIMIT :limit
+            """
+        ),
+        db_engine,
+        params={"limit": int(limit)},
+    )
+
+
+def load_jkm_official_market(cob_date: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Load the exact-COB official ICAP smile and ICE_JKM_MO forward set."""
+
+    from options.calibration_engine.io.loaders import load_market_data_with_metadata
+
+    selected = pd.Timestamp(cob_date).date()
+    result = load_market_data_with_metadata(
+        "JKM",
+        selected,
+        source="icap",
+        allow_synthetic_fallback=False,
+    )
+    market = result.get("data")
+    if not isinstance(market, pd.DataFrame) or market.empty:
+        raise ValueError(f"No official JKM inputs exist for exact COB {selected}")
+    if result.get("is_synthetic"):
+        raise ValueError("Synthetic JKM inputs are prohibited")
+    required = {"expiry", "option_expiration_date", "delta", "iv", "strike", "forward"}
+    missing = sorted(required.difference(market.columns))
+    if missing:
+        raise ValueError("Official JKM inputs are missing: " + ", ".join(missing))
+    normalized = market.copy()
+    for column in ("expiry", "option_expiration_date"):
+        normalized[column] = pd.to_datetime(normalized[column], errors="coerce")
+    for column in ("delta", "iv", "strike", "forward"):
+        normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
+    invalid = (
+        normalized[["expiry", "option_expiration_date"]].isna().any(axis=1)
+        | ~np.isfinite(
+            normalized[["delta", "iv", "strike", "forward"]].to_numpy(dtype=float)
+        ).all(axis=1)
+        | normalized["delta"].le(0)
+        | normalized["delta"].ge(1)
+        | normalized["iv"].le(0)
+        | normalized["strike"].le(0)
+        | normalized["forward"].le(0)
+    )
+    if invalid.any() or normalized.duplicated(["expiry", "delta"]).any():
+        raise ValueError("Official JKM inputs contain invalid or duplicate nodes")
+    normalized["business_date"] = pd.Timestamp(selected)
+    return normalized.sort_values(["expiry", "delta"]).reset_index(drop=True), result
 
 
 @lru_cache(maxsize=64)
@@ -1011,6 +1125,62 @@ def calibrated_publication_metadata(surface: pd.DataFrame | None) -> dict[str, A
     return metadata
 
 
+def _read_calibrated_surface_points(
+    publication_id: str,
+    contract_dates: tuple[Any, ...],
+    engine,
+) -> pd.DataFrame:
+    points_query = text(
+        f"""
+        SELECT s.contract_date,
+               s.option_expiration_date,
+               s.strike,
+               s.delta,
+               s.put_call,
+               s.volatility,
+               s.working_forward AS forward_value,
+               s.source_name,
+               s.calibration_basis,
+               s.surface_region,
+               s.blend_classification,
+               s.calibration_method,
+               s.calibration_policy_version,
+               s.input_fingerprint,
+               s.created_at
+        FROM {CALIBRATED_SURFACE_TABLE} AS s
+        WHERE s.publication_id = CAST(:publication_id AS uuid)
+          AND s.contract_date IN :contract_dates
+        ORDER BY s.contract_date, s.strike
+        """
+    ).bindparams(bindparam("contract_dates", expanding=True))
+    frame = pd.read_sql(
+        points_query,
+        engine,
+        params={
+            "publication_id": publication_id,
+            "contract_dates": contract_dates,
+        },
+    )
+    if frame.empty:
+        return frame
+    for column in ("contract_date", "option_expiration_date", "created_at"):
+        frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    for column in ("strike", "delta", "volatility", "forward_value"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
+@lru_cache(maxsize=8)
+def _cached_calibrated_surface_points(
+    publication_id: str,
+    contract_dates: tuple[Any, ...],
+) -> pd.DataFrame:
+    engine = get_database_engine(required=False)
+    if engine is None:
+        return pd.DataFrame()
+    return _read_calibrated_surface_points(publication_id, contract_dates, engine)
+
+
 def load_latest_calibrated_surface(
     cob_date: str,
     contract_dates: list[str] | tuple[str, ...],
@@ -1070,36 +1240,17 @@ def load_latest_calibrated_surface(
         )
     publication = catalog.iloc[0]
     publication_id = str(publication["publication_id"])
-    points_query = text(
-        f"""
-        SELECT s.contract_date,
-               s.option_expiration_date,
-               s.strike,
-               s.delta,
-               s.put_call,
-               s.volatility,
-               s.working_forward AS forward_value,
-               s.source_name,
-               s.calibration_basis,
-               s.surface_region,
-               s.blend_classification,
-               s.calibration_method,
-               s.calibration_policy_version,
-               s.input_fingerprint,
-               s.created_at
-        FROM {CALIBRATED_SURFACE_TABLE} AS s
-        WHERE s.publication_id = CAST(:publication_id AS uuid)
-          AND s.contract_date IN :contract_dates
-        ORDER BY s.contract_date, s.strike
-        """
-    ).bindparams(bindparam("contract_dates", expanding=True))
-    frame = pd.read_sql(
-        points_query,
-        db_engine,
-        params={
-            "publication_id": publication_id,
-            "contract_dates": normalized_contracts,
-        },
+    frame = (
+        _read_calibrated_surface_points(
+            publication_id,
+            normalized_contracts,
+            db_engine,
+        )
+        if engine is not None
+        else _cached_calibrated_surface_points(
+            publication_id,
+            normalized_contracts,
+        ).copy()
     )
     metadata = {
         "publication_id": publication_id,
@@ -1112,10 +1263,6 @@ def load_latest_calibrated_surface(
     }
     if frame.empty:
         return _empty_calibrated_surface("no_contract_overlap", **metadata)
-    for column in ("contract_date", "option_expiration_date", "created_at"):
-        frame[column] = pd.to_datetime(frame[column], errors="coerce")
-    for column in ("strike", "delta", "volatility", "forward_value"):
-        frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.loc[
         frame["contract_date"].notna()
         & frame["strike"].gt(0.0)
@@ -3516,6 +3663,13 @@ def build_plot_cards(
     )
     product_label = _product_spec(resolved_product)["label"]
     if chain is None or chain.empty:
+        if resolved_product == "JKM":
+            return [
+                dbc.Alert(
+                    "No exact-COB ICAP JKM smile with ICE_JKM_MO forwards is available.",
+                    color="secondary",
+                )
+            ]
         return [
             dbc.Alert(
                 f"No complete Bloomberg {product_label} option-chain snapshot is available.",
@@ -3620,6 +3774,129 @@ def build_plot_cards(
             _settlement_exclusion_note(
                 exclusions,
                 product=resolved_product,
+            )
+        )
+    return cards
+
+
+def build_jkm_official_cards(
+    market: pd.DataFrame,
+    calibrated: pd.DataFrame | None,
+    *,
+    x_axis: str,
+) -> list[Any]:
+    """Render JKM official nodes in the established Vol Trades card system."""
+
+    if market is None or market.empty:
+        return [
+            dbc.Alert(
+                "No exact-COB ICAP JKM smile with ICE_JKM_MO forwards is available.",
+                color="secondary",
+            )
+        ]
+    cards: list[Any] = [
+        dbc.Alert(
+            [
+                html.Strong("Official-source market view: "),
+                "ICAP JKM nodes and exact-COB ICE_JKM_MO forwards. "
+                "No Bloomberg chain or trade tape is configured.",
+            ],
+            color="info",
+            className="brent-vol-history-jkm-source-note",
+        )
+    ]
+    active = calibrated if isinstance(calibrated, pd.DataFrame) else pd.DataFrame()
+    for expiry, group in market.groupby("expiry", sort=True):
+        expiry_ts = pd.Timestamp(expiry).normalize()
+        ordered = group.sort_values("delta")
+        x_column = "strike" if _normalize_x_axis(x_axis) == X_AXIS_STRIKE else "delta"
+        figure = go.Figure()
+        figure.add_trace(
+            go.Scatter(
+                x=ordered[x_column],
+                y=100.0 * ordered["iv"],
+                mode="markers+lines",
+                name="Official ICAP nodes",
+                marker={"color": "#0b5cab", "size": 7, "symbol": "circle"},
+                line={"color": "#0b5cab", "width": 1.5},
+                meta={"role": "official-market", "layer": "settlement"},
+                customdata=np.column_stack(
+                    [ordered["forward"], ordered["delta"], ordered["strike"]]
+                ),
+                hovertemplate=(
+                    "Official ICAP JKM<br>Forward %{customdata[0]:.4f}"
+                    "<br>Call delta %{customdata[1]:.2f}"
+                    "<br>Strike %{customdata[2]:.4f}"
+                    "<br>IV %{y:.2f}%<extra></extra>"
+                ),
+            )
+        )
+        if not active.empty and "contract_date" in active.columns:
+            active_period = pd.to_datetime(
+                active["contract_date"], errors="coerce"
+            ).dt.to_period("M")
+            published = active.loc[active_period.eq(expiry_ts.to_period("M"))].copy()
+            if not published.empty:
+                published_x = (
+                    pd.to_numeric(published["strike"], errors="coerce")
+                    if x_column == "strike"
+                    else pd.to_numeric(published["delta"], errors="coerce")
+                )
+                figure.add_trace(
+                    go.Scatter(
+                        x=published_x,
+                        y=100.0 * pd.to_numeric(
+                            published["volatility"], errors="coerce"
+                        ),
+                        mode="lines",
+                        name="Active JKM publication",
+                        line={"color": "#7c3aed", "width": 2},
+                        meta={"role": "calibrated", "layer": "calibrated"},
+                        hovertemplate="Active publication<br>IV %{y:.2f}%<extra></extra>",
+                    )
+                )
+        figure.update_layout(
+            template="plotly_white",
+            margin={"l": 45, "r": 18, "t": 18, "b": 42},
+            height=330,
+            xaxis_title="Strike" if x_column == "strike" else "Call delta",
+            yaxis_title="Implied volatility (%)",
+            legend={"orientation": "h", "y": 1.12, "x": 0},
+            meta={"expiry": expiry_ts.date().isoformat(), "quality": {
+                "status": "Official",
+                "color": "success",
+                "detail": "Exact-COB ICAP nodes with ICE_JKM_MO forward",
+            }},
+        )
+        label = expiry_ts.strftime("%b-%y")
+        cards.append(
+            html.Section(
+                [
+                    html.Header(
+                        [
+                            html.H3(label, className="brent-vol-history-card-title"),
+                            dbc.Badge(
+                                "Official",
+                                color="success",
+                                pill=True,
+                                className="brent-vol-history-quality-badge",
+                            ),
+                        ],
+                        className="brent-vol-history-card-header",
+                    ),
+                    dcc.Graph(
+                        id={
+                            "type": "brent-vol-history-expiry-graph",
+                            "expiry": expiry_ts.date().isoformat(),
+                        },
+                        figure=figure,
+                        config={"displaylogo": False, "responsive": True},
+                        className="brent-vol-history-graph",
+                    ),
+                ],
+                className="brent-vol-history-expiry-card",
+                role="region",
+                **{"aria-label": f"{label} JKM official volatility smile"},
             )
         )
     return cards
@@ -4815,7 +5092,16 @@ def build_expiry_legend():
 
 def _oi_methodology_children(product: str):
     resolved_product = _normalize_product(product)
-    if resolved_product == "TFO":
+    if resolved_product == "JKM":
+        title = "JKM official-source scope"
+        copy = (
+            "The JKM view is sourced from official ICAP volatility nodes and the "
+            "exact-COB ICE_JKM_MO forward curve. Bloomberg chain, trade-tape, "
+            "volume and open-interest fields are intentionally unavailable."
+        )
+        link_label = "ICE JKM LNG average-price option specification"
+        href = "https://www.ice.com/api/productguide/spec/71090519/pdf"
+    elif resolved_product == "TFO":
         title = "ICE Endex open-interest timing"
         copy = (
             "Official TFO open interest can be published after the option settlement. "
@@ -4895,6 +5181,7 @@ layout = html.Main(
                                         {"label": "TFO", "value": "TFO"},
                                         {"label": "HH · ON", "value": "ON"},
                                         {"label": "HH · LNE", "value": "LNE"},
+                                        {"label": "JKM", "value": "JKM"},
                                     ],
                                     value=PRODUCT,
                                     inline=True,
@@ -5081,6 +5368,30 @@ layout = html.Main(
                                 "brent-vol-history-trade-preset-control"
                             ),
                         ),
+                        html.Div(
+                            html.Button(
+                                "Calibrate surface",
+                                id="brent-vol-history-calibration-toggle",
+                                n_clicks=0,
+                                disabled=not inline_calibration_enabled(),
+                                className="brent-vol-history-calibration-toggle",
+                                title=(
+                                    "Open the calibration controls for this immutable market context"
+                                    if inline_calibration_enabled()
+                                    else "Inline calibration is disabled by configuration"
+                                ),
+                                **{"aria-expanded": "false"},
+                            ),
+                            className=(
+                                "brent-vol-history-toolbar-control "
+                                "brent-vol-history-calibration-control"
+                            ),
+                            style=(
+                                None
+                                if inline_calibration_enabled()
+                                else {"display": "none"}
+                            ),
+                        ),
                     ],
                     className="brent-vol-history-toolbar",
                 ),
@@ -5096,6 +5407,20 @@ layout = html.Main(
         dcc.Store(id="brent-vol-history-expiry-layer-manifest"),
         dcc.Store(id="brent-vol-history-refresh-job", storage_type="session"),
         dcc.Store(id="brent-vol-history-refresh-completion", storage_type="session"),
+        dcc.Store(
+            id="brent-vol-history-calibration-open",
+            storage_type="memory",
+            data={"open": False},
+        ),
+        dcc.Store(
+            id="brent-vol-history-calibration-context",
+            storage_type="memory",
+        ),
+        html.Div(
+            id="brent-vol-history-calibration-panel",
+            className="brent-vol-history-calibration-panel",
+            **{"aria-live": "polite"},
+        ),
         dcc.Interval(
             id="brent-vol-history-refresh-poll",
             interval=1000,
@@ -5175,6 +5500,7 @@ layout = html.Main(
                     ],
                     className="brent-vol-history-table-header",
                 ),
+                html.Div(id="brent-vol-history-trade-source-note"),
                 dag.AgGrid(
                     id="brent-vol-history-trade-grid",
                     rowData=[],
@@ -5261,6 +5587,7 @@ layout = html.Main(
                         "brent-vol-history-table-header"
                     ),
                 ),
+                html.Div(id="brent-vol-history-chain-source-note"),
                 dag.AgGrid(
                     id="brent-vol-history-grid",
                     rowData=[],
@@ -5324,11 +5651,123 @@ layout = html.Main(
 
 
 @callback(
+    Output("brent-vol-history-calibration-open", "data"),
+    Input("brent-vol-history-calibration-toggle", "n_clicks"),
+    Input("brent-vol-history-product", "value"),
+    Input("brent-vol-history-date", "value"),
+    Input("brent-vol-history-snapshot", "data"),
+    State("brent-vol-history-calibration-open", "data"),
+    prevent_initial_call=True,
+)
+def update_inline_calibration_state(
+    _n_clicks,
+    product,
+    selected_date,
+    snapshot,
+    state,
+):
+    current = state or {"open": False}
+    trigger = ctx.triggered_id
+    if trigger == "brent-vol-history-calibration-toggle":
+        is_open = not bool(current.get("open"))
+    elif bool(current.get("open")) and trigger in {
+        "brent-vol-history-product",
+        "brent-vol-history-date",
+        "brent-vol-history-snapshot",
+    }:
+        is_open = True
+    else:
+        return no_update
+    return {
+        "open": is_open,
+        "product": product,
+        "selectedDate": selected_date,
+        "snapshotId": (snapshot or {}).get("snapshot_id"),
+        "revision": pd.Timestamp.now(tz="UTC").isoformat(),
+    }
+
+
+clientside_callback(
+    """
+    function(state) {
+        const isOpen = Boolean(state && state.open);
+        return [isOpen ? 'Close calibration' : 'Calibrate surface', String(isOpen)];
+    }
+    """,
+    Output("brent-vol-history-calibration-toggle", "children"),
+    Output("brent-vol-history-calibration-toggle", "aria-expanded"),
+    Input("brent-vol-history-calibration-open", "data"),
+)
+
+
+@callback(
+    Output("brent-vol-history-calibration-panel", "children"),
+    Output("brent-vol-history-calibration-context", "data"),
+    Input("brent-vol-history-calibration-open", "data"),
+    State("brent-vol-history-snapshot", "data"),
+    State("brent-vol-history-product", "value"),
+    prevent_initial_call=True,
+)
+def render_inline_calibration(open_state, snapshot, product):
+    if not inline_calibration_enabled() or not (open_state or {}).get("open"):
+        return [], None
+    try:
+        context = resolve_inline_context(
+            get_database_engine(required=False),
+            snapshot,
+            _normalize_product(product),
+        )
+        return create_inline_workspace(context), context
+    except Exception as exc:
+        message = str(exc)
+        if _normalize_product(product) == "ON" and "LNE" in message:
+            message = (
+                "Calibration is unavailable because no complete LNE SETTLEMENT "
+                "snapshot exists for the selected ON COB. ON observations remain "
+                "visible but are never calibration inputs."
+            )
+        return (
+            dbc.Alert(
+                [html.Strong("Calibration unavailable: "), message],
+                color="warning",
+                className="main-section-container mt-3",
+            ),
+            {
+                "market_product": _normalize_product(product),
+                "available": False,
+                "reason": message,
+            },
+        )
+
+
+@callback(
     Output("brent-vol-history-oi-methodology", "children"),
     Input("brent-vol-history-product", "value"),
 )
 def render_oi_methodology(product):
     return _oi_methodology_children(_normalize_product(product))
+
+
+@callback(
+    Output("brent-vol-history-trade-source-note", "children"),
+    Output("brent-vol-history-chain-source-note", "children"),
+    Input("brent-vol-history-product", "value"),
+)
+def render_market_source_notes(product):
+    if _normalize_product(product) != "JKM":
+        return None, None
+    common = {
+        "color": "secondary",
+        "className": "brent-vol-history-jkm-unavailable-note",
+    }
+    return (
+        dbc.Alert("No Bloomberg trade tape configured for JKM.", **common),
+        dbc.Alert(
+            "No Bloomberg option chain or refresh is configured for JKM; "
+            "the expiry charts above show official ICAP nodes and ICE_JKM_MO forwards.",
+            **common,
+        ),
+    )
 
 
 def _request_identity():
@@ -5539,6 +5978,72 @@ def _product_store(value: Any, payload_key: str) -> dict[str, dict[str, Any]]:
     }
 
 
+def _completion_payload(job, product: str, request_kind: str) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "product": product,
+        "request_kind": request_kind,
+        "result_snapshot_id": job.result_snapshot_id,
+        "result_status": job.result_status,
+        "updated_at": job.updated_at,
+    }
+
+
+def _job_is_terminal(job: Any) -> bool:
+    status = getattr(job, "status", None)
+    if status is None and isinstance(job, dict):
+        status = job.get("status")
+    return str(status or "").lower() in {"succeeded", "failed"}
+
+
+def _settlement_batch_status(jobs: dict[str, Any]) -> tuple[str, str]:
+    terminal_count = 0
+    failure_count = 0
+    has_warning = False
+    summaries = []
+    for product in SETTLEMENT_REFRESH_PRODUCTS:
+        job = jobs.get(product)
+        if job is None:
+            continue
+        if job.status == "succeeded":
+            terminal_count += 1
+            failed_dates = bool((getattr(job, "metrics", None) or {}).get("failed_dates"))
+            is_partial = (
+                str(getattr(job, "result_status", "") or "").lower() == "partial"
+                or failed_dates
+            )
+            has_warning = has_warning or is_partial
+            detail = _settlement_success_message(job).removesuffix(".")
+            detail = detail.removeprefix("Settlements ")
+        elif job.status == "failed":
+            terminal_count += 1
+            failure_count += 1
+            failure_category = str(
+                (getattr(job, "metrics", None) or {}).get("failure_category") or ""
+            )
+            detail = (
+                "failed (daily capacity reached)"
+                if failure_category == "daily_capacity_reached"
+                else "failed"
+            )
+        else:
+            detail = _refresh_stage_label(job, SETTLEMENT_REQUEST_KIND)
+        summaries.append(f"{product}: {detail}")
+    total = len(jobs)
+    message = (
+        f"Settlements {terminal_count}/{total} finished · " + " · ".join(summaries)
+    )
+    if total and failure_count == total:
+        suffix = "danger"
+    elif failure_count or has_warning:
+        suffix = "warning"
+    elif terminal_count == total:
+        suffix = "success"
+    else:
+        suffix = "active"
+    return message, f"brent-vol-history-refresh-status brent-vol-history-refresh-status-{suffix}"
+
+
 @callback(
     Output("brent-vol-history-refresh-job", "data"),
     Output("brent-vol-history-refresh-completion", "data"),
@@ -5570,8 +6075,6 @@ def manage_bloomberg_refresh(
     product_label = _product_spec(product)["label"]
     active_jobs = _product_store(active_jobs_value, "job_id")
     completions = _product_store(completions_value, "result_snapshot_id")
-    active_job = active_jobs.get(product)
-    current_completion = completions.get(product)
     try:
         triggered = ctx.triggered_id
     except Exception:
@@ -5582,8 +6085,8 @@ def manage_bloomberg_refresh(
     }
 
     def response(
-        job_payload,
-        completion_payload,
+        updated_jobs,
+        updated_completions,
         poll_disabled,
         intraday_disabled,
         settlement_disabled,
@@ -5592,14 +6095,8 @@ def manage_bloomberg_refresh(
         intraday_style,
         settlement_style,
     ):
-        updated_jobs = dict(active_jobs)
-        updated_completions = dict(completions)
-        if job_payload is None:
-            updated_jobs.pop(product, None)
-        else:
-            updated_jobs[product] = dict(job_payload)
-        if completion_payload is not None:
-            updated_completions[product] = dict(completion_payload)
+        updated_jobs = dict(updated_jobs)
+        updated_completions = dict(updated_completions)
         jobs_output = (
             no_update
             if suppress_unchanged_stores and updated_jobs == active_jobs
@@ -5624,15 +6121,33 @@ def manage_bloomberg_refresh(
 
     hidden = {"display": "none"}
     visible = {"display": "inline-flex"}
-    intraday_enabled = intraday_refresh_enabled(product)
-    settlement_enabled = settlement_refresh_enabled(product)
-    intraday_style = visible if intraday_enabled else hidden
-    settlement_style = visible if settlement_enabled else hidden
-    idle_disabled = (not intraday_enabled, not settlement_enabled)
-    if not intraday_enabled and not settlement_enabled:
+    if product == "JKM":
         return response(
-            None,
-            current_completion,
+            active_jobs,
+            completions,
+            True,
+            True,
+            True,
+            "JKM uses official ICAP and ICE_JKM_MO inputs; Bloomberg refresh is unavailable.",
+            "brent-vol-history-refresh-status brent-vol-history-refresh-status-neutral",
+            hidden,
+            hidden,
+        )
+    intraday_enabled = intraday_refresh_enabled(product)
+    settlement_enabled_by_product = {
+        settlement_product: settlement_refresh_enabled(settlement_product)
+        for settlement_product in SETTLEMENT_REFRESH_PRODUCTS
+    }
+    settlement_enabled = all(settlement_enabled_by_product.values())
+    intraday_style = visible if intraday_enabled else hidden
+    settlement_style = (
+        visible if any(settlement_enabled_by_product.values()) else hidden
+    )
+    idle_disabled = (not intraday_enabled, not settlement_enabled)
+    if not intraday_enabled and not any(settlement_enabled_by_product.values()):
+        return response(
+            active_jobs,
+            completions,
             True,
             True,
             True,
@@ -5645,9 +6160,9 @@ def manage_bloomberg_refresh(
         identity = _authorize_refresh()
     except Exception:
         return response(
-            active_job,
-            current_completion,
-            True,
+            active_jobs,
+            completions,
+            not any(not _job_is_terminal(job) for job in active_jobs.values()),
             True,
             True,
             "",
@@ -5657,30 +6172,24 @@ def manage_bloomberg_refresh(
         )
 
     try:
-        triggered_kind = None
         if triggered == "brent-vol-history-refresh-button":
-            triggered_kind = INTRADAY_REQUEST_KIND
             if not intraday_enabled:
                 raise PermissionError(
                     "Bloomberg intraday refresh is disabled by configuration."
                 )
-        elif triggered == "brent-vol-history-settlement-refresh-button":
-            triggered_kind = SETTLEMENT_REQUEST_KIND
-            if not settlement_enabled:
-                raise PermissionError(
-                    "Bloomberg settlement refresh is disabled by configuration."
+            if any(not _job_is_terminal(job) for job in active_jobs.values()):
+                raise SettlementRefreshBatchError(
+                    "A Bloomberg refresh is already in progress. Wait for it "
+                    "to finish before starting an intraday refresh."
                 )
-
-        if triggered_kind:
             readiness = get_worker_readiness(product)
             if not readiness.ready:
-                job_needs_polling = bool(
-                    active_job
-                    and active_job.get("status") in {"queued", "running"}
+                job_needs_polling = any(
+                    not _job_is_terminal(job) for job in active_jobs.values()
                 )
                 return response(
-                    active_job,
-                    current_completion,
+                    active_jobs,
+                    completions,
                     not job_needs_polling,
                     True,
                     True,
@@ -5695,23 +6204,17 @@ def manage_bloomberg_refresh(
             job, created = submit_refresh_job(
                 identity.subject or "",
                 product=product,
-                request_kind=triggered_kind,
+                request_kind=INTRADAY_REQUEST_KIND,
             )
-            if triggered_kind == SETTLEMENT_REQUEST_KIND:
-                message = (
-                    "Settlement refresh queued."
-                    if created
-                    else "Joined the settlement refresh already in progress."
-                )
-            else:
-                message = (
-                    "Bloomberg refresh queued."
-                    if created
-                    else "Joined the Bloomberg refresh already in progress."
-                )
+            updated_jobs = {product: job.as_dict()}
+            message = (
+                "Bloomberg refresh queued."
+                if created
+                else "Joined the Bloomberg refresh already in progress."
+            )
             return response(
-                job.as_dict(),
-                current_completion,
+                updated_jobs,
+                completions,
                 False,
                 True,
                 True,
@@ -5721,168 +6224,288 @@ def manage_bloomberg_refresh(
                 settlement_style,
             )
 
-        if active_job and active_job.get("job_id"):
-            job = get_refresh_job(active_job["job_id"], product=product)
-            if job is None:
-                raise RuntimeError("The queued refresh job no longer exists.")
-            request_kind = _job_request_kind(job, active_job)
-            if job.status == "succeeded":
-                readiness = get_worker_readiness(product)
-                completion = {
-                    "job_id": job.job_id,
-                    "product": product,
-                    "request_kind": request_kind,
-                    "result_snapshot_id": job.result_snapshot_id,
-                    "result_status": job.result_status,
-                    "updated_at": job.updated_at,
-                }
-                if request_kind == SETTLEMENT_REQUEST_KIND:
-                    message = _settlement_success_message(job)
-                elif job.result_status == "fresh_reuse":
-                    message = (
-                        "Fresh complete Bloomberg snapshot reused—no new "
-                        "Bloomberg request was needed."
+        if triggered == "brent-vol-history-settlement-refresh-button":
+            jobs = submit_settlement_refresh_jobs(
+                identity.subject or "",
+                products=SETTLEMENT_REFRESH_PRODUCTS,
+            )
+            updated_jobs = dict(active_jobs)
+            created_products = []
+            joined_products = []
+            for settlement_product, (job, created) in jobs.items():
+                updated_jobs[settlement_product] = job.as_dict()
+                (created_products if created else joined_products).append(
+                    settlement_product
+                )
+            if not joined_products:
+                message = "Settlement refresh queued for BRENT, TFO, ON, and LNE."
+            elif not created_products:
+                message = (
+                    "Joined settlement refreshes already in progress for "
+                    "BRENT, TFO, ON, and LNE."
+                )
+            else:
+                message = (
+                    f"Settlement refresh queued for {', '.join(created_products)}; "
+                    f"joined {', '.join(joined_products)}."
+                )
+            return response(
+                updated_jobs,
+                completions,
+                False,
+                True,
+                True,
+                message,
+                "brent-vol-history-refresh-status brent-vol-history-refresh-status-active",
+                intraday_style,
+                settlement_style,
+            )
+
+        if active_jobs:
+            job_ids = {
+                active_product: payload.get("job_id")
+                for active_product, payload in active_jobs.items()
+                if payload.get("job_id")
+            }
+            refreshed_jobs = get_refresh_jobs(job_ids)
+            updated_jobs = dict(active_jobs)
+            for active_product, job in refreshed_jobs.items():
+                updated_jobs[active_product] = job.as_dict()
+            missing_products = set(job_ids) - set(refreshed_jobs)
+            for missing_product in missing_products:
+                missing_payload = dict(updated_jobs[missing_product])
+                missing_payload.update(
+                    {
+                        "status": "failed",
+                        "stage": "failed",
+                        "metrics": dict(missing_payload.get("metrics") or {}),
+                        "result_status": missing_payload.get("result_status"),
+                        "last_error": "The queued refresh job no longer exists.",
+                    }
+                )
+                updated_jobs[missing_product] = missing_payload
+
+            updated_completions = dict(completions)
+            selected_job = refreshed_jobs.get(product)
+            if selected_job is not None and selected_job.status == "succeeded":
+                selected_kind = _job_request_kind(
+                    selected_job,
+                    active_jobs.get(product),
+                )
+                completion = _completion_payload(
+                    selected_job,
+                    product,
+                    selected_kind,
+                )
+                if completions.get(product, {}).get("job_id") != selected_job.job_id:
+                    updated_completions[product] = completion
+
+            hydrated_jobs = {}
+            for active_product, payload in updated_jobs.items():
+                job = refreshed_jobs.get(active_product)
+                hydrated_jobs[active_product] = job or SimpleNamespace(**payload)
+            has_active = any(
+                not _job_is_terminal(job) for job in hydrated_jobs.values()
+            )
+            readiness_by_product = (
+                get_worker_readiness_many(SETTLEMENT_REFRESH_PRODUCTS)
+                if not has_active
+                or any(job.status == "queued" for job in hydrated_jobs.values())
+                else {}
+            )
+            selected_readiness = readiness_by_product.get(product)
+            all_ready = bool(readiness_by_product) and all(
+                readiness.ready for readiness in readiness_by_product.values()
+            )
+            intraday_disabled = has_active or not (
+                intraday_enabled
+                and selected_readiness is not None
+                and selected_readiness.ready
+            )
+            settlement_disabled = has_active or not (
+                settlement_enabled and all_ready
+            )
+            settlement_jobs = {
+                active_product: job
+                for active_product, job in hydrated_jobs.items()
+                if _job_request_kind(job, active_jobs.get(active_product))
+                == SETTLEMENT_REQUEST_KIND
+            }
+            if len(settlement_jobs) > 1:
+                message, status_class = _settlement_batch_status(settlement_jobs)
+            else:
+                selected = hydrated_jobs.get(product) or next(
+                    iter(hydrated_jobs.values())
+                )
+                request_kind = _job_request_kind(selected, active_jobs.get(product))
+                if selected.status == "succeeded":
+                    if request_kind == SETTLEMENT_REQUEST_KIND:
+                        message = _settlement_success_message(selected)
+                    elif getattr(selected, "result_status", None) == "fresh_reuse":
+                        message = (
+                            "Fresh complete Bloomberg snapshot reused—no new "
+                            "Bloomberg request was needed."
+                        )
+                    elif getattr(selected, "result_status", None) == "noop":
+                        message = "Checked Bloomberg—no market-data changes."
+                    else:
+                        message = "Bloomberg intraday snapshot is ready."
+                    is_partial = (
+                        str(getattr(selected, "result_status", "") or "").lower()
+                        == "partial"
+                        or bool(
+                            (getattr(selected, "metrics", None) or {}).get(
+                                "failed_dates"
+                            )
+                        )
                     )
-                elif job.result_status == "noop":
-                    message = "Checked Bloomberg—no market-data changes."
-                else:
-                    message = "Bloomberg intraday snapshot is ready."
-                result_is_partial = (
-                    str(job.result_status or "").lower() == "partial"
-                    or bool((getattr(job, "metrics", None) or {}).get("failed_dates"))
-                )
-                status_class = (
-                    "brent-vol-history-refresh-status "
-                    "brent-vol-history-refresh-status-warning"
-                    if result_is_partial
-                    else "brent-vol-history-refresh-status "
-                    "brent-vol-history-refresh-status-success"
-                )
-                if not readiness.ready:
-                    message = (
-                        f"{message} "
-                        f"{_worker_readiness_message(readiness, product_label)}"
+                    status_class = (
+                        "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-warning"
+                        if is_partial
+                        else "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-success"
+                    )
+                elif selected.status == "failed":
+                    if (
+                        (getattr(selected, "metrics", None) or {}).get(
+                            "failure_category"
+                        )
+                        == "daily_capacity_reached"
+                    ):
+                        message = (
+                            "Bloomberg daily request capacity has been reached. "
+                            "The displayed snapshot is unchanged; refresh again after "
+                            "Bloomberg resets the entitlement."
+                        )
+                    else:
+                        fallback = (
+                            "Bloomberg settlement refresh failed."
+                            if request_kind == SETTLEMENT_REQUEST_KIND
+                            else "Bloomberg refresh failed."
+                        )
+                        message = (
+                            f"{getattr(selected, 'last_error', None) or fallback} "
+                            "Check the worker and retry."
+                        )
+                    status_class = (
+                        "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-danger"
+                    )
+                elif (
+                    selected.status == "queued"
+                    and selected_readiness is not None
+                    and not selected_readiness.ready
+                ):
+                    message = _worker_readiness_message(
+                        selected_readiness,
+                        product_label,
                     )
                     status_class = (
                         "brent-vol-history-refresh-status "
                         "brent-vol-history-refresh-status-danger"
                     )
-                return response(
-                    job.as_dict(),
-                    completion,
-                    True,
-                    not (intraday_enabled and readiness.ready),
-                    not (settlement_enabled and readiness.ready),
-                    message,
-                    status_class,
-                    intraday_style,
-                    settlement_style,
-                )
-            if job.status == "failed":
-                readiness = get_worker_readiness(product)
-                if job.metrics.get("failure_category") == "daily_capacity_reached":
-                    failure_message = (
-                        "Bloomberg daily request capacity has been reached. "
-                        "The displayed snapshot is unchanged; refresh again after "
-                        "Bloomberg resets the entitlement."
+                elif selected.status == "queued" and _queued_job_wait_exceeded(selected):
+                    message = (
+                        f"Bloomberg {product_label} worker is online—this request "
+                        "is queued behind another refresh. The page will keep "
+                        "monitoring it."
+                    )
+                    status_class = (
+                        "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-active"
                     )
                 else:
-                    fallback = (
-                        "Bloomberg settlement refresh failed."
-                        if request_kind == SETTLEMENT_REQUEST_KIND
-                        else "Bloomberg refresh failed."
+                    message = f"{_refresh_stage_label(selected, request_kind)}…"
+                    status_class = (
+                        "brent-vol-history-refresh-status "
+                        "brent-vol-history-refresh-status-active"
                     )
-                    failure_message = (
-                        f"{job.last_error or fallback} "
-                        "Check the worker and retry."
-                    )
-                return response(
-                    job.as_dict(),
-                    current_completion,
-                    True,
-                    not (intraday_enabled and readiness.ready),
-                    not (settlement_enabled and readiness.ready),
-                    failure_message,
-                    "brent-vol-history-refresh-status brent-vol-history-refresh-status-danger",
-                    intraday_style,
-                    settlement_style,
-                )
-            readiness = None
-            if job.status == "queued":
-                readiness = get_worker_readiness(product)
-                if not readiness.ready:
-                    return response(
-                        job.as_dict(),
-                        current_completion,
-                        False,
-                        True,
-                        True,
-                        _worker_readiness_message(readiness, product_label),
-                        (
-                            "brent-vol-history-refresh-status "
-                            "brent-vol-history-refresh-status-danger"
-                        ),
-                        intraday_style,
-                        settlement_style,
-                    )
-                if _queued_job_wait_exceeded(job):
-                    return response(
-                        job.as_dict(),
-                        current_completion,
-                        False,
-                        True,
-                        True,
-                        (
-                            f"Bloomberg {product_label} worker is online—this "
-                            "request is queued behind another refresh. The page "
-                            "will keep monitoring it."
-                        ),
-                        (
-                            "brent-vol-history-refresh-status "
-                            "brent-vol-history-refresh-status-active"
-                        ),
-                        intraday_style,
-                        settlement_style,
-                    )
-            stage = _refresh_stage_label(job, request_kind)
             return response(
-                job.as_dict(),
-                current_completion,
-                False,
-                True,
-                True,
-                f"{stage}…",
-                "brent-vol-history-refresh-status brent-vol-history-refresh-status-active",
+                updated_jobs,
+                updated_completions,
+                not has_active,
+                intraday_disabled,
+                settlement_disabled,
+                message,
+                status_class,
                 intraday_style,
                 settlement_style,
             )
-        readiness = get_worker_readiness(product)
-        return response(
-            None,
-            current_completion,
-            True,
-            not (intraday_enabled and readiness.ready),
-            not (settlement_enabled and readiness.ready),
-            _worker_readiness_message(readiness, product_label),
-            (
+
+        readiness_by_product = get_worker_readiness_many(
+            SETTLEMENT_REFRESH_PRODUCTS
+        )
+        readiness = readiness_by_product[product]
+        all_ready = all(
+            candidate.ready for candidate in readiness_by_product.values()
+        )
+        if not settlement_enabled and any(settlement_enabled_by_product.values()):
+            disabled_products = [
+                candidate
+                for candidate, enabled in settlement_enabled_by_product.items()
+                if not enabled
+            ]
+            message = (
+                "Settlement refresh is disabled for "
+                + ", ".join(disabled_products)
+                + "."
+            )
+            status_class = (
+                "brent-vol-history-refresh-status "
+                "brent-vol-history-refresh-status-warning"
+            )
+        elif readiness.ready and settlement_enabled and not all_ready:
+            unavailable = [
+                candidate
+                for candidate in readiness_by_product.values()
+                if not candidate.ready
+            ]
+            message = "Settlement refresh unavailable · " + " · ".join(
+                _worker_readiness_message(candidate, candidate.product)
+                for candidate in unavailable
+            )
+            status_class = (
+                "brent-vol-history-refresh-status "
+                "brent-vol-history-refresh-status-danger"
+            )
+        else:
+            message = _worker_readiness_message(readiness, product_label)
+            status_class = (
                 "brent-vol-history-refresh-status "
                 + (
                     "brent-vol-history-refresh-status-success"
                     if readiness.ready
                     else "brent-vol-history-refresh-status-danger"
                 )
-            ),
+            )
+        return response(
+            active_jobs,
+            completions,
+            True,
+            not (intraday_enabled and readiness.ready),
+            not (settlement_enabled and all_ready),
+            message,
+            status_class,
             intraday_style,
             settlement_style,
         )
     except Exception as exc:
+        has_active = any(
+            not _job_is_terminal(job) for job in active_jobs.values()
+        )
+        error_message = (
+            str(exc)
+            if isinstance(exc, SettlementRefreshBatchError)
+            else f"{_safe_message(exc)}. Check the Bloomberg worker and retry."
+        )
         return response(
-            active_job,
-            current_completion,
-            True,
-            idle_disabled[0],
-            idle_disabled[1],
-            f"{_safe_message(exc)}. Check the Bloomberg worker and retry.",
+            active_jobs,
+            completions,
+            not has_active,
+            has_active or idle_disabled[0],
+            has_active or idle_disabled[1],
+            error_message,
             "brent-vol-history-refresh-status brent-vol-history-refresh-status-danger",
             intraday_style,
             settlement_style,
@@ -5905,13 +6528,26 @@ def update_history_dates(
 ):
     product = _normalize_product(product)
     try:
-        snapshots = load_available_snapshots(product)
+        snapshots = (
+            load_available_jkm_cobs()
+            if product == "JKM"
+            else load_available_snapshots(product)
+        )
     except Exception:
         return [], None
     if snapshots.empty:
         return [], None
     options = []
     for snapshot in snapshots.itertuples(index=False):
+        if product == "JKM":
+            business_date = pd.Timestamp(snapshot.business_date).date().isoformat()
+            options.append(
+                {
+                    "label": pd.Timestamp(snapshot.business_date).strftime("%d %b %Y"),
+                    "value": f"jkm:{business_date}",
+                }
+            )
+            continue
         observed = pd.to_datetime(snapshot.observed_at, errors="coerce", utc=True)
         if str(snapshot.snapshot_kind).upper() == "INTRADAY":
             local = observed.tz_convert("Asia/Dubai") if not pd.isna(observed) else observed
@@ -5924,15 +6560,113 @@ def update_history_dates(
             label = pd.Timestamp(snapshot.business_date).strftime("%d %b %Y")
         options.append({"label": label, "value": str(snapshot.snapshot_id)})
     allowed = {option["value"] for option in options}
-    product_completion = _product_store(
-        completion, "result_snapshot_id"
-    ).get(product, {})
+    product_completion = (
+        {}
+        if product == "JKM"
+        else _product_store(completion, "result_snapshot_id").get(product, {})
+    )
     completed_snapshot = product_completion.get("result_snapshot_id")
     if completed_snapshot in allowed:
         value = completed_snapshot
     else:
         value = current_value if current_value in allowed else options[0]["value"]
     return options, value
+
+
+def _render_jkm_history(
+    selected_value,
+    *,
+    x_axis,
+    current_detail_expiry,
+    current_legend_options,
+    current_legend_value,
+):
+    token = str(selected_value or "")
+    if not token.startswith("jkm:"):
+        raise ValueError("JKM requires an exact official COB selection")
+    selected_date = pd.Timestamp(token.removeprefix("jkm:")).date().isoformat()
+    market, metadata = load_jkm_official_market(selected_date)
+    display_expiries = sorted(
+        pd.to_datetime(market["expiry"], errors="coerce")
+        .dropna()
+        .dt.date.astype(str)
+        .unique()
+        .tolist()
+    )
+    try:
+        calibrated = load_latest_calibrated_surface(
+            selected_date,
+            display_expiries,
+            product="JKM",
+        )
+    except Exception:
+        calibrated = _empty_calibrated_surface(
+            "query_error", commodity="JKM", selected_cob=selected_date
+        )
+    cards = build_jkm_official_cards(
+        market,
+        calibrated,
+        x_axis=x_axis,
+    )
+    expiry_options = [
+        {
+            "label": pd.Timestamp(value).strftime("%b-%y"),
+            "value": pd.Timestamp(value).date().isoformat(),
+        }
+        for value in sorted(pd.to_datetime(market["expiry"]).unique())
+    ]
+    allowed = {item["value"] for item in expiry_options}
+    detail_value = (
+        current_detail_expiry
+        if current_detail_expiry in allowed
+        else expiry_options[0]["value"]
+    )
+    legend_contract = _expiry_legend_contract(cards)
+    legend_options = _expiry_legend_options(
+        legend_contract["available_layers"],
+        new_volume_layers=legend_contract["new_volume_layers"],
+    )
+    selected_layers = _selected_expiry_layers(
+        legend_contract["available_layers"],
+        current_legend_options,
+        current_legend_value,
+    )
+    _apply_expiry_layer_selection(cards, legend_contract, selected_layers)
+    observed_at = pd.to_datetime(metadata.get("last_update"), errors="coerce", utc=True)
+    if pd.isna(observed_at):
+        observed_at = pd.Timestamp(selected_date, tz="UTC") + pd.Timedelta(
+            hours=23, minutes=59, seconds=59
+        )
+    return (
+        {
+            "snapshot_id": None,
+            "source_revision": selected_date,
+            "source_identity": "ICAP_JKM+ICE_JKM_MO",
+            "product": "JKM",
+            "business_date": selected_date,
+            "observed_at": observed_at.isoformat(),
+            "snapshot_kind": "OFFICIAL_COB",
+            "display_expiries": display_expiries,
+            "intraday_universe_policy_version": (
+                PRODUCT_SPECS["JKM"]["intraday_policy_version"]
+            ),
+        },
+        cards,
+        expiry_options,
+        detail_value,
+        0,
+        1,
+        0,
+        {0: "00:00", 1: "Latest"},
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        _expiry_legend_controls(legend_options, selected_layers),
+        legend_contract,
+    )
 
 
 @callback(
@@ -5994,6 +6728,41 @@ def render_history(
             _expiry_legend_controls([], []),
             legend_contract,
         )
+    if product == "JKM":
+        try:
+            return _render_jkm_history(
+                selected_snapshot_id,
+                x_axis=x_axis,
+                current_detail_expiry=current_detail_expiry,
+                current_legend_options=current_legend_options,
+                current_legend_value=current_legend_value,
+            )
+        except Exception:
+            legend_contract = _expiry_legend_contract([])
+            return (
+                None,
+                [
+                    dbc.Alert(
+                        "The exact-COB official JKM inputs could not be rendered. "
+                        "No alternate date or synthetic source was selected.",
+                        color="danger",
+                    )
+                ],
+                [],
+                None,
+                0,
+                1,
+                0,
+                {0: "00:00", 1: "Latest"},
+                True,
+                True,
+                True,
+                True,
+                True,
+                True,
+                _expiry_legend_controls([], []),
+                legend_contract,
+            )
     try:
         snapshots = load_available_snapshots(product)
         selected = snapshots[snapshots["snapshot_id"].astype(str).eq(selected_snapshot_id)]

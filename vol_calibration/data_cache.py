@@ -221,7 +221,7 @@ def cached_workspace_callback(
 
     def decorator(loader):
         @wraps(loader)
-        def wrapper(trade_date, reload_clicks):
+        def wrapper(trade_date, reload_clicks, *context_args):
             triggered_id = triggered_id_factory()
             force_refresh = (
                 bool(reload_clicks)
@@ -231,11 +231,17 @@ def cached_workspace_callback(
             key = (
                 product.upper(),
                 _date_key(trade_date, default_date_factory),
-                fingerprint_factory(),
+                hashlib.sha256(
+                    (
+                        fingerprint_factory()
+                        + "|"
+                        + repr(context_args)
+                    ).encode("utf-8")
+                ).hexdigest(),
             )
             return cache.get_or_load(
                 key,
-                lambda: loader(trade_date, reload_clicks),
+                lambda: loader(trade_date, reload_clicks, *context_args),
                 force_refresh=force_refresh,
                 degraded=_is_degraded_callback_result,
                 healthy_ttl_seconds=_positive_int_setting(

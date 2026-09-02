@@ -332,21 +332,57 @@ def test_product_selector_keeps_all_products_on_one_desktop_row():
     assert "@media (min-width: 1281px) and (max-width: 1760px)" in css
 
 
-def test_expiry_charts_use_compact_desktop_dimensions_with_full_width_reflow():
+def test_expiry_charts_use_four_column_low_margin_layout_with_readable_reflow():
     css = (
         Path(__file__).resolve().parents[1] / "assets" / "styles.css"
     ).read_text(encoding="utf-8")
-    grid_rule = css.split(".brent-vol-history-plot-grid {", 1)[1].split("}", 1)[0]
-    graph_rule = css.split(".brent-vol-history-graph {", 1)[1].split("}", 1)[0]
-    narrow_rule = css.split("@media (max-width: 1024px) {", 1)[1].split(
+    page_css = css.split(
+        "/* Bloomberg Brent option-chain settlement and intraday history */", 1
+    )[1]
+    page_rule = page_css.split(
+        ".options-dashboard-container.brent-vol-history-page {", 1
+    )[1].split("}", 1)[0]
+    grid_rule = page_css.split(".brent-vol-history-plot-grid {", 1)[1].split(
+        "}", 1
+    )[0]
+    expiry_rule = page_css.split(".brent-vol-history-expiry-section {", 1)[
+        1
+    ].split("}", 1)[0]
+    scoped_expiry_rule = page_css.split(
+        ".brent-vol-history-expiry-section.greeks-monitor-section.main-section-container.supply-dest-section {",
+        1,
+    )[1].split("}", 1)[0]
+    table_rule = page_css.split(".brent-vol-history-table-section {", 1)[1].split(
+        "}", 1
+    )[0]
+    graph_rule = page_css.split(".brent-vol-history-graph {", 1)[1].split(
+        "}", 1
+    )[0]
+    tablet_rule = page_css.split("@media (max-width: 1024px) {", 1)[1].split(
+        "@media", 1
+    )[0]
+    compact_rule = page_css.split("@media (max-width: 768px) {", 1)[1].split(
+        "@media", 1
+    )[0]
+    mobile_rule = page_css.split("@media (max-width: 560px) {", 1)[1].split(
         "@media", 1
     )[0]
 
-    assert "width: 75%;" in grid_rule
-    assert "margin-inline: auto;" in grid_rule
+    assert "padding: 10px 4px 24px;" in page_rule
+    assert "padding: 0;" in expiry_rule
+    assert "width: 100%;" in scoped_expiry_rule
+    assert "margin: 0 0 var(--spacing-xl) !important;" in scoped_expiry_rule
+    assert "padding: 0;" in scoped_expiry_rule
+    assert "width: 100%;" in table_rule
+    assert "margin: 8px 0 18px;" in table_rule
+    assert "width: 100%;" in grid_rule
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr));" in grid_rule
+    assert "gap: 4px;" in grid_rule
+    assert "padding: 4px;" in grid_rule
     assert "height: 308px !important;" in graph_rule
-    assert ".brent-vol-history-plot-grid" in narrow_rule
-    assert "width: 100%;" in narrow_rule
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in tablet_rule
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in compact_rule
+    assert "grid-template-columns: minmax(0, 1fr);" in mobile_rule
 
 
 def test_trade_and_chain_tables_use_grouped_trader_focused_format():

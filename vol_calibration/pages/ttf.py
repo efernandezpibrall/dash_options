@@ -11,6 +11,7 @@ from datetime import date
 import hashlib
 from io import StringIO, BytesIO
 import json
+import os
 from uuid import uuid4
 
 import pandas as pd
@@ -1243,7 +1244,7 @@ def load_ttf_publication(trading_date, reload_clicks):
     ],
     [
         Input('ttf-param-table', 'data'),
-        Input('vol-calibration-requested-expiry', 'data'),
+        Input('vol-calibration-requested-expiry', 'data', allow_optional=True),
     ],
     [
         State('ttf-workspace-expiry', 'value'),
@@ -2927,6 +2928,30 @@ def publish_ttf_intraday_surface(
             for trade in (trade_store or {}).get('trades', [])
             if trade.get('trade_id')
         ]
+        input_manifest = {
+            'commodity': 'TTF',
+            'cob_date': pd.Timestamp(trading_date).date().isoformat(),
+            'source_snapshots': [
+                {
+                    'source': 'ICAP official smile plus ICE_TTF forward',
+                    'revision': (trading_context or {}).get('settlement_cob'),
+                    'observed_at': (trading_context or {}).get(
+                        'forward_observed_at'
+                    ),
+                }
+            ],
+            'raw_observations': json.loads(
+                market_data.to_json(orient='records', date_format='iso')
+            ),
+            'forward_context': trading_context or {},
+            'manual_trade_ids': manual_trade_ids,
+            'base_publication_id': (current_publication or {}).get(
+                'publication_id'
+            ),
+            'model_version': DEFAULT_CALIBRATION_MODEL_VERSION,
+            'policy_version': TTF_HYBRID_POLICY_VERSION,
+            'code_revision': os.getenv('APP_CODE_REVISION', 'unknown'),
+        }
         payload = publish_ttf_surface(
             get_database_engine(),
             complete_surface,
@@ -2952,6 +2977,7 @@ def publish_ttf_intraday_surface(
                 if triggered_id == 'ttf-save-all-btn'
                 else 'Published from the TTF intraday adjustment workspace.'
             ),
+            input_manifest=input_manifest,
         )
     except Exception as exc:
         message = dbc.Alert(

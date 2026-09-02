@@ -1,8 +1,8 @@
-"""Read-only published-surface references for the structure Pricer.
+"""Authoritative governed-surface references for the structure Pricer.
 
-The module deliberately returns only compact per-leg advisory values.  Published
-surface curves stay server-side and never enter persisted Pricer drafts,
-calculation snapshots, or exports.
+The module returns compact per-leg values and immutable publication provenance.
+Published curves stay server-side and never enter persisted Pricer drafts or
+browser stores in full.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from options.option_expiry_engine import (
     business_days_between,
     get_surface_calendar_mapping,
 )
-from options.ttf_volatility import black76_call_delta, delta_node_to_strike
+from options.ttf_volatility import black76_call_delta
 from pricer_structure import (
     PRODUCT_METADATA_FIELDS,
     SUPPORTED_ASSETS,
@@ -47,11 +47,13 @@ from vol_calibration.ttf_publication import PUBLICATION_TABLE, SURFACE_TABLE
 
 
 LOGGER = logging.getLogger(__name__)
-REFERENCE_SCHEMA_VERSION = 2
-SUPPORTED_SURFACE_ASSETS = {"TTF", "JKM"}
-OPERATIONAL_SURFACE_ASSETS = {"BRENT", "HH", "NBP"}
-PRICER_SURFACE_ASSETS = SUPPORTED_SURFACE_ASSETS | OPERATIONAL_SURFACE_ASSETS
-SUPPORTED_SURFACE_MODELS = {"black76", "asian76", "american_futures"}
+REFERENCE_SCHEMA_VERSION = 3
+SUPPORTED_SURFACE_ASSETS = {"BRENT", "HH", "JKM", "NBP", "TTF"}
+# Kept as an empty compatibility export for callers which imported the old
+# distinction.  The Pricer never falls back to the operational surface table.
+OPERATIONAL_SURFACE_ASSETS = frozenset()
+PRICER_SURFACE_ASSETS = SUPPORTED_SURFACE_ASSETS
+SUPPORTED_SURFACE_MODELS = {"black76", "asian76", "american_futures", "kirk"}
 DAY_COUNT_DENOMINATOR = 365.25
 COMPARISON_SCHEMA_VERSION = 1
 COMPARISON_CURVE_POINT_LIMIT = 81
@@ -138,7 +140,8 @@ def _load_publication_points(
     month_filter = " OR ".join(predicates) or "FALSE"
     query = text(
         f"""
-        SELECT contract_date, option_expiration_date, delta, volatility,
+        SELECT run_id, commodity, cob_date, contract_date,
+               option_expiration_date, strike, delta, put_call, volatility,
                working_forward, created_at
         FROM {SURFACE_TABLE}
         WHERE publication_id = CAST(:publication_id AS uuid)
@@ -154,6 +157,73 @@ def _load_publication_points(
     return points
 
 
+def _load_publication_expiry_points(
+    engine,
+    publication_id: str,
+    reference_expiry: date,
+) -> pd.DataFrame:
+    query = text(
+        f"""
+        SELECT run_id, commodity, cob_date, contract_date,
+               option_expiration_date, strike, delta, put_call, volatility,
+               working_forward, created_at
+        FROM {SURFACE_TABLE}
+        WHERE publication_id = CAST(:publication_id AS uuid)
+          AND option_expiration_date = :reference_expiry
+        ORDER BY contract_date, strike
+        """
+    )
+    with engine.connect() as connection:
+        points = pd.read_sql(
+            query,
+            connection,
+            params={
+                "publication_id": publication_id,
+                "reference_expiry": reference_expiry,
+            },
+        )
+    for column in ("cob_date", "contract_date", "option_expiration_date", "created_at"):
+        if column in points.columns:
+            points[column] = pd.to_datetime(points[column], errors="coerce")
+    return points
+
+
+def _validate_publication_points(catalog: Mapping, points: pd.DataFrame) -> None:
+    if not isinstance(points, pd.DataFrame) or points.empty:
+        return
+    required = {
+        "run_id",
+        "commodity",
+        "cob_date",
+        "contract_date",
+        "option_expiration_date",
+        "strike",
+        "delta",
+        "volatility",
+        "working_forward",
+    }
+    missing = sorted(required - set(points.columns))
+    if missing:
+        raise SurfaceReferenceError(
+            "The governed publication slice is missing: " + ", ".join(missing) + "."
+        )
+    commodities = points["commodity"].astype(str).str.strip().str.upper().unique()
+    if len(commodities) != 1 or commodities[0] != str(catalog["commodity"]).upper():
+        raise SurfaceReferenceError(
+            "The governed publication contains mismatched commodity points."
+        )
+    run_ids = points["run_id"].astype(str).unique()
+    if len(run_ids) != 1 or run_ids[0] != str(catalog["run_id"]):
+        raise SurfaceReferenceError(
+            "The governed publication contains mismatched calibration-run points."
+        )
+    point_cobs = pd.to_datetime(points["cob_date"], errors="coerce").dt.date.unique()
+    if len(point_cobs) != 1 or point_cobs[0].isoformat() != str(catalog["cob_date"]):
+        raise SurfaceReferenceError(
+            "The governed publication contains mismatched COB points."
+        )
+
+
 def load_published_surface_slice(
     asset: str,
     valuation_date,
@@ -166,7 +236,7 @@ def load_published_surface_slice(
     normalized_asset = str(asset or "").strip().upper()
     if normalized_asset not in SUPPORTED_SURFACE_ASSETS:
         raise SurfaceReferenceError(
-            "Published surface references are available only for TTF and JKM."
+            f"Governed calibrated surfaces are not configured for {normalized_asset}."
         )
     selected_date = _as_date(valuation_date, "Valuation date")
     months = tuple(sorted({_month_start(item) for item in contract_months or []}))
@@ -210,7 +280,74 @@ def load_published_surface_slice(
         healthy_ttl_seconds=86_400,
         degraded_ttl_seconds=5,
     )
+    _validate_publication_points(catalog, points)
     return {**catalog, "contract_months": months, "points": points}
+
+
+def load_published_surface_expiry_slice(
+    asset: str,
+    valuation_date,
+    reference_expiry,
+    *,
+    force_refresh: bool = False,
+    engine=None,
+) -> dict:
+    """Load one exact reference-expiry slice from the latest active publication."""
+    normalized_asset = str(asset or "").strip().upper()
+    if normalized_asset not in SUPPORTED_SURFACE_ASSETS:
+        raise SurfaceReferenceError(
+            f"Governed calibrated surfaces are not configured for {normalized_asset}."
+        )
+    selected_date = _as_date(valuation_date, "Valuation date")
+    selected_expiry = _as_date(reference_expiry, "Volatility-reference expiry")
+    db_engine = engine or get_database_engine(required=False)
+    if db_engine is None:
+        raise SurfaceReferenceError("Published surface storage is unavailable.")
+
+    fingerprint = source_config_fingerprint()
+    catalog_key = (normalized_asset, selected_date.isoformat(), fingerprint)
+    catalog = _CATALOG_CACHE.get_or_load(
+        catalog_key,
+        lambda: _load_publication_catalog(db_engine, normalized_asset, selected_date),
+        force_refresh=force_refresh,
+        degraded=lambda value: value is None,
+        healthy_ttl_seconds=300,
+        degraded_ttl_seconds=5,
+    )
+    if catalog is None:
+        raise SurfaceReferenceError(
+            f"No active {normalized_asset} publication has COB on or before "
+            f"{selected_date.isoformat()}."
+        )
+
+    slice_key = (
+        catalog["publication_id"],
+        f"expiry:{selected_expiry.isoformat()}",
+        fingerprint,
+    )
+    points = _SLICE_CACHE.get_or_load(
+        slice_key,
+        lambda: _load_publication_expiry_points(
+            db_engine,
+            catalog["publication_id"],
+            selected_expiry,
+        ),
+        force_refresh=False,
+        degraded=lambda value: not isinstance(value, pd.DataFrame) or value.empty,
+        healthy_ttl_seconds=86_400,
+        degraded_ttl_seconds=5,
+    )
+    if not isinstance(points, pd.DataFrame) or points.empty:
+        raise SurfaceReferenceError(
+            f"The active {normalized_asset} publication has no exact "
+            f"{selected_expiry.isoformat()} volatility-reference expiry."
+        )
+    _validate_publication_points(catalog, points)
+    return {
+        **catalog,
+        "reference_expiry": selected_expiry.isoformat(),
+        "points": points,
+    }
 
 
 def _normalize_reference_context(
@@ -413,20 +550,24 @@ def _prepare_component_surface(
 ) -> dict:
     contract_month = _month_start(component.get("contract_month"))
     selected = _month_points(points, contract_month)
-    selected["delta"] = pd.to_numeric(selected.get("delta"), errors="coerce")
-    selected["volatility"] = pd.to_numeric(
-        selected.get("volatility"), errors="coerce"
-    )
-    selected["working_forward"] = pd.to_numeric(
-        selected.get("working_forward"), errors="coerce"
-    )
+    for column in ("strike", "delta", "volatility", "working_forward"):
+        if column not in selected.columns:
+            raise SurfaceReferenceError(
+                f"{contract_month.strftime('%b-%y')} is missing governed {column}."
+            )
+        selected[column] = pd.to_numeric(selected[column], errors="coerce")
     selected["option_expiration_date"] = pd.to_datetime(
         selected.get("option_expiration_date"), errors="coerce"
     )
-    selected = selected.dropna(subset=["delta", "volatility", "option_expiration_date"])
-    selected = selected[
-        selected["volatility"].gt(0.0) & np.isfinite(selected["volatility"])
-    ]
+    required_numeric = selected[["strike", "volatility", "working_forward"]]
+    if (
+        selected["option_expiration_date"].isna().any()
+        or not np.isfinite(required_numeric.to_numpy(dtype=float)).all()
+        or (required_numeric <= 0.0).any().any()
+    ):
+        raise SurfaceReferenceError(
+            f"{contract_month.strftime('%b-%y')} has invalid governed coordinates."
+        )
     source_call_deltas = []
     valid_indices = []
     for row_index, row in selected.iterrows():
@@ -449,22 +590,32 @@ def _prepare_component_surface(
             "is not after valuation."
         )
     reference_time = (reference_expiry - valuation_date).days / DAY_COUNT_DENOMINATOR
-    selected["rebased_strike"] = [
-        delta_node_to_strike(
-            current_forward,
-            reference_time,
-            float(delta),
-            float(volatility),
+    saved_forwards = selected["working_forward"].to_numpy(dtype=float)
+    saved_forward = float(np.median(saved_forwards))
+    if not np.allclose(
+        saved_forwards,
+        saved_forward,
+        rtol=1e-10,
+        atol=1e-12,
+    ):
+        raise SurfaceReferenceError(
+            f"{contract_month.strftime('%b-%y')} has inconsistent governed forwards."
         )
-        for delta, volatility in zip(
-            selected["source_call_delta"], selected["volatility"]
-        )
-    ]
-    selected = selected.replace([np.inf, -np.inf], np.nan).dropna(
-        subset=["rebased_strike"]
+    selected["log_moneyness"] = np.log(
+        selected["strike"].to_numpy(dtype=float) / saved_forwards
     )
-    selected = selected.sort_values("rebased_strike")
-    selected = selected.drop_duplicates("rebased_strike", keep=False)
+    if not np.isfinite(selected["log_moneyness"].to_numpy(dtype=float)).all():
+        raise SurfaceReferenceError(
+            f"{contract_month.strftime('%b-%y')} has invalid log-moneyness coordinates."
+        )
+    selected = selected.sort_values("log_moneyness")
+    if selected["log_moneyness"].round(12).duplicated(keep=False).any():
+        raise SurfaceReferenceError(
+            f"{contract_month.strftime('%b-%y')} has duplicate governed coordinates."
+        )
+    selected["rebased_strike"] = current_forward * np.exp(
+        selected["log_moneyness"].to_numpy(dtype=float)
+    )
     if len(selected) < 2:
         raise SurfaceReferenceError(
             f"{contract_month.strftime('%b-%y')} has insufficient published points."
@@ -512,10 +663,6 @@ def _prepare_component_surface(
         )
     except StructureValidationError as exc:
         raise SurfaceReferenceError(str(exc)) from exc
-    saved_forward_values = selected["working_forward"].dropna()
-    saved_forward = (
-        float(saved_forward_values.median()) if not saved_forward_values.empty else None
-    )
     return {
         "contract_month": contract_month,
         "contract_month_label": contract_month.strftime("%b-%y"),
@@ -534,6 +681,7 @@ def _prepare_component_surface(
         "weight": float(component.get("weight", 1.0)),
         "component": dict(component),
         "strike_nodes": selected["rebased_strike"].to_numpy(dtype=float),
+        "log_moneyness_nodes": selected["log_moneyness"].to_numpy(dtype=float),
         "volatility_nodes": selected["volatility"].to_numpy(dtype=float),
     }
 
@@ -554,10 +702,11 @@ def _prepared_component_result(
             f"{minimum_strike:.6g}-{maximum_strike:.6g} for "
             f"{prepared['contract_month_label']}."
         )
+    target_log_moneyness = math.log(strike / current_forward)
     reference_volatility = float(
         np.interp(
-            strike,
-            np.asarray(prepared["strike_nodes"], dtype=float),
+            target_log_moneyness,
+            np.asarray(prepared["log_moneyness_nodes"], dtype=float),
             np.asarray(prepared["volatility_nodes"], dtype=float),
         )
     )
@@ -758,7 +907,11 @@ def _published_surface_tooltip(
         published_label = (
             published_at.strftime("%Y-%m-%d %H:%M") + timezone_label
         )
-        source_label = f"Published: {published_label}"
+        source_label = (
+            f"Surface COB: {publication.get('cob_date')} · "
+            f"Published: {published_label} · "
+            f"Publication: {publication.get('publication_id')}"
+        )
 
     deltas = [float(item["call_delta"]) for item in component_results]
     if not deltas or not all(math.isfinite(value) for value in deltas):
@@ -809,10 +962,208 @@ def _failed_rows(rows, reason: str, publication: Mapping | None = None) -> dict:
             "surface_pricing_vol": None,
             "surface_input_tooltip": detail,
             "surface_pricing_tooltip": detail,
+            "surface_volatility_asset_1": None,
+            "surface_volatility_asset_2": None,
+            "surface_pricing_volatility_asset_1": None,
+            "surface_pricing_volatility_asset_2": None,
+            "surface_asset_1_tooltip": detail,
+            "surface_asset_2_tooltip": detail,
         }
         for row in rows or []
         if isinstance(row, Mapping) and row.get("leg_id")
     }
+
+
+def _prior_cob_warning(asset: str, publication: Mapping, valuation_date: date) -> str | None:
+    surface_cob = _as_date(publication.get("cob_date"), "Surface COB")
+    if surface_cob >= valuation_date:
+        return None
+    return (
+        f"Prior COB: using {asset} {surface_cob.isoformat()} governed publication "
+        f"for valuation {valuation_date.isoformat()}."
+    )
+
+
+def _normalize_kirk_reference_context(context: Mapping, valuation_date: date) -> dict:
+    try:
+        snapshot = calculate_structure(
+            "kirk",
+            dict(context or {}),
+            {"structure_quantity": 1, "contract_multiplier": 1.0},
+            [default_leg("kirk", 1)],
+            as_of=valuation_date,
+        )
+    except StructureValidationError as exc:
+        raise SurfaceReferenceError(str(exc)) from exc
+    return snapshot["context"]
+
+
+def _fifty_call_delta_anchor(points: pd.DataFrame, asset: str) -> dict:
+    if not isinstance(points, pd.DataFrame) or points.empty:
+        raise SurfaceReferenceError(f"The {asset} reference-expiry slice is empty.")
+    selected = points.copy()
+    selected["volatility"] = pd.to_numeric(
+        selected.get("volatility"), errors="coerce"
+    )
+    source_call_deltas = []
+    valid_indices = []
+    for row_index, row in selected.iterrows():
+        try:
+            call_delta = _source_call_delta(row)
+        except SurfaceReferenceError:
+            continue
+        volatility = float(row.get("volatility"))
+        if math.isfinite(volatility) and 0.005 <= volatility <= 2.0:
+            source_call_deltas.append(call_delta)
+            valid_indices.append(row_index)
+    selected = selected.loc[valid_indices].copy()
+    selected["source_call_delta"] = source_call_deltas
+    if len(selected) < 2:
+        raise SurfaceReferenceError(
+            f"The {asset} reference-expiry slice has insufficient valid delta points."
+        )
+    contract_dates = pd.to_datetime(
+        selected.get("contract_date"), errors="coerce"
+    ).dt.date.unique()
+    reference_expiries = pd.to_datetime(
+        selected.get("option_expiration_date"), errors="coerce"
+    ).dt.date.unique()
+    if len(contract_dates) != 1 or len(reference_expiries) != 1:
+        raise SurfaceReferenceError(
+            f"The {asset} reference expiry does not identify exactly one contract."
+        )
+    selected = (
+        selected.sort_values("source_call_delta")
+        .drop_duplicates("source_call_delta", keep="first")
+    )
+    delta_nodes = selected["source_call_delta"].to_numpy(dtype=float)
+    if delta_nodes[0] > 0.5 or delta_nodes[-1] < 0.5:
+        raise SurfaceReferenceError(
+            f"The {asset} reference expiry does not bracket 50-call-delta."
+        )
+    anchor_volatility = float(
+        np.interp(
+            0.5,
+            delta_nodes,
+            selected["volatility"].to_numpy(dtype=float),
+        )
+    )
+    if not math.isfinite(anchor_volatility) or not 0.005 <= anchor_volatility <= 2.0:
+        raise SurfaceReferenceError(
+            f"The {asset} 50-call-delta volatility is outside the supported range."
+        )
+    return {
+        "contract_date": contract_dates[0].isoformat(),
+        "reference_expiry": reference_expiries[0].isoformat(),
+        "call_delta": 0.5,
+        "volatility": anchor_volatility,
+    }
+
+
+def _build_kirk_published_surface_reference(
+    asset: str,
+    context: Mapping,
+    rows: Sequence[Mapping],
+    valuation_date: date,
+    *,
+    force_refresh: bool,
+    engine,
+    expiry_surface_loader: Callable,
+) -> dict:
+    normalized_context = _normalize_kirk_reference_context(context, valuation_date)
+    publications = {}
+    warnings = []
+    for asset_number in (1, 2):
+        key = f"asset_{asset_number}"
+        product = str(normalized_context[f"{key}_code"]).strip().upper()
+        reference_expiry = normalized_context[f"{key}_reference_expiry"]
+        publication = expiry_surface_loader(
+            product,
+            valuation_date,
+            reference_expiry,
+            force_refresh=force_refresh,
+            engine=engine,
+        )
+        required_publication_fields = (
+            "publication_id",
+            "run_id",
+            "commodity",
+            "cob_date",
+            "published_at",
+            "points",
+        )
+        if not isinstance(publication, Mapping) or any(
+            field not in publication
+            or publication[field] is None
+            or (field != "points" and publication[field] == "")
+            for field in required_publication_fields
+        ):
+            raise SurfaceReferenceError(
+                f"The {product} governed publication metadata is incomplete."
+            )
+        if str(publication["commodity"]).strip().upper() != product:
+            raise SurfaceReferenceError(
+                f"The {product} volatility-reference slice has mismatched commodity."
+            )
+        anchor = _fifty_call_delta_anchor(publication.get("points"), product)
+        if anchor["reference_expiry"] != str(reference_expiry):
+            raise SurfaceReferenceError(
+                f"The {product} publication does not match its requested "
+                "volatility-reference expiry."
+            )
+        warning = _prior_cob_warning(product, publication, valuation_date)
+        if warning:
+            warnings.append(warning)
+        publications[key] = {
+            "asset": product,
+            "publication_id": str(publication["publication_id"]),
+            "run_id": str(publication["run_id"]),
+            "publication_cob": str(publication["cob_date"]),
+            "published_at": str(publication["published_at"]),
+            "contract_date": anchor["contract_date"],
+            "reference_expiry": anchor["reference_expiry"],
+            "anchor_call_delta": anchor["call_delta"],
+            "anchor_volatility": anchor["volatility"],
+        }
+
+    digest = sha256()
+    for key in ("asset_1", "asset_2"):
+        digest.update(publications[key]["publication_id"].encode("utf-8"))
+        digest.update(publications[key]["reference_expiry"].encode("utf-8"))
+    payload = {
+        "schema_version": REFERENCE_SCHEMA_VERSION,
+        "asset": str(asset or ""),
+        "model": "kirk",
+        "source_kind": "governed",
+        "source": "governed calibrated publications",
+        "source_revision": digest.hexdigest(),
+        "asset_publications": publications,
+        "warnings": warnings,
+        "rows": {},
+    }
+    for row in rows:
+        leg_id = row.get("leg_id")
+        if not leg_id:
+            continue
+        row_payload = {}
+        for asset_number in (1, 2):
+            key = f"asset_{asset_number}"
+            publication = publications[key]
+            input_volatility = float(publication["anchor_volatility"])
+            factor = float(normalized_context[f"{key}_vol_adjustment_factor"])
+            tooltip = (
+                f"{publication['asset']} governed 50-call-delta anchor · "
+                f"Reference expiry: {publication['reference_expiry']} · "
+                f"Surface COB: {publication['publication_cob']} · "
+                f"Publication: {publication['publication_id']}"
+            )
+            row_payload[f"surface_volatility_{key}"] = input_volatility
+            row_payload[f"surface_pricing_volatility_{key}"] = (
+                input_volatility * factor
+            )
+            row_payload[f"surface_{key}_tooltip"] = tooltip
+        payload["rows"][str(leg_id)] = row_payload
+    return payload
 
 
 def load_operational_surface_slice(
@@ -1489,8 +1840,10 @@ def build_published_surface_reference(
     engine=None,
     surface_loader: Callable = load_published_surface_slice,
     operational_loader: Callable = load_operational_surface_slice,
+    expiry_surface_loader: Callable = load_published_surface_expiry_slice,
 ) -> dict:
-    """Build a compact, read-only per-leg published-surface payload."""
+    """Build a compact, authoritative per-leg governed-surface payload."""
+    del operational_loader  # compatibility only; governed publications are authoritative
     normalized_rows = [dict(row) for row in rows or [] if isinstance(row, Mapping)]
     payload = {
         "schema_version": REFERENCE_SCHEMA_VERSION,
@@ -1499,6 +1852,28 @@ def build_published_surface_reference(
         "rows": {},
     }
     if not normalized_rows:
+        return payload
+    try:
+        selected_date = _as_date(valuation_date, "Valuation date")
+        if model == "kirk":
+            return _build_kirk_published_surface_reference(
+                str(asset or ""),
+                context,
+                normalized_rows,
+                selected_date,
+                force_refresh=force_refresh,
+                engine=engine,
+                expiry_surface_loader=expiry_surface_loader,
+            )
+    except SurfaceReferenceError as exc:
+        payload["rows"] = _failed_rows(normalized_rows, str(exc))
+        return payload
+    except Exception:
+        LOGGER.exception("Published Kirk surface reference loading failed")
+        payload["rows"] = _failed_rows(
+            normalized_rows,
+            "published surface data could not be loaded.",
+        )
         return payload
     normalized_asset = str(asset or "").strip().upper()
     if normalized_asset not in PRICER_SURFACE_ASSETS:
@@ -1510,7 +1885,6 @@ def build_published_surface_reference(
     if model not in SUPPORTED_SURFACE_MODELS:
         return payload
     try:
-        selected_date = _as_date(valuation_date, "Valuation date")
         normalized_context = _normalize_reference_context(
             normalized_asset,
             model,
@@ -1519,21 +1893,13 @@ def build_published_surface_reference(
         )
         components = _delivery_components(normalized_context)
         months = [_month_start(item["contract_month"]) for item in components]
-        if normalized_asset in SUPPORTED_SURFACE_ASSETS:
-            publication = surface_loader(
-                normalized_asset,
-                selected_date,
-                months,
-                force_refresh=force_refresh,
-                engine=engine,
-            )
-        else:
-            publication = operational_loader(
-                normalized_asset,
-                selected_date,
-                months,
-                force_refresh=force_refresh,
-            )
+        publication = surface_loader(
+            normalized_asset,
+            selected_date,
+            months,
+            force_refresh=force_refresh,
+            engine=engine,
+        )
         points = publication.get("points")
         if not isinstance(points, pd.DataFrame) or points.empty:
             raise SurfaceReferenceError("The selected publication slice is empty.")
@@ -1556,8 +1922,12 @@ def build_published_surface_reference(
             "source_kind": publication.get("source_kind") or "governed",
             "source": publication.get("source") or "governed publication",
             "source_revision": _surface_revision(publication),
+            "warnings": [],
         }
     )
+    warning = _prior_cob_warning(normalized_asset, publication, selected_date)
+    if warning:
+        payload["warnings"].append(warning)
     current_forward = float(normalized_context["forward"])
     prepared_components = None
     for row in normalized_rows:

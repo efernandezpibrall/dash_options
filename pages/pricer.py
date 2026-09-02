@@ -1686,8 +1686,9 @@ def _build_context_form(
                 ),
                 html.Div(
                     "Kirk is undiscounted, so rate and Rho are not applicable. "
-                    "It requires two input vols; PREMIUM quoting is unavailable "
-                    "because one premium cannot determine both vols.",
+                    "Both volatility inputs are resolved from the governed "
+                    "50-call-delta anchors at their selected reference expiries; "
+                    "correlation remains an explicit input.",
                     className="pricer-inline-method-note",
                     role="note",
                 ),
@@ -1758,6 +1759,7 @@ def _published_pricer_volatility_column(
     calculated_field=None,
     width=82,
     tooltip=None,
+    tooltip_field="surface_input_tooltip",
     sign_coloring=False,
 ):
     column = _result_numeric_column(
@@ -1780,12 +1782,24 @@ def _published_pricer_volatility_column(
             "? '—' : d3.format('.2%')(Number(params.value))"
         )
     }
-    column["tooltipValueGetter"] = _surface_tooltip_getter(
-        "surface_input_tooltip"
-    )
+    column["tooltipValueGetter"] = _surface_tooltip_getter(tooltip_field)
     if tooltip:
         column["headerTooltip"] = tooltip
     return column
+
+
+def _published_kirk_volatility_column(asset_number):
+    return _published_pricer_volatility_column(
+        f"surface_volatility_asset_{asset_number}",
+        f"Asset {asset_number} surface vol",
+        calculated_field=f"raw_volatility_asset_{asset_number}",
+        width=118,
+        tooltip=(
+            f"Governed 50-call-delta volatility for Asset {asset_number} at its "
+            "selected volatility-reference expiry."
+        ),
+        tooltip_field=f"surface_asset_{asset_number}_tooltip",
+    )
 
 
 def _published_pricer_volatility_columns():
@@ -2183,6 +2197,8 @@ _CURRENT_PRICER_COLUMN_WIDTHS = {
     "trade_value": (74, 96),
     "volatility_asset_1": (104, 118),
     "volatility_asset_2": (104, 118),
+    "surface_volatility_asset_1": (104, 118),
+    "surface_volatility_asset_2": (104, 118),
 }
 
 _CURRENT_PRICER_LONG_GREEK_WIDTHS = {
@@ -2469,26 +2485,34 @@ def _leg_column_defs(
                 ]
             )
     else:
-        columns.extend(
-            [
-                {
-                    "headerName": "Asset 1 input vol",
-                    "field": "volatility_asset_1",
-                    "width": 118,
-                    "minWidth": 104,
-                    **numeric_column,
-                    "cellClassRules": volatility_rules,
-                },
-                {
-                    "headerName": "Asset 2 input vol",
-                    "field": "volatility_asset_2",
-                    "width": 118,
-                    "minWidth": 104,
-                    **numeric_column,
-                    "cellClassRules": volatility_rules,
-                },
-            ]
-        )
+        if use_published_surface:
+            columns.extend(
+                [
+                    _published_kirk_volatility_column(1),
+                    _published_kirk_volatility_column(2),
+                ]
+            )
+        else:
+            columns.extend(
+                [
+                    {
+                        "headerName": "Asset 1 input vol",
+                        "field": "volatility_asset_1",
+                        "width": 118,
+                        "minWidth": 104,
+                        **numeric_column,
+                        "cellClassRules": volatility_rules,
+                    },
+                    {
+                        "headerName": "Asset 2 input vol",
+                        "field": "volatility_asset_2",
+                        "width": 118,
+                        "minWidth": 104,
+                        **numeric_column,
+                        "cellClassRules": volatility_rules,
+                    },
+                ]
+            )
     output = [
         columns[0],
         {
@@ -6649,7 +6673,7 @@ def _published_surface_calculation_rows(
 ):
     """Replace legacy quote fields with governed per-leg contract vols."""
     normalized_rows = _rows_with_volatility_adjustments(model, rows or [])
-    if model not in SINGLE_ASSET_MODELS:
+    if model not in SINGLE_ASSET_MODELS and model != "kirk":
         return normalized_rows, None
     if (
         not isinstance(surface_reference, dict)
@@ -6672,12 +6696,90 @@ def _published_surface_calculation_rows(
             "Published surface volatility is still refreshing for the current inputs. "
             "Wait for it to load and calculate again."
         )
+    if surface_reference.get("source_kind") not in (None, "governed"):
+        raise StructureValidationError(
+            "The Pricer requires an active governed calibrated publication."
+        )
+    if model == "kirk":
+        if not surface_reference.get("source_revision"):
+            raise StructureValidationError(
+                "No governed publication revision is available for the Kirk assets."
+            )
+        asset_publications = surface_reference.get("asset_publications")
+        if not isinstance(asset_publications, dict):
+            raise StructureValidationError(
+                "Governed publications are unavailable for the two Kirk assets."
+            )
+        for asset_number in (1, 2):
+            publication = asset_publications.get(f"asset_{asset_number}")
+            required = (
+                "asset",
+                "publication_id",
+                "run_id",
+                "publication_cob",
+                "published_at",
+                "contract_date",
+                "reference_expiry",
+                "anchor_call_delta",
+                "anchor_volatility",
+            )
+            if not isinstance(publication, dict) or any(
+                publication.get(field) in (None, "") for field in required
+            ):
+                raise StructureValidationError(
+                    f"No governed publication is available for Kirk Asset {asset_number}."
+                )
+        surface_rows = surface_reference.get("rows")
+        if not isinstance(surface_rows, dict):
+            raise StructureValidationError(
+                "Governed volatility is unavailable for the Kirk option legs."
+            )
+        resolved_rows = []
+        signature_rows = []
+        for position, row in enumerate(normalized_rows, start=1):
+            leg_id = str(row.get("leg_id") or "")
+            surface_row = surface_rows.get(leg_id)
+            if not isinstance(surface_row, dict):
+                raise StructureValidationError(
+                    f"Leg {position}: governed Kirk volatility is unavailable."
+                )
+            resolved = copy.deepcopy(row)
+            signature_row = {"leg_id": leg_id}
+            for asset_number in (1, 2):
+                field = f"surface_volatility_asset_{asset_number}"
+                pricing_field = f"surface_pricing_volatility_asset_{asset_number}"
+                try:
+                    volatility = float(surface_row[field])
+                    pricing_volatility = float(surface_row[pricing_field])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    detail = surface_row.get(f"surface_asset_{asset_number}_tooltip")
+                    raise StructureValidationError(
+                        f"Leg {position}: {detail or f'Asset {asset_number} governed volatility is unavailable.'}"
+                    ) from None
+                if not (
+                    math.isfinite(volatility)
+                    and 0.005 <= volatility <= 2.0
+                    and math.isfinite(pricing_volatility)
+                    and 0.005 <= pricing_volatility <= 2.0
+                ):
+                    raise StructureValidationError(
+                        f"Leg {position}: Asset {asset_number} governed volatility "
+                        "is outside the supported range."
+                    )
+                resolved[f"volatility_asset_{asset_number}"] = volatility
+                signature_row[f"surface_volatility_asset_{asset_number}"] = volatility
+                signature_row[pricing_field] = pricing_volatility
+            resolved_rows.append(resolved)
+            signature_rows.append(signature_row)
+        return resolved_rows, {
+            "source_kind": "governed",
+            "source_revision": str(surface_reference.get("source_revision") or ""),
+            "asset_publications": copy.deepcopy(asset_publications),
+            "warnings": copy.deepcopy(surface_reference.get("warnings") or []),
+            "rows": signature_rows,
+        }
     source_kind = str(surface_reference.get("source_kind") or "governed")
-    publication_fields = (
-        ("publication_id", "publication_cob", "published_at")
-        if source_kind == "governed"
-        else ("source_revision", "publication_cob", "source_kind", "source")
-    )
+    publication_fields = ("publication_id", "publication_cob", "published_at")
     if any(
         surface_reference.get(field) in (None, "")
         for field in publication_fields
@@ -6887,9 +6989,12 @@ def _published_surface_calculation_rows(
                 ),
             }
         )
-    return resolved_rows, {
+    signature = {
         field: str(surface_reference[field]) for field in publication_fields
     } | {"rows": surface_signature_rows}
+    if surface_reference.get("warnings"):
+        signature["warnings"] = copy.deepcopy(surface_reference["warnings"])
+    return resolved_rows, signature
 
 
 def _signature_leg_rows(model, rows):
@@ -7149,27 +7254,53 @@ def calculate_structure_callback(
             tone="danger",
         )
     if surface_signature is not None:
-        snapshot["surface_expiry_adjustments"] = {
-            row["leg_id"]: copy.deepcopy(row["surface_expiry_adjustments"])
-            for row in surface_signature["rows"]
-        }
-        effective_pricing_vols = {
-            row["leg_id"]: row["effective_pricing_vol"]
-            for row in surface_signature["rows"]
-        }
-        inconsistent_leg = next(
-            (
-                index
-                for index, leg in enumerate(snapshot["legs"], start=1)
-                if not math.isclose(
-                    leg["volatility_used"],
-                    effective_pricing_vols.get(leg["leg_id"], math.nan),
-                    rel_tol=1e-10,
-                    abs_tol=1e-12,
-                )
-            ),
-            None,
-        )
+        if model == "kirk":
+            surface_rows = {
+                row["leg_id"]: row for row in surface_signature["rows"]
+            }
+            inconsistent_leg = next(
+                (
+                    index
+                    for index, leg in enumerate(snapshot["legs"], start=1)
+                    if any(
+                        not math.isclose(
+                            leg[f"volatility_asset_{asset_number}_used"],
+                            float(
+                                surface_rows.get(leg["leg_id"], {}).get(
+                                    f"surface_pricing_volatility_asset_{asset_number}",
+                                    math.nan,
+                                )
+                            ),
+                            rel_tol=1e-10,
+                            abs_tol=1e-12,
+                        )
+                        for asset_number in (1, 2)
+                    )
+                ),
+                None,
+            )
+        else:
+            snapshot["surface_expiry_adjustments"] = {
+                row["leg_id"]: copy.deepcopy(row["surface_expiry_adjustments"])
+                for row in surface_signature["rows"]
+            }
+            effective_pricing_vols = {
+                row["leg_id"]: row["effective_pricing_vol"]
+                for row in surface_signature["rows"]
+            }
+            inconsistent_leg = next(
+                (
+                    index
+                    for index, leg in enumerate(snapshot["legs"], start=1)
+                    if not math.isclose(
+                        leg["volatility_used"],
+                        effective_pricing_vols.get(leg["leg_id"], math.nan),
+                        rel_tol=1e-10,
+                        abs_tol=1e-12,
+                    )
+                ),
+                None,
+            )
         if inconsistent_leg is not None:
             return None, _build_pricer_message(
                 f"Leg {inconsistent_leg}: the published surface pricing volatility "
@@ -7177,6 +7308,10 @@ def calculate_structure_callback(
                 "contract-date adjustment.",
                 tone="danger",
             )
+        for warning in surface_signature.get("warnings") or []:
+            governed_warning = f"Governed surface: {warning}"
+            if governed_warning not in snapshot["warnings"]:
+                snapshot["warnings"].append(governed_warning)
     snapshot["_ui_input_signature"] = input_signature
     leg_count = len(snapshot["legs"])
     leg_label = "leg" if leg_count == 1 else "legs"
