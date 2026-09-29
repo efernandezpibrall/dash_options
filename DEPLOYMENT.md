@@ -7,17 +7,17 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.2.3`, built from reviewed `options` commit
-`dc12f0e22f9fd724f23c3b0cdf152cc9f244cb4b`, and this repository's
+`at-options-analytics==1.2.4`, built from reviewed `options` commit
+`63baa7a29f9876d36153d115c462b80de13b6043`, and this repository's
 requirements. The release wheel SHA-256 is
-`4c8eed95b467cca43bc8da51dd5ee7dc5aabee3c2ae2115cc42a7f65c33e1f5f`.
+`709ee0e145726aa83bba221c13e4645de2d431b7c7066a72c507e6df6778e676`.
 Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
 Use a dedicated virtual environment for this application; other tools in the
 shared repository environment have incompatible `requests` requirements.
 The pinned NumPy, pandas, SciPy, and SQLAlchemy versions reproduce the reviewed
 Brent settlement calibration and its 25 September publication to persisted precision.
-Analytics 1.2.3 includes HH policy v3 and preserves the fitted forward when
+Analytics 1.2.4 adds the HH actual-strike single-SVI seasonal policy and preserves the fitted forward when
 producing an accepted Brent intraday smile. Gas fit workers require the pinned
 `threadpoolctl` dependency; their code fingerprints resolve the installed
 analytics package and require no sibling options checkout.
@@ -25,12 +25,12 @@ analytics package and require no sibling options checkout.
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout dc12f0e22f9fd724f23c3b0cdf152cc9f244cb4b
+git -C /path/to/options checkout 63baa7a29f9876d36153d115c462b80de13b6043
 SOURCE_DATE_EPOCH=$(git -C /path/to/options show -s --format=%ct HEAD) python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-echo "4c8eed95b467cca43bc8da51dd5ee7dc5aabee3c2ae2115cc42a7f65c33e1f5f  dist/at_options_analytics-1.2.3-py3-none-any.whl" | shasum -a 256 -c -
-python -m pip install dist/at_options_analytics-1.2.3-py3-none-any.whl
+echo "709ee0e145726aa83bba221c13e4645de2d431b7c7066a72c507e6df6778e676  dist/at_options_analytics-1.2.4-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.4-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.3'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.4'"
 ```
 
 Run before producing the deployment artifact:
@@ -71,6 +71,15 @@ policy in the governed dense-surface table. After verifying the source, expiry
 calendar, and publisher identity,
 enable `VOL_CALIBRATION_BRENT_WRITES_ENABLED` and
 `VOL_CALIBRATION_BRENT_PUBLICATION_ENABLED`; other product gates remain separate.
+
+HH LNE now uses one actual-strike SVI smile per delivery month. Sparse months
+are constrained by available LNE quotes and same-season predecessors. The
+401-point governed surface and operational 11-delta grid sample the same model.
+Apply Alembic revision `20260929_02` before enabling
+`VOL_CALIBRATION_HH_WRITES_ENABLED` and
+`VOL_CALIBRATION_HH_PUBLICATION_ENABLED`. Pin the exact LNE settlement snapshot,
+verify the quote-fit and density diagnostics, then read back the immutable HH
+publication by ID and inspect the selected HH surface in Vol Trades.
 
 The read-only release uses:
 

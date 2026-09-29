@@ -28,7 +28,7 @@ def _candidate():
             {
                 "option_expiration_date": "2026-10-26",
                 "validation": {"is_valid": True},
-                "diagnostics": {"point_count": 2, "calibration_mode": "observed"},
+                "diagnostics": {"quote_count": 2, "term_basis": "observed_fit"},
                 "weighted_rmse": 0.001,
             }
         ],
@@ -64,7 +64,6 @@ def test_hh_publish_reuses_server_candidate_and_rejects_tampered_browser_state(
 
     monkeypatch.setattr(page, "_identity", lambda: identity)
     monkeypatch.setattr(page, "build_hh_lne_candidate_surface", build)
-    monkeypatch.setattr(page, "_densify_hh_candidate", lambda candidate: candidate)
     monkeypatch.setattr(page, "get_database_engine", lambda: object())
     monkeypatch.setattr(page, "publish_snapshot", store.publish)
     monkeypatch.setattr(page, "resolve_snapshot", store.resolve)

@@ -25,7 +25,6 @@ from options.build_brent_vol_surface import (
     exclude_expired_option_targets,
     horizon_from_as_of,
 )
-from options.calibration_engine.converters.delta import delta_to_strike
 from options.surface_expiry_metadata import resolve_surface_expiry_metadata
 from options.hh_lne_calibration import (
     HH_LNE_CALIBRATION_ENGINE_VERSION,
@@ -44,7 +43,6 @@ from vol_calibration.ttf_publication import (
     publish_hybrid_surface,
     ttf_publication_frame,
 )
-from vol_calibration.ttf_hybrid_surface import densify_bounded_source_surface
 
 
 COMMODITY = "HH"
@@ -91,6 +89,8 @@ def _candidate_code_fingerprint():
     dash_root = Path(__file__).resolve().parents[2]
     paths = (
         options_root / "hh_lne_calibration.py",
+        options_root / "hh_single_surface.py",
+        options_root / "brent_single_surface.py",
         options_root / "build_hh_vol_surface_from_settlements.py",
         options_root / "build_brent_vol_surface.py",
         options_root / "calibration_engine" / "models" / "wing_model.py",
@@ -219,72 +219,6 @@ def _verify_candidate_source(engine, stored):
         locked_inputs
     ):
         raise ValueError("The pinned HH settlement rows changed; recalibrate.")
-
-
-def _densify_hh_candidate(candidate):
-    source_results = {
-        pd.Timestamp(item["option_expiration_date"]).date(): item
-        for item in candidate["expiry_results"]
-    }
-    source = candidate["surface"]
-    atm_variance = source.loc[
-        np.isclose(source["delta"].to_numpy(dtype=float), 0.50),
-        ["contract_date", "total_variance"],
-    ].set_index("contract_date")["total_variance"]
-    selected_shape_factor = None
-    for shape_factor in (1.0, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.50, 0.0):
-        surface = source.copy()
-        if shape_factor < 1.0:
-            time_to_expiry = (
-                surface["total_variance"].to_numpy(dtype=float)
-                / surface["volatility"].to_numpy(dtype=float) ** 2
-            )
-            surface["total_variance"] = (
-                shape_factor * surface["total_variance"].to_numpy(dtype=float)
-                + (1.0 - shape_factor)
-                * surface["contract_date"].map(atm_variance).to_numpy(dtype=float)
-            )
-            surface["volatility"] = np.sqrt(
-                surface["total_variance"].to_numpy(dtype=float) / time_to_expiry
-            )
-            surface["strike"] = [
-                delta_to_strike(
-                    float(delta), float(forward), float(volatility),
-                    float(years) * 365.0, option_type="call", r=0.0,
-                )
-                for delta, forward, volatility, years in zip(
-                    surface["delta"], surface["working_forward"],
-                    surface["volatility"], time_to_expiry,
-                )
-            ]
-        try:
-            dense, dense_results = densify_bounded_source_surface(
-                surface, commodity="HH"
-            )
-        except ValueError as exc:
-            if "jointly projected PCHIP core failed the complete arbitrage gate" not in str(exc):
-                raise
-            continue
-        selected_shape_factor = shape_factor
-        break
-    if selected_shape_factor is None:
-        raise ValueError("HH dense smile failed the complete arbitrage gate at every governed shape factor")
-    candidate["input_manifest"]["bounded_density_shape_factor"] = selected_shape_factor
-    for result in dense_results:
-        source = source_results[result["option_expiration_date"]]
-        result["parameters"] = source.get("parameters") or result["parameters"]
-        result["diagnostics"] = {
-            **(source.get("diagnostics") or {}),
-            **result["diagnostics"],
-            "bounded_density_shape_factor": selected_shape_factor,
-        }
-        result["weighted_rmse"] = source.get("weighted_rmse")
-        result["unweighted_rmse"] = source.get("unweighted_rmse")
-        result["max_error"] = source.get("max_error")
-    candidate["surface"] = dense
-    candidate["expiry_results"] = dense_results
-    candidate["point_count"] = len(dense)
-    return candidate
 
 
 def _empty_figure(message: str):
@@ -595,7 +529,6 @@ def calibrate_hh_governed(_clicks, trade_date, requested_snapshot_id, published)
             code_revision=os.getenv("APP_CODE_REVISION", "unknown"),
             base_publication_id=(published or {}).get("publication_id"),
         )
-        candidate = _densify_hh_candidate(candidate)
         candidate["input_fingerprint"] = input_manifest_fingerprint(
             candidate["input_manifest"]
         )
@@ -613,11 +546,11 @@ def calibrate_hh_governed(_clicks, trade_date, requested_snapshot_id, published)
                     "expiry": pd.Timestamp(
                         result["option_expiration_date"]
                     ).strftime("%Y-%m"),
-                    "eligible": (result.get("diagnostics") or {}).get("point_count"),
-                    "rmse": "Projected" if rmse is None else f"{100 * float(rmse):.3f}%",
+                    "eligible": (result.get("diagnostics") or {}).get("quote_count"),
+                    "rmse": "No quotes" if rmse is None else f"{100 * float(rmse):.3f}%",
                     "arbitrage": "Pass" if validation.get("is_valid") else "Fail",
                     "source_class": (result.get("diagnostics") or {}).get(
-                        "calibration_mode", "unknown"
+                        "term_basis", "unknown"
                     ),
                 }
             )

@@ -22,12 +22,11 @@ from vol_calibration.auth import Identity, Permission, authorize
 from vol_calibration.calibration_inputs import TTF_CALL_DELTA_NODES
 from vol_calibration.ttf_hybrid_surface import (
     GAS_HYBRID_POLICY_VERSIONS,
-    HH_HYBRID_METHOD,
-    HH_HYBRID_POLICY_VERSION,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
 )
 from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
+from options.hh_single_surface import HH_SINGLE_SURFACE_POLICY_VERSION
 
 
 PUBLICATION_TABLE = "at_lng.vol_surface_publications"
@@ -60,9 +59,9 @@ _HYBRID_PUBLICATION_POLICIES = {
         "engine_version": "nbp-pchip-wing-v1",
     },
     "HH": {
-        "method": HH_HYBRID_METHOD,
-        "policy_version": HH_HYBRID_POLICY_VERSION,
-        "engine_version": "hh-lne-projected-pchip-core-v2",
+        "method": "single_svi_seasonal_quotes",
+        "policy_version": HH_SINGLE_SURFACE_POLICY_VERSION,
+        "engine_version": HH_SINGLE_SURFACE_POLICY_VERSION,
     },
 }
 _TIMING_LOG = logging.getLogger(__name__)
@@ -427,8 +426,8 @@ def load_latest_ttf_publication(
         "expiry_count": int(points["contract_date"].nunique()) if not points.empty else 0,
         "source": SURFACE_TABLE,
         "commodity": product,
-        "method": policy["method"],
-        "policy_version": policy["policy_version"],
+        "method": configuration.get("method") or policy["method"],
+        "policy_version": configuration.get("policy_version") or policy["policy_version"],
         "expiry_results": [_json_ready(dict(item)) for item in expiry_results],
         "data": points.to_json(date_format="iso", orient="split"),
         "error": None,
@@ -445,6 +444,8 @@ def _load_persisted_publication_receipt(
         SELECT p.publication_id, p.run_id, p.cob_date, p.published_at,
                p.published_by,
                r.configuration->>'input_manifest_fingerprint' AS input_manifest_fingerprint,
+               r.configuration->>'method' AS calibration_method,
+               r.configuration->>'policy_version' AS calibration_policy_version,
                points.row_count, points.expiry_count, points.bad_point_count,
                points.min_fingerprint, points.max_fingerprint,
                month_sizes.min_points_per_month, month_sizes.max_points_per_month,
@@ -517,8 +518,8 @@ def _load_persisted_publication_receipt(
         else None,
         "source": SURFACE_TABLE,
         "commodity": product,
-        "method": policy["method"],
-        "policy_version": policy["policy_version"],
+        "method": row["calibration_method"] or policy["method"],
+        "policy_version": row["calibration_policy_version"] or policy["policy_version"],
         "surface_loaded": False,
         "data": None,
         "error": None,

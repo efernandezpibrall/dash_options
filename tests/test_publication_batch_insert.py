@@ -89,6 +89,8 @@ def test_compact_receipt_checks_committed_points_and_results():
         "published_at": datetime(2026, 9, 28, tzinfo=timezone.utc),
         "published_by": "operator",
         "input_manifest_fingerprint": "fingerprint",
+        "calibration_method": "PCHIP-core/Wing-v2-tail",
+        "calibration_policy_version": "ttf-pchip-core-wing-v2-tail",
         "row_count": 24862,
         "expiry_count": 62,
         "bad_point_count": 0,
