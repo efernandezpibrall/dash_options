@@ -5702,8 +5702,10 @@ def update_inline_calibration_state(
     current = state or {"open": False}
     trigger = ctx.triggered_id
     clicks = int(_n_clicks or 0)
-    previous_clicks = int(current.get("last_clicks") or 0)
-    if clicks > previous_clicks:
+    toggle_clicked = (
+        "brent-vol-history-calibration-toggle.n_clicks" in ctx.triggered_prop_ids
+    )
+    if toggle_clicked and clicks:
         is_open = not bool(current.get("open"))
     elif bool(current.get("open")) and trigger in {
         "brent-vol-history-product",
@@ -5718,7 +5720,6 @@ def update_inline_calibration_state(
         "product": product,
         "selectedDate": selected_date,
         "snapshotId": (snapshot or {}).get("snapshot_id"),
-        "last_clicks": clicks,
         "revision": pd.Timestamp.now(tz="UTC").isoformat(),
     }
 
