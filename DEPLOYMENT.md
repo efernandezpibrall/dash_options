@@ -75,7 +75,7 @@ enable `VOL_CALIBRATION_BRENT_WRITES_ENABLED` and
 HH LNE now uses one actual-strike SVI smile per delivery month. Sparse months
 are constrained by available LNE quotes and same-season predecessors. The
 401-point governed surface and operational 11-delta grid sample the same model.
-Apply Alembic revision `20260929_02` before enabling
+Apply Alembic revisions `20260929_02` and `20260929_03` before enabling
 `VOL_CALIBRATION_HH_WRITES_ENABLED` and
 `VOL_CALIBRATION_HH_PUBLICATION_ENABLED`. Pin the exact LNE settlement snapshot,
 verify the quote-fit and density diagnostics, then read back the immutable HH
