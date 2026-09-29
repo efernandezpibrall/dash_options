@@ -39,14 +39,16 @@ Run before producing the deployment artifact:
 python -m pip check
 python -m pytest
 ruff check .
-python -c "import index_options; index_options.app._setup_server()"
+python -c "import wsgi"
 ```
 
 Serve this Dash build with one process and multiple threads so every request
-uses the same registered callback map while long chart loads remain responsive:
+uses the same registered callback map while long chart loads remain responsive.
+The WSGI entrypoint completes callback registration before requests can arrive,
+including polling requests from browser tabs left open during a restart:
 
 ```bash
-gunicorn -w 1 -k gthread --threads 8 -b 127.0.0.1:8071 --timeout 180 index_options:server
+gunicorn -w 1 -k gthread --threads 8 -b 127.0.0.1:8071 --timeout 180 wsgi:server
 ```
 
 ## Configuration
