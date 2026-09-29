@@ -49,7 +49,9 @@ to hide it explicitly. Publication still uses separate write flags.
 Brent calibration fits observed strikes from a pinned settlement or intraday
 snapshot with one SVI model. The 11 saved deltas are output samples for sharing,
 not calibration targets. The Brent residual/PCHIP callback is removed from the
-app path. After verifying the source, expiry calendar, and publisher identity,
+app path. Apply Alembic revision `20260929_01` to permit the exact single-SVI
+policy in the governed dense-surface table. After verifying the source, expiry
+calendar, and publisher identity,
 enable `VOL_CALIBRATION_BRENT_WRITES_ENABLED` and
 `VOL_CALIBRATION_BRENT_PUBLICATION_ENABLED`; other product gates remain separate.
 
