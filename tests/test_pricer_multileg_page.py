@@ -6,6 +6,7 @@ import json
 import pytest
 from dash import dcc, html, no_update
 
+import pricer_structure
 from pages import pricer
 
 
@@ -1089,7 +1090,7 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
         context,
         "2026-07-29",
     )
-    pricing_volatility = 0.31 * pricer.volatility_adjustment(
+    pricing_volatility = 0.31 * pricer_structure.volatility_adjustment(
         FrozenDate(2026, 7, 29),
         FrozenDate(2026, 10, 29),
         FrozenDate(2027, 1, 29),

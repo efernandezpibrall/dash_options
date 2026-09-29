@@ -80,6 +80,14 @@ def test_context_mapping_pins_exact_sources_and_one_shared_hh_publication(monkey
         inline_workspace, "load_latest_hybrid_publication", fake_publication
     )
     monkeypatch.setattr(
+        inline_workspace,
+        "active_brent_publication",
+        lambda _engine, cob_date: {
+            "publication_id": "active-brent",
+            "published_at": "2026-08-28T18:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
         inline_workspace, "resolve_hh_lne_snapshot_reference", fake_lne
     )
 
@@ -107,7 +115,7 @@ def test_context_mapping_pins_exact_sources_and_one_shared_hh_publication(monkey
         ("2026-08-28", None),
         ("2026-08-28", "lne-uuid"),
     ]
-    assert [call[1] for call in publication_calls] == ["BRENT", "HH", "HH", "JKM"]
+    assert [call[1] for call in publication_calls] == ["HH", "HH", "JKM"]
 
 
 def test_lne_intraday_is_rejected_before_any_calibration_load(monkeypatch):

@@ -10,7 +10,6 @@ import os
 from typing import Any
 
 import dash_bootstrap_components as dbc
-import numpy as np
 import pandas as pd
 from dash import Input, Output, State, callback, dcc, html, no_update
 from dash.exceptions import PreventUpdate
@@ -26,7 +25,6 @@ from runtime_config import get_database_engine
 from vol_calibration.auth import resolve_request_identity
 from vol_calibration.brent_single_candidate import active_brent_publication
 from vol_calibration.feature_flags import (
-    brent_publication_enabled,
     jkm_publication_enabled,
     ttf_publication_enabled,
 )
