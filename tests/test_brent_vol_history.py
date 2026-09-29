@@ -750,7 +750,8 @@ def test_latest_calibrated_surface_uses_latest_active_publication(
     )
 
 
-def test_missing_calibrated_publication_is_explicit(monkeypatch):
+@pytest.mark.parametrize("product", ["BRENT", "LNE", "ON"])
+def test_missing_calibrated_publication_is_explicit(monkeypatch, product):
     monkeypatch.setattr(
         history.pd,
         "read_sql",
@@ -760,17 +761,69 @@ def test_missing_calibrated_publication_is_explicit(monkeypatch):
         "2026-08-26",
         ["2026-12-01"],
         engine=object(),
-        product="BRENT",
+        product=product,
     )
     assert surface.attrs["publication_status"] == "no_publication"
     cards = history.build_plot_cards(
         _chain_frame(),
         pd.DataFrame(),
-        product="BRENT",
+        product=product,
         calibrated=surface,
     )
     contract = history._expiry_legend_contract(cards)
     assert "calibrated" not in contract["available_layers"]
+    if product in {"LNE", "ON"}:
+        assert "No HH surface published for this settlement date" in str(cards[0].children)
+
+
+@pytest.mark.parametrize("product", ["BRENT", "LNE", "ON"])
+@pytest.mark.parametrize("selected_date", ["2026-09-25", "2026-09-28"])
+def test_single_surface_chart_queries_only_selected_cob(monkeypatch, product, selected_date):
+    captured = []
+
+    def read_sql(query, engine, params):
+        captured.append((str(query), params))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", read_sql)
+    history.load_latest_calibrated_surface(
+        selected_date, ["2026-12-01"], engine=object(), product=product,
+    )
+    sql, params = captured[0]
+    assert "AND p.cob_date = :selected_cob" in sql
+    assert params == {
+        "commodity": "BRENT" if product == "BRENT" else "HH",
+        "selected_cob": pd.Timestamp(selected_date).date(),
+    }
+
+
+@pytest.mark.parametrize("product", ["LNE", "ON"])
+@pytest.mark.parametrize("axis", ["strike", "delta"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_hh_views_draw_one_shared_surface_with_separate_market_context(product, axis, legacy):
+    chain = _chain_frame().assign(product=product)
+    # Distinct context observations must not alter the shared HH publication.
+    chain["implied_volatility"] += 0.10 if product == "ON" else 0.0
+    surface = _calibrated_frame().assign(
+        commodity="HH", calibration_policy_version=(
+            "legacy" if legacy else history.HH_SINGLE_SURFACE_POLICY_VERSION
+        ),
+    )
+    surface.attrs["publication_metadata"]["commodity"] = "HH"
+    cards = history.build_plot_cards(chain, _published_frame(), x_axis=axis, product=product, calibrated=surface)
+    figures = [c.figure for card in cards for c in _walk(card) if hasattr(c, "figure")]
+    assert len(figures) == 1
+    traces = figures[0].data
+    assert not any((t.meta or {}).get("legend_layer") == "published" for t in traces)
+    fitted = [t for t in traces if (t.meta or {}).get("legend_layer") == "calibrated"]
+    assert len(fitted) == 1
+    label = "Legacy HH surface" if legacy else "HH surface · LNE calibrated"
+    assert fitted[0].name.startswith(label)
+    assert list(fitted[0].y) == pytest.approx([32, 30, 28])
+    observed = next(t for t in traces if t.name == "Bloomberg settlement IV")
+    assert sorted(observed.y) == pytest.approx([39, 41] if product == "ON" else [29, 31])
+    assert "Revision 9572ae7f" in fitted[0].hovertemplate
+    assert "Policy " in fitted[0].hovertemplate
 
 
 def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
@@ -1664,3 +1717,49 @@ def test_publication_coverage_ignores_non_chain_maturities():
         ignore_index=True,
     )
     assert history.publication_coverage(_chain_frame(), published) == (1, 1)
+
+
+@pytest.mark.parametrize("product", ["LNE", "ON", "BRENT"])
+def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkeypatch, product):
+    from types import SimpleNamespace
+    from dash import no_update
+
+    chain = _chain_frame().assign(product=product)
+    snapshot_id = chain.iloc[0]["snapshot_id"]
+    snapshots = pd.DataFrame([{
+        "snapshot_id": snapshot_id, "business_date": "2026-08-10",
+        "observed_at": "2026-08-10T12:00:00Z", "snapshot_kind": "SETTLEMENT",
+    }])
+    commodity = "BRENT" if product == "BRENT" else "HH"
+    surface = _calibrated_frame().assign(publication_id="new-revision", commodity=commodity)
+    surface.attrs["publication_metadata"].update(publication_id="new-revision", commodity=commodity)
+    calls = []
+    monkeypatch.setattr(history, "ctx", SimpleNamespace(triggered_id="vol-trades-publication-revision"))
+    monkeypatch.setattr(history, "load_available_snapshots", lambda _product: snapshots)
+    monkeypatch.setattr(history, "load_chain_snapshot", lambda *_args, **_kwargs: chain)
+
+    def load(cob, dates, *, product):
+        calls.append((cob, product))
+        return surface
+
+    monkeypatch.setattr(history, "load_latest_calibrated_surface", load)
+    monkeypatch.setattr(history, "load_published_surface", lambda *_a, **_kw: pytest.fail("duplicate operational overlay queried"))
+    event = {"commodity": commodity, "cob_date": "2026-08-10", "publication_id": "new-revision"}
+    options = [{"value": v} for v in history.EXPIRY_LEGEND_LAYER_ORDER]
+    result = history.render_history(
+        snapshot_id, "delta", product, event, "2026-12-01", None, options, ["calibrated"],
+    )
+    assert calls == [("2026-08-10", product)]
+    assert result[0]["publication_id"] == "new-revision"
+    assert result[0]["snapshot_id"] == snapshot_id
+    assert result[3] == "2026-12-01"
+    controls = [c for child in result[14] for c in _walk(child)]
+    selector = next(c for c in controls if getattr(c, "id", None) == "brent-vol-history-expiry-layers")
+    assert selector.value == ["calibrated"]
+    figures = [c.figure for card in result[1] for c in _walk(card) if hasattr(c, "figure")]
+    assert figures and figures[0].layout.xaxis.title.text.startswith("Delta")
+    for other in [dict(event, cob_date="2026-08-11"), dict(event, commodity="JKM")]:
+        unchanged = history.render_history(snapshot_id, "delta", product, other)
+        assert all(value is no_update for value in unchanged)
+    assert len(calls) == 1
+    assert all(value is no_update for value in history.render_history(snapshot_id, "delta", "JKM", event))

@@ -28,6 +28,7 @@ from dash import (
     no_update,
 )
 from flask import has_request_context, request
+from dash.exceptions import MissingCallbackContextException
 from plotly.subplots import make_subplots
 from sqlalchemy import bindparam, text
 
@@ -39,6 +40,7 @@ from options.calibration_engine.io.brent_market import (
     prepare_brent_calibration_observations,
 )
 from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
+from options.hh_single_surface import HH_SINGLE_SURFACE_POLICY_VERSION
 from runtime_config import get_database_engine
 from brent_option_chain_refresh import (
     INTRADAY_REQUEST_KIND,
@@ -134,6 +136,7 @@ SNAPSHOT_TABLE = "at_lng.vol_market_snapshots"
 PUBLISHED_TABLE = "at_lng.implied_volatility_surface_from_prices"
 CALIBRATED_PUBLICATION_TABLE = "at_lng.vol_surface_publications"
 CALIBRATED_SURFACE_TABLE = "at_lng.implied_volatility_surface_calibrated"
+EXACT_COB_SURFACE_PRODUCTS = frozenset({"BRENT", "LNE", "ON"})
 X_AXIS_STRIKE = "strike"
 X_AXIS_DELTA = "delta"
 SETTLEMENT_IV_LOWER_BOUND = 0.005
@@ -1125,6 +1128,18 @@ def calibrated_publication_metadata(surface: pd.DataFrame | None) -> dict[str, A
     return metadata
 
 
+def _calibrated_surface_label(product: str, surface: pd.DataFrame) -> str:
+    policies = (
+        surface["calibration_policy_version"].dropna().astype(str).unique().tolist()
+        if "calibration_policy_version" in surface else []
+    )
+    if product == "BRENT":
+        return "BRENT surface" if policies == [BRENT_SINGLE_SURFACE_POLICY_VERSION] else "Legacy BRENT surface"
+    if product in {"LNE", "ON"}:
+        return "HH surface · LNE calibrated" if policies == [HH_SINGLE_SURFACE_POLICY_VERSION] else "Legacy HH surface"
+    return f"Calibrated {_product_spec(product)['published_product']}"
+
+
 def _read_calibrated_surface_points(
     publication_id: str,
     contract_dates: tuple[Any, ...],
@@ -1190,7 +1205,7 @@ def load_latest_calibrated_surface(
 ) -> pd.DataFrame:
     """Load the latest active calibrated publication for the selected product.
 
-    Brent uses the active revision for the selected exact COB. Other products
+    Brent and both HH views use the active revision for the selected exact COB. Other products
     retain their current-publication comparison with a labelled publication COB.
     """
     product = _normalize_product(product)
@@ -1210,7 +1225,8 @@ def load_latest_calibrated_surface(
     if pd.isna(selected_cob) or not normalized_contracts:
         return _empty_calibrated_surface("invalid_selection")
     commodity = _product_spec(product)["published_product"]
-    cob_filter = "AND p.cob_date = :selected_cob" if product == "BRENT" else ""
+    exact_cob = product in EXACT_COB_SURFACE_PRODUCTS
+    cob_filter = "AND p.cob_date = :selected_cob" if exact_cob else ""
     catalog_query = text(
         f"""
         SELECT p.publication_id,
@@ -1233,7 +1249,7 @@ def load_latest_calibrated_surface(
         db_engine,
         params={
             "commodity": commodity,
-            **({"selected_cob": selected_cob.date()} if product == "BRENT" else {}),
+            **({"selected_cob": selected_cob.date()} if exact_cob else {}),
         },
     )
     if catalog.empty:
@@ -3168,32 +3184,19 @@ def build_expiry_figure(
             if not pd.isna(published_at)
             else "unavailable"
         )
-        commodity = str(metadata.get("commodity") or spec["published_product"])
         publication_id = str(metadata.get("publication_id") or "unavailable")
-        brent_policy = (
+        surface_policies = (
             calibrated["calibration_policy_version"].dropna().astype(str).unique().tolist()
-            if resolved_product == "BRENT" and "calibration_policy_version" in calibrated
+            if "calibration_policy_version" in calibrated
             else []
         )
-        current_brent_policy = brent_policy == [BRENT_SINGLE_SURFACE_POLICY_VERSION]
-        brent_surface_label = (
-            "BRENT surface" if current_brent_policy else "Legacy BRENT surface"
-        )
-        hover_surface_label = (
-            brent_surface_label
-            if resolved_product == "BRENT"
-            else f"Calibrated {commodity} publication"
-        )
+        surface_label = _calibrated_surface_label(resolved_product, calibrated)
         figure.add_trace(
             go.Scatter(
                 x=calibrated["_axis_x"],
                 y=100.0 * calibrated["volatility"],
                 mode="lines",
-                name=(
-                    f"{brent_surface_label} · COB {cob_label}"
-                    if resolved_product == "BRENT"
-                    else f"Calibrated {commodity} · COB {cob_label}"
-                ),
+                name=f"{surface_label} · COB {cob_label}",
                 legendrank=35,
                 meta={"legend_layer": "calibrated"},
                 line=(
@@ -3211,7 +3214,7 @@ def build_expiry_figure(
                     ]
                 ),
                 hovertemplate=(
-                    f"<b>{hover_surface_label}</b>"
+                    f"<b>{surface_label} publication</b>"
                     "<br>Strike %{customdata[0]:.3f}"
                     + axis_hover
                     + " · IV <b>%{y:.2f}%</b>"
@@ -3219,7 +3222,8 @@ def build_expiry_figure(
                     " · call Δ %{customdata[1]:.3f}"
                     "<br>%{customdata[4]} · %{customdata[3]}"
                     f"<br>COB {cob_label} · Published {published_label}"
-                    f"<br>Revision {publication_id}<extra></extra>"
+                    f"<br>Revision {publication_id}"
+                    f"<br>Policy {escape(', '.join(surface_policies) or 'legacy')}<extra></extra>"
                 ),
             ),
             secondary_y=False,
@@ -3694,9 +3698,22 @@ def build_plot_cards(
         .drop_duplicates()
         .itertuples(index=False)
     }
-    published_nodes = published_strike_nodes(published, forward_by_contract, cob_date)
+    published_nodes = (
+        pd.DataFrame() if resolved_product in EXACT_COB_SURFACE_PRODUCTS
+        else published_strike_nodes(published, forward_by_contract, cob_date)
+    )
     calibrated_nodes = calibrated if calibrated is not None else pd.DataFrame()
     cards = []
+    if resolved_product in {"LNE", "ON"} and calibrated_nodes.empty:
+        missing = calibrated_nodes.attrs.get("publication_status") == "no_publication"
+        cards.append(dbc.Alert(
+            (
+                f"No HH surface published for this settlement date ({cob_date:%Y-%m-%d})."
+                if missing else
+                f"HH surface unavailable for {cob_date:%Y-%m-%d}; publication data could not be loaded."
+            ),
+            color="secondary" if missing else "warning",
+        ))
     for expiry_value in expiries:
         expiry = pd.Timestamp(expiry_value).normalize()
         figure = build_expiry_figure(
@@ -5037,6 +5054,8 @@ def _expiry_legend_options(
     available_layers: list[str] | tuple[str, ...],
     *,
     new_volume_layers: list[str] | tuple[str, ...] = (),
+    product: str = PRODUCT,
+    surface_label: str | None = None,
 ) -> list[dict[str, Any]]:
     available = set(available_layers)
     new_volume = set(new_volume_layers)
@@ -5050,6 +5069,9 @@ def _expiry_legend_options(
         label = spec["label"]
         description = spec["description"]
         swatch = spec["swatch"]
+        if layer == "calibrated" and product in {"LNE", "ON"}:
+            label = surface_label or "HH surface · LNE calibrated"
+            description = "Show or hide the shared HH publication for this settlement date; calibrated only from LNE"
         if layer in new_volume:
             label = f"{label} · new edge"
             description = (
@@ -5443,7 +5465,7 @@ layout = html.Main(
             id="brent-vol-history-calibration-context",
             storage_type="memory",
         ),
-        dcc.Store(id="brent-single-publication-revision", storage_type="memory"),
+        dcc.Store(id="vol-trades-publication-revision", storage_type="memory"),
         html.Div(
             id="brent-vol-history-calibration-panel",
             className="brent-vol-history-calibration-panel",
@@ -6727,7 +6749,7 @@ def _render_jkm_history(
     Input("brent-vol-history-date", "value"),
     Input("brent-vol-history-x-axis", "value"),
     Input("brent-vol-history-product", "value"),
-    Input("brent-single-publication-revision", "data"),
+    Input("vol-trades-publication-revision", "data"),
     State("brent-vol-history-detail-expiry", "value"),
     State("brent-vol-history-trade-window-state", "data"),
     State("brent-vol-history-expiry-layers", "options"),
@@ -6745,6 +6767,14 @@ def render_history(
 ):
     x_axis = _normalize_x_axis(x_axis)
     product = _normalize_product(product)
+    try:
+        publication_trigger = ctx.triggered_id == "vol-trades-publication-revision"
+    except MissingCallbackContextException:
+        publication_trigger = False
+    if publication_trigger and (
+        (_published_revision or {}).get("commodity") != _product_spec(product)["published_product"]
+    ):
+        return (no_update,) * 16
     if not selected_snapshot_id:
         cards = build_plot_cards(
             pd.DataFrame(), pd.DataFrame(), x_axis=x_axis, product=product
@@ -6809,6 +6839,10 @@ def render_history(
         if selected.empty:
             raise ValueError("selected snapshot is no longer available")
         snapshot = selected.iloc[0]
+        if publication_trigger and (
+            (_published_revision or {}).get("cob_date") != str(pd.Timestamp(snapshot["business_date"]).date())
+        ):
+            return (no_update,) * 16
         snapshot_id = str(snapshot["snapshot_id"])
         snapshot_kind = _normalize_snapshot_kind(
             snapshot.get("snapshot_kind") or "SETTLEMENT"
@@ -6869,7 +6903,7 @@ def render_history(
                     )
                 except Exception:
                     prior_settlement_chain = pd.DataFrame()
-        if product == "BRENT" or snapshot_kind == "INTRADAY":
+        if product in EXACT_COB_SURFACE_PRODUCTS or snapshot_kind == "INTRADAY":
             published = pd.DataFrame()
         elif product == "TFO":
             published = load_icap_settlement_surface(selected_date)
@@ -6943,6 +6977,8 @@ def render_history(
         legend_options = _expiry_legend_options(
             legend_contract["available_layers"],
             new_volume_layers=legend_contract["new_volume_layers"],
+            product=product,
+            surface_label=_calibrated_surface_label(product, calibrated),
         )
         selected_layers = _selected_expiry_layers(
             legend_contract["available_layers"],
@@ -6959,6 +6995,7 @@ def render_history(
                 "observed_at": pd.Timestamp(snapshot["observed_at"]).isoformat(),
                 "display_expiries": display_expiries,
                 "intraday_universe_policy_version": universe.get("policy_version"),
+                "publication_id": calibrated_publication_metadata(calibrated).get("publication_id"),
             },
             cards,
             expiry_options,

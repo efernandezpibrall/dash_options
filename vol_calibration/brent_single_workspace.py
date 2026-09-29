@@ -148,7 +148,7 @@ def enable_brent_publication(confirmation, candidate, context):
 
 @callback(
     Output("vol-trades-inline-brent-publication-status", "children"),
-    Output("brent-single-publication-revision", "data"),
+    Output("vol-trades-publication-revision", "data", allow_duplicate=True),
     Input("vol-trades-inline-brent-publish", "n_clicks"),
     State("vol-trades-inline-brent-confirm", "value"),
     State("brent-single-candidate", "data"),
@@ -201,6 +201,9 @@ def publish_brent_candidate(clicks, confirmation, preview, context):
         return dbc.Alert(
             f"Published Brent revision {publication_id} with "
             f"{payload['row_count']} persisted points.", color="success"
-        ), {"publication_id": publication_id, "at": datetime.now(timezone.utc).isoformat()}
+        ), {
+            "commodity": "BRENT", "cob_date": context["cob_date"],
+            "publication_id": publication_id, "at": datetime.now(timezone.utc).isoformat(),
+        }
     except Exception as exc:
         return dbc.Alert(f"Publication blocked: {exc}", color="danger"), no_update

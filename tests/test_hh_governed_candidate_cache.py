@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from dash import no_update
 from snapshot_cache import SnapshotStore
 from vol_calibration.pages import hh_governed as page
 
@@ -103,14 +104,16 @@ def test_hh_publish_reuses_server_candidate_and_rejects_tampered_browser_state(
         exported = pd.read_excel(workbook, sheet_name="Candidate Surface")
         assert exported["volatility"].tolist() == [0.30, 0.32]
 
-        result, _ = page.publish_hh_governed(
+        result, _, revision = page.publish_hh_governed(
             1, browser, None, ["confirmed"]
         )
         assert result["publication_id"] == "published-id"
+        assert revision == {"commodity": "HH", "cob_date": "2026-09-25", "publication_id": "published-id"}
         assert calls == {"build": 1, "publish": 1, "source": 1}
 
         changed = dict(browser, input_fingerprint="forged")
-        _, alert = page.publish_hh_governed(1, changed, None, ["confirmed"])
+        unchanged, alert, revision = page.publish_hh_governed(1, changed, None, ["confirmed"])
+        assert unchanged is no_update and revision is no_update
         assert "blocked" in str(alert.children).lower()
         assert calls["publish"] == 1
 

@@ -445,7 +445,7 @@ def load_hh_governed_inputs(trade_date, _reload_clicks, requested_snapshot_id):
             trade_date,
             commodity="HH",
             as_of=pd.to_datetime(reference["observed_at"], utc=True),
-            prefer_exact_cob=True,
+            require_exact_cob=True,
         )
         expiry_rows = []
         for expiry, group in market.groupby("expiry", sort=True):
@@ -488,9 +488,9 @@ def load_hh_governed_inputs(trade_date, _reload_clicks, requested_snapshot_id):
             "market_fingerprint": input_manifest_fingerprint(manifest),
         }
         publication_note = (
-            f"Active point-in-time HH publication {published.get('publication_id')}"
+            f"Active HH publication for {trade_date}: {published.get('publication_id')}"
             if published.get("publication_id")
-            else "No point-in-time HH publication exists for this market as-of."
+            else "No HH surface published for this settlement date."
         )
         return (
             market.to_json(date_format="iso", orient="split"),
@@ -661,6 +661,7 @@ def enable_hh_publish(candidate, confirmation):
 @callback(
     Output(f"{PREFIX}-published", "data", allow_duplicate=True),
     Output(f"{PREFIX}-publication-status", "children"),
+    Output("vol-trades-publication-revision", "data", allow_duplicate=True),
     Input(f"{PREFIX}-publish", "n_clicks"),
     State(f"{PREFIX}-candidate", "data"),
     State(f"{PREFIX}-published", "data"),
@@ -708,9 +709,13 @@ def publish_hh_governed(_clicks, candidate, current, confirmation):
             f"Published HH revision {payload['publication_id']} with "
             f"{payload['row_count']} freshly read-back points.",
             color="success",
-        )
+        ), {
+            "commodity": "HH",
+            "cob_date": rebuilt["cob_date"],
+            "publication_id": payload["publication_id"],
+        }
     except Exception as exc:
-        return no_update, dbc.Alert(f"Publication blocked: {exc}", color="danger")
+        return no_update, dbc.Alert(f"Publication blocked: {exc}", color="danger"), no_update
 
 
 @callback(

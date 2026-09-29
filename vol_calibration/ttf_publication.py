@@ -302,13 +302,15 @@ def load_latest_ttf_publication(
     as_of: datetime | None = None,
     publication_id: str | None = None,
     prefer_exact_cob: bool = False,
+    require_exact_cob: bool = False,
     commodity: str = "TTF",
 ) -> dict:
     """Load one complete hybrid publication, normally without look-ahead.
 
     Calibration review may opt into the active revision for the exact selected
     COB even when that revision was approved later.  Older fallback revisions
-    remain subject to the normal point-in-time cutoff.
+    remain subject to the normal point-in-time cutoff. require_exact_cob selects
+    only that date's active publication, with no older-date fallback.
     """
     product, policy = _publication_policy(commodity)
     if not ttf_publication_storage_available(engine):
@@ -319,7 +321,10 @@ def load_latest_ttf_publication(
         )
     cutoff = _as_of_cutoff(trading_date, as_of)
     if publication_id is None:
-        if prefer_exact_cob:
+        if require_exact_cob:
+            publication_filter = "p.cob_date = :trading_date"
+            publication_order = "p.published_at DESC, p.created_at DESC"
+        elif prefer_exact_cob:
             publication_filter = (
                 "(p.cob_date = :trading_date OR "
                 "(p.cob_date < :trading_date AND p.published_at <= :as_of))"
@@ -1131,6 +1136,7 @@ def load_latest_hybrid_publication(
     as_of: datetime | None = None,
     publication_id: str | None = None,
     prefer_exact_cob: bool = False,
+    require_exact_cob: bool = False,
 ) -> dict:
     return load_latest_ttf_publication(
         engine,
@@ -1138,6 +1144,7 @@ def load_latest_hybrid_publication(
         as_of=as_of,
         publication_id=publication_id,
         prefer_exact_cob=prefer_exact_cob,
+        require_exact_cob=require_exact_cob,
         commodity=commodity,
     )
 

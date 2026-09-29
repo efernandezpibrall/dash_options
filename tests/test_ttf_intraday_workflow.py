@@ -403,8 +403,9 @@ def test_post_commit_readback_can_select_historical_publication_by_id(monkeypatc
     assert calls[0][1] == {"publication_id": publication_id}
 
 
+@pytest.mark.parametrize("strict", [False, True])
 def test_calibration_review_prefers_active_exact_cob_before_pit_fallback(
-    monkeypatch,
+    monkeypatch, strict,
 ):
     publication_id = "139aa83d-775c-4de4-abad-3967dc393730"
     run_id = "84f08398-fbe7-436c-bdf8-84f2ebfc8163"
@@ -470,14 +471,15 @@ def test_calibration_review_prefers_active_exact_cob_before_pit_fallback(
         Engine(),
         "2026-08-21",
         as_of=datetime(2026, 8, 21, 23, 59, tzinfo=timezone.utc),
-        prefer_exact_cob=True,
+        prefer_exact_cob=not strict,
+        require_exact_cob=strict,
     )
 
     sql, params = calls[0]
     assert payload["publication_id"] == publication_id
     assert "p.cob_date = :trading_date" in sql
-    assert "p.cob_date < :trading_date AND p.published_at <= :as_of" in sql
-    assert "CASE WHEN p.cob_date = :trading_date THEN 0 ELSE 1 END" in sql
+    assert ("p.cob_date < :trading_date AND p.published_at <= :as_of" in sql) is (not strict)
+    assert ("CASE WHEN p.cob_date = :trading_date THEN 0 ELSE 1 END" in sql) is (not strict)
     assert params["trading_date"] == pd.Timestamp("2026-08-21").date()
 
 

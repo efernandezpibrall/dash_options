@@ -75,6 +75,13 @@ enable `VOL_CALIBRATION_BRENT_WRITES_ENABLED` and
 HH LNE now uses one actual-strike SVI smile per delivery month. Sparse months
 are constrained by available LNE quotes and same-season predecessors. The
 401-point governed surface and operational 11-delta grid sample the same model.
+HH is calibrated exclusively from LNE. The LNE and ON selections are market
+context views of the same exact-COB HH publication; ON observations never enter
+calibration. Vol Trades displays the dense HH curve only, labels legacy policy
+revisions, and reports a missing publication instead of substituting another
+date. The operational 11-delta grid remains available to existing consumers.
+Successful Brent and HH publications refresh the matching charts through the
+page-level publication revision signal after persisted readback succeeds.
 Apply Alembic revisions `20260929_02` and `20260929_03` before enabling
 `VOL_CALIBRATION_HH_WRITES_ENABLED` and
 `VOL_CALIBRATION_HH_PUBLICATION_ENABLED`. Pin the exact LNE settlement snapshot,
