@@ -5,13 +5,13 @@ dash-bootstrap-components>=2.0,<3
 diskcache>=5.6,<6
 Flask-Compress>=1.17,<2
 gunicorn>=23.0,<24
-numpy>=2.0,<3
+numpy==2.3.5
 openpyxl>=3.1,<4
-pandas>=2.2,<3
+pandas==2.3.2
 plotly>=6.0,<7
 psycopg2-binary>=2.9,<3
 requests>=2.32.4,<3
 brotli>=1.1,<2
-scipy>=1.13,<2
-SQLAlchemy>=2.0,<2.1
+scipy==1.16.2
+SQLAlchemy==2.0.43
 trino>=0.330,<1
