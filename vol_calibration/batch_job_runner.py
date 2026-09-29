@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import scipy
 
+from options import ttf_volatility
 from options.calibration_engine.io.loaders import load_market_data_with_metadata
 from options.calibration_engine.io.storage import get_database_engine
 from vol_calibration.batch_checkpoints import (
@@ -41,7 +42,7 @@ from vol_calibration.ttf_market_context import load_ttf_trading_context
 JOB_TYPE = "gas_settlement_batch_v1"
 LEASE_SECONDS = 300
 _DASH_ROOT = Path(__file__).resolve().parents[1]
-_OPTIONS_ROOT = _DASH_ROOT.parent / "options"
+_OPTIONS_ROOT = Path(ttf_volatility.__file__).resolve().parent
 _CODE_FILES = (
     _DASH_ROOT / "vol_calibration/batch_checkpoints.py",
     _DASH_ROOT / "vol_calibration/batch_job_runner.py",

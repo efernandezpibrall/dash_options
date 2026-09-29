@@ -1,8 +1,34 @@
 """The parallel fitting scheduler must preserve a reliable serial path."""
 
+import os
+
+import numpy as np
 import pytest
 
 from vol_calibration import observed_fit_pool
+
+
+def _worker_probe(value):
+    from threadpoolctl import threadpool_info
+
+    np.dot(np.ones((2, 2)), np.ones((2, 2)))
+    return value, (
+        os.getpid(), observed_fit_pool._BLAS_LIMIT is not None,
+        [pool["num_threads"] for pool in threadpool_info()],
+    )
+
+
+def test_observed_pool_runs_in_children_with_bounded_numerical_threads(monkeypatch):
+    monkeypatch.setenv("TEST_OBSERVED_WORKERS", "2")
+    result = observed_fit_pool.prefit_observed_expiries(
+        list(range(8)), _worker_probe, environment_variable="TEST_OBSERVED_WORKERS"
+    )
+    assert set(result) == set(range(8))
+    for pid, initialized, thread_counts in result.values():
+        assert pid != os.getpid()
+        assert initialized
+        # Accelerate on macOS is not enumerated by threadpoolctl.
+        assert all(count == 1 for count in thread_counts)
 
 
 def test_observed_pool_serial_switch_and_process_failure(monkeypatch):

@@ -7,26 +7,30 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.2.2`, built from reviewed `options` commit
-`9742037bbf6d30a81cccab5576deae2f36e9f005`, and this repository's
+`at-options-analytics==1.2.3`, built from reviewed `options` commit
+`dc12f0e22f9fd724f23c3b0cdf152cc9f244cb4b`, and this repository's
 requirements. The release wheel SHA-256 is
-`0dcfbe294ec5942418aa1def11e795271e7db64f5040c043074a289196b6e3a4`.
+`4c8eed95b467cca43bc8da51dd5ee7dc5aabee3c2ae2115cc42a7f65c33e1f5f`.
 Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
 Use a dedicated virtual environment for this application; other tools in the
 shared repository environment have incompatible `requests` requirements.
 The pinned NumPy, pandas, SciPy, and SQLAlchemy versions reproduce the reviewed
-Brent calibration and its 25 September publication to persisted precision.
+Brent settlement calibration and its 25 September publication to persisted precision.
+Analytics 1.2.3 includes HH policy v3 and preserves the fitted forward when
+producing an accepted Brent intraday smile. Gas fit workers require the pinned
+`threadpoolctl` dependency; their code fingerprints resolve the installed
+analytics package and require no sibling options checkout.
 
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout 9742037bbf6d30a81cccab5576deae2f36e9f005
+git -C /path/to/options checkout dc12f0e22f9fd724f23c3b0cdf152cc9f244cb4b
 SOURCE_DATE_EPOCH=$(git -C /path/to/options show -s --format=%ct HEAD) python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-echo "0dcfbe294ec5942418aa1def11e795271e7db64f5040c043074a289196b6e3a4  dist/at_options_analytics-1.2.2-py3-none-any.whl" | shasum -a 256 -c -
-python -m pip install dist/at_options_analytics-1.2.2-py3-none-any.whl
+echo "4c8eed95b467cca43bc8da51dd5ee7dc5aabee3c2ae2115cc42a7f65c33e1f5f  dist/at_options_analytics-1.2.3-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.3-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.2'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.3'"
 ```
 
 Run before producing the deployment artifact:
