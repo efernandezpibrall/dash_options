@@ -36,12 +36,6 @@ def redirect_retired_vol_calibration():
     return redirect('/brent_vol_history', code=302)
 
 
-@server.route('/ice_chat_quotes')
-def redirect_retired_ice_quotes():
-    """Keep ICE Quotes bookmarks on their new Vol Trades section."""
-    return redirect('/brent_vol_history#ice-quotes', code=302)
-
-
 PAGE_TITLES = {
     '/': 'Greeks',
     '/greeks': 'Greeks',
@@ -50,6 +44,7 @@ PAGE_TITLES = {
     '/prices': 'Underlying Prices',
     '/vol_surface': 'Volatility Surface',
     '/brent_vol_history': 'Vol Trades',
+    '/ice_chat_quotes': 'ICE Quotes',
     '/correlations': 'Correlations',
     '/scenarios': 'Scenarios',
     '/pnl_explain': 'P&L Explain',
@@ -65,6 +60,7 @@ STATIC_PAGE_LAYOUTS = {
     '/prices': pages.prices.layout,
     '/vol_surface': pages.vol_surface.layout,
     '/brent_vol_history': pages.brent_vol_history.layout,
+    '/ice_chat_quotes': pages.ice_chat_quotes.layout,
     '/correlations': pages.correlations.layout,
     '/scenarios': pages.scenarios.layout,
     '/pricer': pages.pricer_new.layout,
@@ -79,6 +75,7 @@ NAV_LINK_IDS = {
     '/prices': 'nav-prices',
     '/vol_surface': 'nav-vol-surface',
     '/brent_vol_history': 'nav-brent-vol-history',
+    '/ice_chat_quotes': 'nav-ice-chat-quotes',
     '/correlations': 'nav-correlations',
     '/scenarios': 'nav-scenarios',
     '/pricer': 'nav-pricer',
@@ -170,6 +167,12 @@ nav_links = html.Header([
                     'Vol Trades',
                     href='/brent_vol_history',
                     id='nav-brent-vol-history',
+                    className='nav-link-secondary',
+                ),
+                dcc.Link(
+                    'ICE Quotes',
+                    href='/ice_chat_quotes',
+                    id='nav-ice-chat-quotes',
                     className='nav-link-secondary',
                 ),
                 dcc.Link(
@@ -492,6 +495,7 @@ def render_dashboard_source_status(
             '/greeks',
             '/trades',
             '/brent_vol_history',
+            '/ice_chat_quotes',
         )
         or (
             pathname == '/valuation'
@@ -578,12 +582,6 @@ def display_page(pathname, search):
             id='retired-vol-calibration-redirect',
             pathname='/brent_vol_history',
         )
-    if pathname == '/ice_chat_quotes':
-        return dcc.Location(
-            id='retired-ice-chat-quotes-redirect',
-            pathname='/brent_vol_history',
-            hash='#ice-quotes',
-        )
     return STATIC_PAGE_LAYOUTS.get(pathname, '404 - Page not found')
 
 # Clientside callback for active navigation states
@@ -636,6 +634,7 @@ app.validation_layout = html.Div([
     ttf.layout,
     dcc.Store(id='vol-calibration-session-state', storage_type='session'),
     pages.brent_vol_history.layout,
+    pages.ice_chat_quotes.layout,
     pages.prices.layout,
     pages.pricer.layout,
     pages.correlations.layout,

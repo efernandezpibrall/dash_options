@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from pathlib import Path
 import uuid
 
 import pandas as pd
@@ -104,17 +105,14 @@ def _rows():
     return quotes._serialize_frame(frame)
 
 
-def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_grid():
+def test_layout_has_one_h1_filters_polling_chart_and_stable_grid():
     items = list(_walk(quotes.layout))
-    headings = [item for item in items if isinstance(item, html.H2)]
+    headings = [item for item in items if isinstance(item, html.H1)]
     ids = {getattr(item, "id", None) for item in items}
     interval = next(item for item in items if getattr(item, "id", None) == "ice-chat-refresh-interval")
     grid = next(item for item in items if getattr(item, "id", None) == "ice-chat-quote-grid")
     assert len(headings) == 1
-    assert headings[0].children == "ICE quotes"
-    assert headings[0].id == "ice-chat-section-title"
-    assert not any(isinstance(item, html.H1) for item in items)
-    assert quotes.layout.id == "ice-quotes"
+    assert headings[0].children == "ICE Chat quotes"
     assert "Executable option edge against our saved volatility marks" not in {
         item for item in items if isinstance(item, str)
     }
@@ -252,16 +250,12 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert "ice-chat-cell-buy" in action_column["cellClassRules"]
 
 
-def test_route_redirects_to_embedded_section_and_navigation_is_retired():
-    redirect = index_options.display_page("/ice_chat_quotes", None)
-    assert redirect.pathname == "/brent_vol_history"
-    assert redirect.hash == "#ice-quotes"
+def test_route_and_navigation_are_registered():
+    assert index_options.display_page("/ice_chat_quotes", None) is quotes.layout
     links = [item for item in _walk(index_options.nav_links) if isinstance(item, dcc.Link)]
-    assert not any(link.children == "ICE Quotes" for link in links)
-    with index_options.server.test_client() as client:
-        response = client.get("/ice_chat_quotes")
-    assert response.status_code == 302
-    assert response.headers["Location"].endswith("/brent_vol_history#ice-quotes")
+    ice_link = next(link for link in links if link.children == "ICE Quotes")
+    assert ice_link.href == "/ice_chat_quotes"
+    assert ice_link.id == "nav-ice-chat-quotes"
 
 
 def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
@@ -365,33 +359,6 @@ def test_filter_options_are_sorted_deduplicated_and_keep_display_labels():
     ]
 
 
-def test_section_follows_selected_product_without_showing_brent_rows():
-    row = _rows()[0]
-    snapshot = {
-        "rows": [row], "error": None,
-        "loaded_at": "2026-08-17T08:00:00+00:00", "truncated": False,
-    }
-    for product, label in quotes.PRODUCT_LABELS.items():
-        title, *reset = quotes.select_quote_product(product)
-        assert title == f"ICE quotes · {label}"
-        assert reset == [None, None, None, None, None, None, []]
-        result = quotes.render_quote_dashboard(
-            snapshot, {}, None, None, None, None, None, None,
-            [], [row], product,
-        )
-        if product == "BRENT":
-            assert len(result[2]) == 1
-            assert result[5] == "Instrument quote history"
-        else:
-            assert result[2] == []
-            assert result[4] == f"ICE quote feed is unavailable for {label}"
-            assert label in result[1].layout.annotations[0].text
-            assert result[5] == "Broker quotes executable edge"
-            assert quotes.update_quote_filter_options(snapshot, product) == (
-                [], [], [], [], [], []
-            )
-
-
 def test_selected_instrument_shows_premium_and_iv_history():
     rows = _rows()
     frame = pd.DataFrame(rows)
@@ -477,6 +444,26 @@ def test_grid_selection_does_not_resend_unchanged_tape_or_status(monkeypatch):
     assert isinstance(result[3], NoUpdate)
     assert isinstance(result[4], NoUpdate)
     assert result[5] == "Instrument quote history"
+
+
+def test_css_is_page_scoped_and_has_responsive_states():
+    css = (Path(__file__).resolve().parents[1] / "assets" / "ice_chat_quotes.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".ice-chat-quotes-page" in css
+    assert ".ice-chat-signal-card" not in css
+    assert ".ice-chat-cell-stale" not in css
+    assert ".ice-chat-group-edge" in css
+    assert ".ice-chat-edge-positive" in css
+    assert ".ice-chat-edge-card" in css
+    assert ".ice-chat-chart-shell" in css
+    assert ".ice-chat-grid-shell" in css
+    assert "max-width: none" in css
+    assert "max-width: 1540px" not in css
+    assert ".ice-chat-advanced-filters" not in css
+    assert "@media (max-width: 1100px)" in css
+    assert "@media (max-width: 640px)" in css
+    assert "@media (max-width: 360px)" in css
 
 
 def test_live_empty_database_contract_loads_without_recalculation():

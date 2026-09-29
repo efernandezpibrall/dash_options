@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-from html import escape
 from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any
@@ -65,7 +64,6 @@ from vol_calibration.inline_workspace import (
     create_inline_workspace,
     resolve_inline_context,
 )
-from pages import ice_chat_quotes
 
 
 PRODUCT = "BRENT"
@@ -3328,28 +3326,6 @@ def build_expiry_figure(
         else pd.DataFrame()
     )
     quality = _intraday_expiry_quality(raw, expiry_trade_tape, prior_reference)
-    option_expirations = (
-        pd.to_datetime(raw["option_expiration_date"], errors="coerce").dropna()
-        if "option_expiration_date" in raw
-        else pd.Series(dtype="datetime64[ns]")
-    )
-    if resolved_product == "BRENT":
-        for layer, label, color, symbol in (
-            ("ice-bid", "ICE bid quote", "#B42318", "triangle-down"),
-            ("ice-offer", "ICE offer quote", "#067647", "triangle-up"),
-            ("ice-single", "ICE single quote", "#6941C6", "circle"),
-        ):
-            figure.add_trace(
-                go.Scatter(
-                    x=[], y=[], mode="markers", name=label,
-                    meta={"legend_layer": layer, "role": "ice-chat-quote"},
-                    marker={"color": color, "symbol": symbol, "size": 10,
-                            "line": {"color": "#ffffff", "width": 1}},
-                    hovertemplate="%{text}<extra></extra>",
-                    showlegend=False,
-                ),
-                secondary_y=False,
-            )
     figure.update_layout(
         template="plotly_white",
         height=308,
@@ -3374,15 +3350,7 @@ def build_expiry_figure(
             f"vol-trades-{resolved_product.lower()}-"
             f"{expiry.date().isoformat()}-{x_axis}"
         ),
-        meta={
-            "expiry": expiry.date().isoformat(),
-            "option_expiration_date": (
-                option_expirations.iloc[0].date().isoformat()
-                if not option_expirations.empty
-                else None
-            ),
-            "quality": quality,
-        },
+        meta={"expiry": expiry.date().isoformat(), "quality": quality},
     )
     return figure
 
@@ -3968,7 +3936,7 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
             if not layer:
                 continue
             trace_entries.append({"index": index, "layer": layer})
-            if _trace_has_points(trace) or layer.startswith("ice-"):
+            if _trace_has_points(trace):
                 available.add(layer)
             if _trace_has_new_volume_edge(trace):
                 new_volume_layers.add(layer)
@@ -3979,15 +3947,7 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
                 continue
             shape_entries.append({"index": index, "layer": layer})
             available.add(layer)
-        iv_range = getattr(figure.layout.yaxis, "range", None)
-        graphs[expiry] = {
-            "traces": trace_entries,
-            "shapes": shape_entries,
-            "iv_range": list(iv_range) if iv_range is not None else None,
-            "option_expiration_date": dict(figure.layout.meta or {}).get(
-                "option_expiration_date"
-            ),
-        }
+        graphs[expiry] = {"traces": trace_entries, "shapes": shape_entries}
     available_layers = [
         layer for layer in EXPIRY_LEGEND_LAYER_ORDER if layer in available
     ]
@@ -4907,9 +4867,6 @@ EXPIRY_LEGEND_LAYER_ORDER = (
     "put-mid",
     "executable-band",
     "trades",
-    "ice-bid",
-    "ice-offer",
-    "ice-single",
     "prior-settlement",
     "bloomberg-settlement",
     "icap-settlement",
@@ -4949,21 +4906,6 @@ EXPIRY_LEGEND_LAYER_SPECS = {
             "Show or hide trade-time volatility; filled markers are exact "
             "midpoints and hollow markers are prevailing midpoints"
         ),
-    },
-    "ice-bid": {
-        "label": "ICE bid", "group": "iv",
-        "swatch": "brent-vol-history-legend-ice-bid",
-        "description": "Show ICE Chat bid implied volatility quotes",
-    },
-    "ice-offer": {
-        "label": "ICE offer", "group": "iv",
-        "swatch": "brent-vol-history-legend-ice-offer",
-        "description": "Show ICE Chat offer implied volatility quotes",
-    },
-    "ice-single": {
-        "label": "ICE single", "group": "iv",
-        "swatch": "brent-vol-history-legend-ice-single",
-        "description": "Show ICE Chat single-price implied volatility quotes",
     },
     "prior-settlement": {
         "label": "Prior settle",
@@ -5473,10 +5415,6 @@ layout = html.Main(
                             ),
                         ),
                         build_expiry_legend(),
-                        html.Div(
-                            id="ice-chat-overlay-status", role="status",
-                            className="brent-vol-history-ice-overlay-status",
-                        ),
                     ],
                     className=(
                         "inline-section-header supply-dest-section-header "
@@ -5581,7 +5519,6 @@ layout = html.Main(
                 "brent-vol-history-trade-table-section"
             ),
         ),
-        ice_chat_quotes.layout,
         html.Section(
             [
                 html.Div(
@@ -7053,182 +6990,6 @@ def update_expiry_layer_visibility(selected_layers, manifest, graph_ids):
             )
         updates.append(patch)
     return updates
-
-
-ICE_QUOTE_LAYERS = {
-    "ice-bid": ("bid", "bid_implied_volatility"),
-    "ice-offer": ("offer", "offer_implied_volatility"),
-    "ice-single": ("single_price", "single_implied_volatility"),
-}
-
-
-def ice_quote_overlay_points(
-    rows: list[dict],
-    snapshot: dict | None,
-    expiry: str,
-    x_axis: str,
-    option_expiration_date: str | None = None,
-) -> tuple[dict[str, dict], int]:
-    """Project same-day Brent quote events onto one saved expiry smile."""
-    empty = {layer: {"x": [], "y": [], "text": [], "opacity": []}
-             for layer in ICE_QUOTE_LAYERS}
-    if not snapshot or snapshot.get("product") != "BRENT":
-        return empty, 0
-    business_date = str(snapshot.get("business_date") or "")
-    cutoff = pd.to_datetime(snapshot.get("observed_at"), errors="coerce", utc=True)
-    if pd.isna(cutoff):
-        return empty, 0
-    omitted = 0
-    for row in rows:
-        if str(row.get("product_code") or "B").upper() not in {"B", "BRENT"}:
-            continue
-        if str(row.get("contract_month") or "")[:10] != expiry:
-            continue
-        if (
-            option_expiration_date
-            and str(row.get("option_expiration_date") or "")[:10]
-            != option_expiration_date
-        ):
-            continue
-        observed = pd.to_datetime(row.get("observed_at"), errors="coerce", utc=True)
-        if pd.isna(observed) or observed > cutoff:
-            continue
-        if observed.tz_convert("Asia/Dubai").date().isoformat() != business_date:
-            continue
-        strike = _numeric_or_none(row.get("strike"))
-        side = str(row.get("option_type") or "").upper()
-        if strike is None or side not in {"C", "P"}:
-            omitted += 1
-            continue
-        for layer, (price_field, iv_field) in ICE_QUOTE_LAYERS.items():
-            price = _numeric_or_none(row.get(price_field))
-            iv = _numeric_or_none(row.get(iv_field))
-            if price is None:
-                continue
-            if iv is None or iv <= 0:
-                omitted += 1
-                continue
-            x = strike
-            if _normalize_x_axis(x_axis) == X_AXIS_DELTA:
-                expiration = pd.to_datetime(
-                    row.get("option_expiration_date"), errors="coerce"
-                )
-                dte = (
-                    (expiration.date() - observed.tz_convert("Asia/Dubai").date()).days
-                    if pd.notna(expiration) else None
-                )
-                x = _delta_x_from_market_inputs(
-                    strike=strike, forward=row.get("forward"),
-                    volatility=iv, dte=dte, put_call=side,
-                )
-                if not np.isfinite(x):
-                    omitted += 1
-                    continue
-            age_hours = max(0.0, (cutoff - observed).total_seconds() / 3600.0)
-            time_label = observed.tz_convert("Asia/Dubai").strftime("%d %b %Y %H:%M:%S GST")
-            sender = escape(str(row.get("sender_handle") or "—"))
-            channel = escape(str(row.get("source_channel") or "—"))
-            surface = escape(str(row.get("surface_cob_date") or "—"))
-            label = ICE_QUOTE_LAYERS[layer][0].replace("_", " ").title()
-            hover = (
-                f"<b>ICE {label} · {'Call' if side == 'C' else 'Put'}</b>"
-                f"<br>{time_label}<br>Strike {strike:.2f}"
-                f" · Premium {price:.4f} {escape(str(row.get('price_unit_label') or 'USD/bbl'))}"
-                f"<br>IV {100.0 * iv:.2f}% · Sender {sender}"
-                f"<br>Channel {channel} · Surface COB {surface}"
-            )
-            empty[layer]["x"].append(float(x))
-            empty[layer]["y"].append(100.0 * iv)
-            empty[layer]["text"].append(hover)
-            empty[layer]["opacity"].append(max(0.35, 0.95 - age_hours / 24.0))
-    return empty, omitted
-
-
-@callback(
-    Output({"type": "brent-vol-history-expiry-graph", "expiry": ALL},
-           "figure", allow_duplicate=True),
-    Output("ice-chat-overlay-status", "children"),
-    Input("ice-chat-quote-snapshot", "data"),
-    Input("ice-chat-contract", "value"),
-    Input("ice-chat-option-type", "value"),
-    Input("ice-chat-strike", "value"),
-    Input("ice-chat-sender", "value"),
-    Input("ice-chat-source-channel", "value"),
-    Input("ice-chat-status-filter", "value"),
-    Input("ice-chat-positive-only", "value"),
-    Input("brent-vol-history-snapshot", "data"),
-    Input("brent-vol-history-expiry-layer-manifest", "data"),
-    State("brent-vol-history-x-axis", "value"),
-    State("brent-vol-history-expiry-layers", "value"),
-    State({"type": "brent-vol-history-expiry-graph", "expiry": ALL}, "id"),
-    prevent_initial_call=True,
-)
-def update_ice_quote_overlays(
-    quote_snapshot, contract, option_type, strike, sender, source_channel,
-    status, positive_only, history_snapshot, manifest, x_axis,
-    selected_layers, graph_ids,
-):
-    if not graph_ids or not manifest:
-        return [], ""
-    quote_snapshot = quote_snapshot or {}
-    filtered = ice_chat_quotes.filter_quote_rows(
-        quote_snapshot.get("rows") or [], contract=contract,
-        option_type=option_type, strike=strike, sender=sender,
-        source_channel=source_channel, status=status,
-        positive_only="positive" in (positive_only or []),
-    )
-    rows = filtered.to_dict("records") if not filtered.empty else []
-    selected = set(selected_layers or [])
-    graph_contracts = (manifest or {}).get("graphs") or {}
-    updates = []
-    plotted = omitted = 0
-    for graph_id in graph_ids:
-        expiry = str((graph_id or {}).get("expiry") or "")
-        contract_for_graph = graph_contracts.get(expiry) or {}
-        points, excluded = ice_quote_overlay_points(
-            rows, history_snapshot, expiry, x_axis,
-            contract_for_graph.get("option_expiration_date"),
-        )
-        omitted += excluded
-        patch = Patch()
-        for entry in contract_for_graph.get("traces") or []:
-            layer = entry["layer"]
-            if layer not in ICE_QUOTE_LAYERS:
-                continue
-            index = int(entry["index"])
-            data = points[layer]
-            plotted += len(data["x"])
-            for key in ("x", "y", "text"):
-                patch["data"][index][key] = data[key]
-            patch["data"][index]["marker"]["opacity"] = data["opacity"]
-            patch["data"][index]["visible"] = layer in selected
-        base_range = contract_for_graph.get("iv_range")
-        if base_range:
-            values = [value for item in points.values() for value in item["y"]]
-            if values:
-                margin = max(0.5, (max(values) - min(values)) * 0.05)
-                patch["layout"]["yaxis"]["range"] = [
-                    max(0.0, min(base_range[0], min(values) - margin)),
-                    max(base_range[1], max(values) + margin),
-                ]
-            else:
-                patch["layout"]["yaxis"]["range"] = base_range
-        updates.append(patch)
-    if not history_snapshot or history_snapshot.get("product") != "BRENT":
-        selected_product = ice_chat_quotes._selected_product(
-            (history_snapshot or {}).get("product")
-        )
-        label = ice_chat_quotes.PRODUCT_LABELS[selected_product]
-        message = f"No ICE quote feed is configured for {label}."
-    elif quote_snapshot.get("error"):
-        message = quote_snapshot["error"]
-    else:
-        message = f"ICE quote markers · {plotted:,} plotted"
-        if omitted:
-            message += f" · {omitted:,} omitted (IV or delta unavailable)"
-        if not plotted:
-            message += " for the selected snapshot date and quote window"
-    return updates, message
 
 
 @callback(

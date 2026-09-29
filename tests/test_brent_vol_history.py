@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -292,7 +293,7 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
     )
 
 
-def test_refresh_buttons_have_distinct_actions_and_labels():
+def test_refresh_buttons_have_primary_secondary_focus_and_mobile_contracts():
     items = list(_walk(history.layout))
     intraday = next(
         item
@@ -310,6 +311,78 @@ def test_refresh_buttons_have_distinct_actions_and_labels():
     assert "refresh-button-primary" in intraday.className
     assert "refresh-button-secondary" in settlement.className
     assert intraday.title and settlement.title
+
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert ".brent-vol-history-refresh-button:focus-visible" in css
+    assert ".brent-vol-history-refresh-button-secondary" in css
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+
+
+def test_product_selector_keeps_all_products_on_one_desktop_row():
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert ".brent-vol-history-product-options label" in css
+    assert "flex: 1 1 0;" in css
+    assert "white-space: nowrap;" in css
+    assert "margin-right: 0;" in css
+    assert "grid-template-columns:\n        312px\n        168px" in css
+    assert "@media (min-width: 1281px) and (max-width: 1760px)" in css
+
+
+def test_expiry_charts_use_four_column_low_margin_layout_with_readable_reflow():
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    page_css = css.split(
+        "/* Bloomberg Brent option-chain settlement and intraday history */", 1
+    )[1]
+    page_rule = page_css.split(
+        ".options-dashboard-container.brent-vol-history-page {", 1
+    )[1].split("}", 1)[0]
+    grid_rule = page_css.split(".brent-vol-history-plot-grid {", 1)[1].split(
+        "}", 1
+    )[0]
+    expiry_rule = page_css.split(".brent-vol-history-expiry-section {", 1)[
+        1
+    ].split("}", 1)[0]
+    scoped_expiry_rule = page_css.split(
+        ".brent-vol-history-expiry-section.greeks-monitor-section.main-section-container.supply-dest-section {",
+        1,
+    )[1].split("}", 1)[0]
+    table_rule = page_css.split(".brent-vol-history-table-section {", 1)[1].split(
+        "}", 1
+    )[0]
+    graph_rule = page_css.split(".brent-vol-history-graph {", 1)[1].split(
+        "}", 1
+    )[0]
+    tablet_rule = page_css.split("@media (max-width: 1024px) {", 1)[1].split(
+        "@media", 1
+    )[0]
+    compact_rule = page_css.split("@media (max-width: 768px) {", 1)[1].split(
+        "@media", 1
+    )[0]
+    mobile_rule = page_css.split("@media (max-width: 560px) {", 1)[1].split(
+        "@media", 1
+    )[0]
+
+    assert "padding: 10px 4px 24px;" in page_rule
+    assert "padding: 0;" in expiry_rule
+    assert "width: 100%;" in scoped_expiry_rule
+    assert "margin: 0 0 var(--spacing-xl) !important;" in scoped_expiry_rule
+    assert "padding: 0;" in scoped_expiry_rule
+    assert "width: 100%;" in table_rule
+    assert "margin: 8px 0 18px;" in table_rule
+    assert "width: 100%;" in grid_rule
+    assert "grid-template-columns: repeat(4, minmax(0, 1fr));" in grid_rule
+    assert "gap: 4px;" in grid_rule
+    assert "padding: 4px;" in grid_rule
+    assert "height: 308px !important;" in graph_rule
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in tablet_rule
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in compact_rule
+    assert "grid-template-columns: minmax(0, 1fr);" in mobile_rule
 
 
 def test_trade_and_chain_tables_use_grouped_trader_focused_format():
@@ -392,6 +465,14 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
     assert len(subtitles) == 2
     assert any("selected expiry and trade window" in text for text in subtitles)
     assert any("Expand grouped headers" in text for text in subtitles)
+
+    css = (
+        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
+    ).read_text(encoding="utf-8")
+    assert ".brent-vol-history-table-section" in css
+    assert ".vol-trades-group-premium" in css
+    assert ".vol-trades-call-cell" in css
+    assert ".vol-trades-trade-grid:has(.ag-overlay-no-rows-wrapper)" not in css
 
 
 def test_layout_includes_sourced_ice_open_interest_timing_note():
@@ -773,25 +854,6 @@ def test_missing_calibrated_publication_is_explicit(monkeypatch):
     assert "calibrated" not in contract["available_layers"]
 
 
-def test_brent_surface_catalog_is_locked_to_selected_cob(monkeypatch):
-    captured = []
-
-    def fake_read_sql(query, engine, params):
-        captured.append((str(query), dict(params)))
-        return pd.DataFrame()
-
-    monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    surface = history.load_latest_calibrated_surface(
-        "2026-09-25", ["2026-12-01"], engine=object(), product="BRENT"
-    )
-
-    assert surface.attrs["publication_status"] == "no_publication"
-    assert "p.cob_date = :selected_cob" in captured[0][0]
-    assert captured[0][1] == {
-        "commodity": "BRENT", "selected_cob": date(2026, 9, 25)
-    }
-
-
 def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
     captured = []
 
@@ -1169,9 +1231,6 @@ def test_expiry_legend_contract_only_exposes_plotted_layers():
     contract = history._expiry_legend_contract(cards)
 
     assert contract["available_layers"] == [
-        "ice-bid",
-        "ice-offer",
-        "ice-single",
         "bloomberg-settlement",
         "pricing-reference",
         "volume-calls",
@@ -1190,83 +1249,6 @@ def test_expiry_legend_contract_only_exposes_plotted_layers():
         entry["layer"] in history.EXPIRY_LEGEND_LAYER_SPECS
         for entry in contract["graphs"]["2026-12-01"]["traces"]
     )
-
-
-def test_ice_quotes_match_snapshot_day_expiry_and_axes():
-    snapshot = {
-        "product": "BRENT", "business_date": "2026-08-17",
-        "observed_at": "2026-08-17T09:00:00Z",
-    }
-    row = {
-        "event_id": "quote-1", "product_code": "B",
-        "contract_month": "2026-12-01", "option_type": "C",
-        "observed_at": "2026-08-17T08:00:00Z",
-        "option_expiration_date": "2026-11-25",
-        "strike": 90.0, "forward": 86.0,
-        "bid": 5.1, "bid_implied_volatility": 0.59,
-        "offer": 5.4, "offer_implied_volatility": 0.62,
-        "single_price": None, "sender_handle": "broker",
-    }
-    strike_points, omitted = history.ice_quote_overlay_points(
-        [row], snapshot, "2026-12-01", "strike"
-    )
-    assert omitted == 0
-    assert strike_points["ice-bid"]["x"] == [90.0]
-    assert strike_points["ice-bid"]["y"] == [59.0]
-    assert strike_points["ice-offer"]["y"] == [62.0]
-    assert strike_points["ice-single"]["x"] == []
-    delta_points, omitted = history.ice_quote_overlay_points(
-        [row], snapshot, "2026-12-01", "delta"
-    )
-    assert omitted == 0
-    assert 0 < delta_points["ice-bid"]["x"][0] < 1
-    assert history.ice_quote_overlay_points(
-        [row], snapshot, "2027-01-01", "strike"
-    )[0]["ice-bid"]["x"] == []
-    assert history.ice_quote_overlay_points(
-        [row], snapshot, "2026-12-01", "strike", "2026-10-26"
-    )[0]["ice-bid"]["x"] == []
-    assert history.ice_quote_overlay_points(
-        [row], {**snapshot, "product": "TFO"}, "2026-12-01", "strike"
-    )[0]["ice-bid"]["x"] == []
-    assert history.ice_quote_overlay_points(
-        [{**row, "observed_at": "2026-08-17T10:00:00Z"}],
-        snapshot, "2026-12-01", "strike"
-    )[0]["ice-bid"]["x"] == []
-    missing_delta, omitted = history.ice_quote_overlay_points(
-        [{**row, "forward": None}], snapshot, "2026-12-01", "delta"
-    )
-    assert omitted == 2
-    assert missing_delta["ice-bid"]["x"] == []
-
-
-def test_ice_overlay_patches_only_quote_traces():
-    cards = history.build_plot_cards(_chain_frame(), pd.DataFrame(), product="BRENT")
-    manifest = history._expiry_legend_contract(cards)
-    row = {
-        "product_code": "B", "contract_month": "2026-12-01",
-        "option_type": "C", "observed_at": "2026-08-17T08:00:00Z",
-        "option_expiration_date": "2026-10-27",
-        "strike": 90.0, "bid": 5.1, "bid_implied_volatility": 0.59,
-        "offer": None, "single_price": None,
-    }
-    patches, status = history.update_ice_quote_overlays(
-        {"rows": [row, {**row, "event_id": "put-quote", "option_type": "P",
-                         "bid_implied_volatility": 0.41}]},
-        None, "C", None, None, None, None, [],
-        {"product": "BRENT", "business_date": "2026-08-17",
-         "observed_at": "2026-08-17T09:00:00Z"},
-        manifest, "strike", ["ice-bid"],
-        [{"type": "brent-vol-history-expiry-graph", "expiry": "2026-12-01"}],
-    )
-    operations = patches[0].to_plotly_json()["operations"]
-    bid_index = next(
-        entry["index"] for entry in manifest["graphs"]["2026-12-01"]["traces"]
-        if entry["layer"] == "ice-bid"
-    )
-    assert {"operation": "Assign", "location": ["data", bid_index, "y"],
-            "params": {"value": [59.0]}} in operations
-    assert status == "ICE quote markers · 1 plotted"
 
 
 def test_expiry_quality_summary_is_inside_the_contract_header():

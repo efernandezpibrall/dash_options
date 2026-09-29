@@ -93,26 +93,6 @@ TIME_WINDOWS = {
     "8h": timedelta(hours=8),
     "7d": timedelta(days=7),
 }
-PRODUCT_LABELS = {
-    "BRENT": "Brent",
-    "TFO": "TFO",
-    "ON": "HH · ON",
-    "LNE": "HH · LNE",
-    "JKM": "JKM",
-}
-# The persisted ICE Chat view and service status currently cover Brent only.
-# Other selected products must never inherit its unlabelled Brent rows.
-QUOTE_FEED_PRODUCTS = frozenset({"BRENT"})
-
-
-def _selected_product(value: Any) -> str:
-    product = str(value or "BRENT").strip().upper()
-    return product if product in PRODUCT_LABELS else "BRENT"
-
-
-def _row_product(value: Any) -> str:
-    code = str(value or "B").strip().upper()
-    return "BRENT" if code in {"B", "BRENT"} else code
 
 
 @dataclass(frozen=True)
@@ -724,7 +704,6 @@ def build_instrument_figure(frame: pd.DataFrame, selected: dict) -> go.Figure:
 def filter_quote_rows(
     rows: list[dict],
     *,
-    product=None,
     contract=None,
     option_type=None,
     strike=None,
@@ -736,12 +715,6 @@ def filter_quote_rows(
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
-    if product is not None:
-        selected_product = _selected_product(product)
-        if selected_product not in QUOTE_FEED_PRODUCTS:
-            return frame.iloc[0:0].copy()
-        codes = frame.get("product_code", pd.Series("B", index=frame.index))
-        frame = frame.loc[codes.map(_row_product).eq(selected_product)].copy()
     if contract:
         frame = frame[frame["contract_month"].astype(str) == str(contract)]
     if option_type:
@@ -963,13 +936,13 @@ QUOTE_COLUMN_DEFS = [
 ]
 
 
-layout = html.Section(
+layout = html.Main(
     [
         html.Header(
             [
                 html.Div(
                     [
-                        html.H2("ICE quotes", id="ice-chat-section-title"),
+                        html.H1("ICE Chat quotes"),
                     ]
                 ),
                 html.Div(id="ice-chat-service-status"),
@@ -1038,7 +1011,7 @@ layout = html.Section(
             [
                 html.Div(
                     [
-                        html.H3(
+                        html.H2(
                             "Broker quotes executable edge",
                             id="ice-chat-chart-title",
                         ),
@@ -1075,7 +1048,7 @@ layout = html.Section(
             [
                 html.Div(
                     [
-                        html.H3("Quote tape"),
+                        html.H2("Quote tape"),
                         html.Div(id="ice-chat-table-status", role="status", **{"aria-live": "polite"}),
                     ],
                     className="ice-chat-section-header",
@@ -1127,25 +1100,8 @@ layout = html.Section(
             className="ice-chat-card ice-chat-table-card",
         ),
     ],
-    id="ice-quotes",
-    className="ice-chat-quotes-page",
+    className="options-dashboard-container ice-chat-quotes-page",
 )
-
-
-@callback(
-    Output("ice-chat-section-title", "children"),
-    Output("ice-chat-contract", "value"),
-    Output("ice-chat-option-type", "value"),
-    Output("ice-chat-strike", "value"),
-    Output("ice-chat-sender", "value"),
-    Output("ice-chat-source-channel", "value"),
-    Output("ice-chat-status-filter", "value"),
-    Output("ice-chat-positive-only", "value"),
-    Input("brent-vol-history-product", "value"),
-)
-def select_quote_product(product):
-    label = PRODUCT_LABELS[_selected_product(product)]
-    return f"ICE quotes · {label}", None, None, None, None, None, None, []
 
 
 @callback(
@@ -1175,10 +1131,9 @@ def refresh_quote_snapshot(_interval, window):
     Output("ice-chat-source-channel", "options"),
     Output("ice-chat-status-filter", "options"),
     Input("ice-chat-quote-snapshot", "data"),
-    Input("brent-vol-history-product", "value"),
 )
-def update_quote_filter_options(snapshot, product="BRENT"):
-    frame = filter_quote_rows((snapshot or {}).get("rows") or [], product=product)
+def update_quote_filter_options(snapshot):
+    frame = pd.DataFrame((snapshot or {}).get("rows") or [])
     if frame.empty:
         return [], [], [], [], [], []
 
@@ -1219,7 +1174,6 @@ def update_quote_filter_options(snapshot, product="BRENT"):
     Input("ice-chat-status-filter", "value"),
     Input("ice-chat-positive-only", "value"),
     Input("ice-chat-quote-grid", "selectedRows"),
-    Input("brent-vol-history-product", "value"),
 )
 def render_quote_dashboard(
     snapshot,
@@ -1232,15 +1186,11 @@ def render_quote_dashboard(
     status,
     positive_only,
     selected_rows,
-    product="BRENT",
 ):
     snapshot = snapshot or {}
-    selected_product = _selected_product(product)
-    label = PRODUCT_LABELS[selected_product]
     rows = snapshot.get("rows") or []
     frame = filter_quote_rows(
         rows,
-        product=selected_product,
         contract=contract,
         option_type=option_type,
         strike=strike,
@@ -1250,39 +1200,21 @@ def render_quote_dashboard(
         positive_only="positive" in (positive_only or []),
     )
     selected = (selected_rows or [None])[0]
-    if selected and (
-        frame.empty or str(selected.get("event_id")) not in set(frame["event_id"].astype(str))
-    ):
-        selected = None
     if selected:
         figure = build_instrument_figure(frame, selected)
         chart_title = "Instrument quote history"
         instrument = selected.get("instrument_label") or "Selected instrument"
         chart_hint = f"{instrument} · broker premium and IV vs our marks"
-    elif selected_product not in QUOTE_FEED_PRODUCTS:
-        figure = _empty_figure(f"ICE quote feed is unavailable for {label}")
-        chart_title = "Broker quotes executable edge"
-        chart_hint = f"No ICE quote feed is configured for {label}"
     else:
         figure = build_all_quotes_figure(frame)
         chart_title = "Broker quotes executable edge"
         chart_hint = "Above 0 favors us on bid/offer · single quotes are neutral"
-    status_strip = (
-        html.Div(
-            f"No ICE quote feed is configured for {label}.",
-            className="ice-chat-feed-unavailable",
-            role="status",
-        )
-        if selected_product not in QUOTE_FEED_PRODUCTS
-        else build_service_strip(
-            service or {},
-            error=snapshot.get("error"),
-            loaded_at=snapshot.get("loaded_at") or datetime.now(timezone.utc).isoformat(),
-        )
+    status_strip = build_service_strip(
+        service or {},
+        error=snapshot.get("error"),
+        loaded_at=snapshot.get("loaded_at") or datetime.now(timezone.utc).isoformat(),
     )
-    if selected_product not in QUOTE_FEED_PRODUCTS:
-        table_status = f"ICE quote feed is unavailable for {label}"
-    elif snapshot.get("error"):
+    if snapshot.get("error"):
         table_status = snapshot["error"]
     elif frame.empty:
         table_status = "No quotes match the selected filters"
