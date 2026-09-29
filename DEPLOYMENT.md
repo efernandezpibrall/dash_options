@@ -7,22 +7,24 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.2.1`, built from reviewed `options` commit
-`f2f6ad123864153d881154c966d9874fc7942186`, and this repository's
+`at-options-analytics==1.2.2`, built from reviewed `options` commit
+`9742037bbf6d30a81cccab5576deae2f36e9f005`, and this repository's
 requirements. The release wheel SHA-256 is
-`bb73cf74a82c3af1909fa1a13e2fb143da5af8b56c1ef966305d71031ed78b32`.
+`0dcfbe294ec5942418aa1def11e795271e7db64f5040c043074a289196b6e3a4`.
 Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
+Use a dedicated virtual environment for this application; other tools in the
+shared repository environment have incompatible `requests` requirements.
 
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout f2f6ad123864153d881154c966d9874fc7942186
+git -C /path/to/options checkout 9742037bbf6d30a81cccab5576deae2f36e9f005
 SOURCE_DATE_EPOCH=$(git -C /path/to/options show -s --format=%ct HEAD) python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-echo "bb73cf74a82c3af1909fa1a13e2fb143da5af8b56c1ef966305d71031ed78b32  dist/at_options_analytics-1.2.1-py3-none-any.whl" | shasum -a 256 -c -
-python -m pip install dist/at_options_analytics-1.2.1-py3-none-any.whl
+echo "0dcfbe294ec5942418aa1def11e795271e7db64f5040c043074a289196b6e3a4  dist/at_options_analytics-1.2.2-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.2-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.1'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.2'"
 ```
 
 Run before producing the deployment artifact:
@@ -32,6 +34,13 @@ python -m pip check
 python -m pytest
 ruff check .
 python -c "import index_options; index_options.app._setup_server()"
+```
+
+Serve this Dash build with one process and multiple threads so every request
+uses the same registered callback map while long chart loads remain responsive:
+
+```bash
+gunicorn -w 1 -k gthread --threads 8 -b 127.0.0.1:8071 --timeout 180 index_options:server
 ```
 
 ## Configuration
