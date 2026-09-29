@@ -195,6 +195,7 @@ def publish_brent_candidate(clicks, confirmation, preview, context):
             expected_expiries=candidate.surface["contract_date"].unique(),
             notes="Single-SVI Brent surface fitted at observed option strikes.",
             input_manifest=manifest,
+            return_surface=False,
         )
         publication_id = payload["publication_id"]
         return dbc.Alert(
