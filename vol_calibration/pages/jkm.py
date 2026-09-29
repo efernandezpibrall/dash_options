@@ -4,16 +4,16 @@ JKM (Japan Korea Marker) commodity page.
 Asian LNG benchmark with call skew characteristic.
 """
 from datetime import date, timedelta
+import getpass
 import hashlib
 from io import StringIO, BytesIO
 import json
-import os
-from uuid import uuid4
+from uuid import UUID
 
 import pandas as pd
 import numpy as np
 import dash_bootstrap_components as dbc
-from dash import html, dcc, callback, Input, Output, State, no_update, ctx
+from dash import html, dcc, callback, clientside_callback, Input, Output, State, no_update, ctx
 from dash.exceptions import PreventUpdate
 from flask import has_request_context, request
 
@@ -39,7 +39,6 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.auth import resolve_request_identity
-from vol_calibration.feature_flags import jkm_publication_enabled
 from vol_calibration.calibration_inputs import (
     calibration_eligibility_error,
     calibration_readiness,
@@ -54,6 +53,24 @@ from vol_calibration.jkm_hybrid_surface import (
     hybrid_iv,
     operational_surface_frame as jkm_hybrid_operational_surface_frame,
 )
+from vol_calibration.ttf_hybrid_surface import HybridFitNoCandidate
+from vol_calibration.observed_fit_pool import prefit_observed_expiries
+from vol_calibration.batch_job_runner import (
+    background_jobs_enabled,
+    build_payload as build_background_payload,
+    code_fingerprint as background_code_fingerprint,
+    completed_batch,
+    job_repository,
+    start_worker,
+    submit_batch,
+)
+from vol_calibration.jobs import JobStatus
+from vol_calibration.batch_checkpoints import (
+    digest as checkpoint_digest,
+    expiry_input_fingerprint,
+    make_checkpoint,
+    verified_checkpoint,
+)
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.session_state import restore_product_table
 from vol_calibration.operational_surface import (
@@ -65,7 +82,6 @@ from vol_calibration.operational_surface import (
 from vol_calibration.ttf_publication import (
     hybrid_publication_frame,
     load_latest_hybrid_publication,
-    publish_hybrid_surface,
 )
 
 from options.calibration_engine.io.loaders import load_market_data_with_metadata
@@ -199,12 +215,21 @@ def _run_jkm_candidate(observations, initial_params, *, basis):
         and not any(_accepted_calibration_result(item) for item in attempts)
     ):
         try:
+            resume = (
+                {
+                    'resume_start_count': starts,
+                    'resume_attempts': first_error.attempts,
+                }
+                if isinstance(first_error, HybridFitNoCandidate)
+                else {}
+            )
             attempts.append(
                 fit_jkm_hybrid_candidate(
                     observations,
                     _model_params(initial_params),
                     n_starts=JKM_EXTRAPOLATED_RETRY_STARTS,
                     seed=42,
+                    **resume,
                 )
             )
         except Exception:
@@ -223,12 +248,6 @@ def _calibration_blocked_status(message):
         color="danger",
         className="mb-0 py-1 px-2",
     )
-
-
-def _current_identity():
-    headers = request.headers if has_request_context() else {}
-    remote_addr = request.remote_addr if has_request_context() else None
-    return resolve_request_identity(headers, remote_addr=remote_addr)
 
 
 def get_default_date():
@@ -385,7 +404,20 @@ def _update_hybrid_row(row, result, basis):
     row['calibration_policy_version'] = JKM_HYBRID_POLICY_VERSION
 
 
-def calibrate_jkm_batch(market_data, table_data, *, skip_good=False):
+def _fit_jkm_observed_task(task):
+    key, observations, initial_params = task
+    try:
+        return key, (True, _run_jkm_candidate(
+            observations, initial_params, basis='observed'
+        ))
+    except Exception as exc:
+        return key, (False, str(exc))
+
+
+def calibrate_jkm_batch(
+    market_data, table_data, *, skip_good=False, checkpoints=None,
+    checkpoint_callback=None, cancellation_check=None,
+):
     """Chronologically calibrate all observed and governed extrapolated smiles."""
     params_df = parse_table_data(table_data)
     updated = [dict(row) for row in table_data]
@@ -396,16 +428,68 @@ def calibrate_jkm_batch(market_data, table_data, *, skip_good=False):
         except ValueError:
             continue
 
+    expiries = sorted(market_data['expiry'].dropna().unique())
+    checkpoints = checkpoints or {}
+    observed_tasks = []
+    if not skip_good and len(expiries) >= 8:
+        for expiry in expiries:
+            if pd.Timestamp(expiry).strftime('%Y-%m-%d') in checkpoints:
+                continue
+            try:
+                row_index = row_by_period[expiry_month(expiry)]
+                observations = _select_jkm_expiry_inputs(market_data, expiry)
+                if (
+                    _calibration_basis(observations) == 'observed'
+                    and not calibration_eligibility_error(observations)
+                ):
+                    initial = _model_params(params_df.iloc[row_index].to_dict())
+                    observed_tasks.append(
+                        (pd.Timestamp(expiry).isoformat(), observations, initial)
+                    )
+            except (KeyError, IndexError, ValueError, TypeError):
+                # The chronological loop reports the original per-expiry error.
+                continue
+    prefitted = prefit_observed_expiries(
+        observed_tasks,
+        _fit_jkm_observed_task,
+        environment_variable='JKM_OBSERVED_FIT_WORKERS',
+    )
+
     results = []
     success_count = 0
     skip_count = 0
     fail_count = 0
     last_successful_params = None
-    for expiry in sorted(market_data['expiry'].dropna().unique()):
+    for expiry in expiries:
         expiry_str = pd.Timestamp(expiry).strftime('%Y-%m-%d')
         row_index = row_by_period.get(expiry_month(expiry))
+        if cancellation_check is not None:
+            cancellation_check()
+        input_fingerprint = expiry_input_fingerprint(
+            market_data, expiry,
+            table_data[row_index] if row_index is not None else None,
+            policy=JKM_HYBRID_POLICY_VERSION,
+            skip_good=skip_good,
+        )
+        dependency_fingerprint = checkpoint_digest(last_successful_params)
+        if expiry_str in checkpoints:
+            saved = verified_checkpoint(
+                checkpoints[expiry_str],
+                expiry=expiry_str,
+                input_fingerprint=input_fingerprint,
+                dependency_fingerprint=dependency_fingerprint,
+            )
+            updated[row_index] = dict(saved['updated_row'])
+            last_successful_params = dict(saved['warm_start_after'])
+            results.append(dict(saved['result_row']))
+            if saved['result_row']['status'] == 'Skipped':
+                skip_count += 1
+            else:
+                success_count += 1
+            continue
         basis = None
         old_rmse = None
+        result_count_before = len(results)
         try:
             if row_index is None or row_index >= len(params_df):
                 raise ValueError("No editable parameter row exists for this expiry.")
@@ -453,11 +537,19 @@ def calibrate_jkm_batch(market_data, table_data, *, skip_good=False):
                     "No successful observed JKM calibration is available to seed "
                     "the extrapolated tail."
                 )
-            candidate = _run_jkm_candidate(
-                observations,
-                initial_params,
-                basis=basis,
+            prefitted_result = (
+                prefitted.get(pd.Timestamp(expiry).isoformat())
+                if basis == 'observed' else None
             )
+            if prefitted_result is None:
+                candidate = _run_jkm_candidate(
+                    observations, initial_params, basis=basis,
+                )
+            else:
+                succeeded, payload = prefitted_result
+                if not succeeded:
+                    raise ValueError(payload)
+                candidate = payload
             _update_hybrid_row(updated[row_index], candidate, basis)
             last_successful_params = _model_params(candidate['params'])
             results.append(
@@ -498,6 +590,18 @@ def calibrate_jkm_batch(market_data, table_data, *, skip_good=False):
             failed['error'] = str(exc)
             results.append(failed)
             fail_count += 1
+        finally:
+            if checkpoint_callback is not None and len(results) > result_count_before:
+                checkpoint_callback(make_checkpoint(
+                    expiry=expiry_str,
+                    result_row=results[-1],
+                    updated_row=(
+                        updated[row_index] if row_index is not None else None
+                    ),
+                    warm_start_after=last_successful_params,
+                    input_fingerprint=input_fingerprint,
+                    dependency_fingerprint=dependency_fingerprint,
+                ))
     return {
         'results': results,
         'table_data': updated,
@@ -597,6 +701,11 @@ def _batch_state_ready(
         return False, "The calibration result is stale; run Calibrate All again."
     if batch_state.get('calibration_policy_version') != JKM_HYBRID_POLICY_VERSION:
         return False, "The JKM calibration policy changed; run Calibrate All again."
+    if (
+        batch_state.get('background_code_fingerprint')
+        and batch_state['background_code_fingerprint'] != background_code_fingerprint()
+    ):
+        return False, "The calibration code changed; run Calibrate All again."
     if batch_state.get('trading_date') != pd.Timestamp(trading_date).date().isoformat():
         return False, "The calibration belongs to a different trading date."
     if batch_state.get('expiry_count') != len(table_data or []):
@@ -658,18 +767,6 @@ def create_header():
                 dbc.Button([html.I(className="fas fa-sync-alt me-1"), "Reload"], id=f'{COMMODITY_LOWER}-reload-btn', color="secondary", outline=True, size="sm"),
                 dbc.Button([html.I(className="fas fa-magic me-1"), "Calibrate"], id=f'{COMMODITY_LOWER}-calibrate-all-btn', color="warning", outline=True, size="sm", title="Calibrate selected expiry"),
                 dbc.Button([html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"], id=f'{COMMODITY_LOWER}-batch-calibrate-btn', color="warning", size="sm", title="Calibrate all expiries at once"),
-                dbc.Button(
-                    [html.I(className="fas fa-save me-1"), "Save calibrated surface"],
-                    id=f'{COMMODITY_LOWER}-save-all-btn',
-                    color="success",
-                    outline=True,
-                    size="sm",
-                    disabled=True,
-                    title=(
-                        "Run Calibrate All Expiries successfully before publishing "
-                        "the complete validated JKM surface."
-                    ),
-                ),
                 dbc.Button([html.I(className="fas fa-file-excel me-1"), "Export"], id=f'{COMMODITY_LOWER}-export-btn', color="info", outline=True, size="sm"),
             ]),
         ], width="auto", className="ms-auto"),
@@ -683,7 +780,10 @@ layout = dbc.Container([
     dcc.Store(id=f'{COMMODITY_LOWER}-params-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-comparison-data-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-results-store'),
+    dcc.Store(id=f'{COMMODITY_LOWER}-batch-job-store', storage_type='session'),
+    dcc.Interval(id=f'{COMMODITY_LOWER}-batch-job-poll', interval=5000),
     dcc.Store(id=f'{COMMODITY_LOWER}-published-surface-store'),
+    dcc.Store(id=f'{COMMODITY_LOWER}-batch-base-publication-store'),
     html.Div(
         id=f'{COMMODITY_LOWER}-publication-status',
         children=dbc.Alert(
@@ -948,6 +1048,18 @@ def load_jkm_publication(trading_date, reload_clicks):
             className='py-2 px-3 mb-3 small',
         )
     return payload, status
+
+
+clientside_callback(
+    """function(payload) {
+        if (!payload) return null;
+        const keys = ['publication_id', 'input_manifest_fingerprint',
+                      'published_at', 'publication_date', 'policy_version'];
+        return Object.fromEntries(keys.map(key => [key, payload[key] ?? null]));
+    }""",
+    Output(f'{COMMODITY_LOWER}-batch-base-publication-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-published-surface-store', 'data'),
+)
 
 
 @callback(
@@ -1469,7 +1581,8 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
      Output(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'disabled'),
      Output(f'{COMMODITY_LOWER}-batch-results-store', 'data'),
      Output(f'{COMMODITY_LOWER}-param-table', 'data', allow_duplicate=True),
-     Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True)],
+     Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-job-store', 'data')],
     [Input(f'{COMMODITY_LOWER}-batch-confirm-btn', 'n_clicks'),
      Input(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'n_clicks')],
     [State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
@@ -1489,7 +1602,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
 
     # Close button pressed
     if triggered_id == f'{COMMODITY_LOWER}-batch-progress-close-btn':
-        return False, 0, "", [], True, no_update, no_update, no_update
+        return False, 0, "", [], True, no_update, no_update, no_update, no_update
 
     # Confirm button pressed - run calibration
     if triggered_id != f'{COMMODITY_LOWER}-batch-confirm-btn':
@@ -1500,6 +1613,39 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
 
     del auto_save_opts, is_open
     skip_good = 'skip_good' in (skip_good_opts or [])
+
+    if background_jobs_enabled():
+        try:
+            payload = build_background_payload(
+                product=COMMODITY,
+                trade_date=trade_date_str,
+                market_data_json=market_data_json,
+                table_data=table_data,
+                skip_good=skip_good,
+                publication_payload=publication_payload,
+            )
+            identity = (
+                resolve_request_identity(
+                    request.headers, remote_addr=request.remote_addr,
+                ) if has_request_context() else None
+            )
+            actor = identity.subject if identity and identity.subject else f"local:{getpass.getuser()}"
+            job = submit_batch(job_repository(), payload, created_by=actor)
+            if job.status == JobStatus.QUEUED:
+                start_worker(job.job_id)
+            return (
+                True, 0, "Queued: 0 expiries completed", [], True,
+                None, no_update,
+                dbc.Badge("JKM calibration queued", color="info", pill=True),
+                {"job_id": str(job.job_id), "payload_fingerprint": checkpoint_digest(payload)},
+            )
+        except Exception as exc:
+            return (
+                True, 0, f"Could not start calibration: {exc}", [], False,
+                None, no_update,
+                dbc.Badge("JKM calibration not started", color="danger", pill=True),
+                None,
+            )
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     outcome = calibrate_jkm_batch(
@@ -1542,188 +1688,132 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
         results,
     )
     return (True, 100, f"Completed: {success_count} calibrated, {skip_count} skipped, {fail_count} failed",
-            results_display, False, batch_state, updated_table_data, status_badge)
+            results_display, False, batch_state, updated_table_data, status_badge,
+            None)
 
 
 @callback(
-    [
-        Output(f'{COMMODITY_LOWER}-save-all-btn', 'disabled'),
-        Output(f'{COMMODITY_LOWER}-save-all-btn', 'title'),
-    ],
-    [
-        Input(f'{COMMODITY_LOWER}-batch-results-store', 'data'),
-        Input(f'{COMMODITY_LOWER}-param-table', 'data'),
-        Input(f'{COMMODITY_LOWER}-date-picker', 'date'),
-        Input(f'{COMMODITY_LOWER}-market-data-store', 'data'),
-        Input(f'{COMMODITY_LOWER}-published-surface-store', 'data'),
-    ],
-)
-def enable_jkm_batch_save(
-    batch_state,
-    table_data,
-    trading_date,
-    market_data_json,
-    publication_payload,
-):
-    if not jkm_publication_enabled():
-        return True, "JKM calibrated-surface publication is disabled."
-    ready, reason = _batch_state_ready(
-        batch_state,
-        trading_date,
-        market_data_json,
-        table_data,
-        publication_payload,
-    )
-    if not ready:
-        return True, reason
-    return (
-        False,
-        f"Publish {len(table_data or [])} validated JKM expiries for "
-        f"{pd.Timestamp(trading_date).date().isoformat()}.",
-    )
-
-
-@callback(
-    [
-        Output(
-            f'{COMMODITY_LOWER}-published-surface-store',
-            'data',
-            allow_duplicate=True,
-        ),
-        Output(
-            f'{COMMODITY_LOWER}-publication-status',
-            'children',
-            allow_duplicate=True,
-        ),
-        Output(
-            f'{COMMODITY_LOWER}-batch-results-store',
-            'data',
-            allow_duplicate=True,
-        ),
-    ],
-    Input(f'{COMMODITY_LOWER}-save-all-btn', 'n_clicks'),
-    [
-        State(f'{COMMODITY_LOWER}-date-picker', 'date'),
-        State(f'{COMMODITY_LOWER}-published-surface-store', 'data'),
-        State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
-        State(f'{COMMODITY_LOWER}-param-table', 'data'),
-        State(f'{COMMODITY_LOWER}-batch-results-store', 'data'),
-    ],
+    [Output(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-bar', 'value', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-text', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-results-container', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'disabled', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-results-store', 'data', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-param-table', 'data', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-cancel-btn', 'disabled')],
+    [Input(f'{COMMODITY_LOWER}-batch-job-poll', 'n_intervals'),
+     Input(f'{COMMODITY_LOWER}-batch-job-store', 'data')],
+    [State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+     State(f'{COMMODITY_LOWER}-param-table', 'data'),
+     State(f'{COMMODITY_LOWER}-date-picker', 'date'),
+     State(f'{COMMODITY_LOWER}-batch-base-publication-store', 'data'),
+     State(f'{COMMODITY_LOWER}-batch-skip-good-fit', 'value'),
+     State(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
+     State(f'{COMMODITY_LOWER}-batch-results-store', 'data')],
     prevent_initial_call=True,
 )
-def publish_jkm_calibrated_surface(
-    save_clicks,
-    trading_date,
-    current_publication,
-    market_data_json,
-    table_data,
-    batch_state,
+def poll_jkm_batch_job(
+    _tick, job_reference, market_data_json, table_data, trade_date_str,
+    publication_payload, skip_good_opts, is_open, batch_state,
 ):
-    if not save_clicks or not market_data_json or not table_data:
+    if not background_jobs_enabled() or not job_reference:
         raise PreventUpdate
     try:
-        if not jkm_publication_enabled():
-            raise PermissionError("JKM publication is disabled.")
-        ready, reason = _batch_state_ready(
-            batch_state,
-            trading_date,
-            market_data_json,
-            table_data,
-            current_publication,
+        repo = job_repository()
+        job = repo.get(job_id=UUID(job_reference['job_id']))
+    except Exception:
+        return (is_open, no_update, "Waiting for calibration database connection.",
+                no_update, True, no_update, no_update, no_update, True)
+    if job is None:
+        return (is_open, 0, "Calibration job is missing.", [], False,
+                None, no_update, no_update, True)
+    progress = round(100 * job.completed_items / max(job.total_items, 1))
+    if job.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+        if job.status == JobStatus.QUEUED or (
+            job.lease_expires_at is not None
+            and job.lease_expires_at < pd.Timestamp.now(tz='UTC').to_pydatetime()
+        ):
+            try:
+                start_worker(job.job_id)
+            except OSError as exc:
+                return (
+                    is_open, progress, f"Could not start calibration worker: {exc}",
+                    no_update, True, no_update, no_update, no_update, False,
+                )
+        return (
+            is_open, progress,
+            f"{job.completed_items} of {job.total_items} expiries completed",
+            no_update, True, no_update, no_update,
+            dbc.Badge("JKM calibration running", color="info", pill=True), False,
         )
-        if not ready:
-            raise ValueError(reason)
-        identity = _current_identity()
-        market_data = pd.read_json(StringIO(market_data_json), orient='split')
-        rows_by_period = {
-            expiry_month(row.get('expiry')): row for row in table_data
-        }
-        surfaces = []
-        expiry_results = []
-        for expiry in sorted(market_data['expiry'].dropna().unique()):
-            row = rows_by_period.get(expiry_month(expiry))
-            if row is None:
-                raise ValueError(f"Missing parameter row for {expiry_month(expiry)}.")
-            surface, result = _publication_candidate_for_expiry(
-                market_data,
-                row,
-                expiry,
+    if job.status != JobStatus.SUCCEEDED:
+        return (
+            is_open, progress, job.last_error or f"Calibration {job.status.value}.",
+            [], False, None, no_update,
+            dbc.Badge("JKM calibration failed", color="danger", pill=True), True,
+        )
+    try:
+        if not market_data_json or not table_data or not trade_date_str or publication_payload is None:
+            return (is_open, 100, "Waiting for page inputs to load.",
+                    no_update, True, no_update, no_update, no_update, True)
+        if isinstance(batch_state, dict) and batch_state.get('background_job_id') == str(job.job_id):
+            ready, _ = _batch_state_ready(
+                batch_state, trade_date_str, market_data_json,
+                table_data, publication_payload,
             )
-            surfaces.append(surface)
-            expiry_results.append(result)
-        complete_surface = pd.concat(surfaces, ignore_index=True)
-        actual_expiries = pd.to_datetime(
-            complete_surface['contract_date'], errors='coerce'
-        ).dt.to_period('M').nunique()
-        if actual_expiries != len(rows_by_period):
-            raise ValueError(
-                f"Complete JKM publication requires {len(rows_by_period)} "
-                f"expiries; built {actual_expiries}."
-            )
-        input_manifest = {
-            'commodity': 'JKM',
-            'cob_date': pd.Timestamp(trading_date).date().isoformat(),
-            'source_snapshots': [
-                {
-                    'source': 'ICAP official smile plus ICE_JKM_MO forward',
-                    'revision': pd.Timestamp(trading_date).date().isoformat(),
-                }
-            ],
-            'raw_observations': json.loads(
-                market_data.to_json(orient='records', date_format='iso')
-            ),
-            'manual_trade_ids': [],
-            'base_publication_id': (current_publication or {}).get(
-                'publication_id'
-            ),
-            'model_version': DEFAULT_CALIBRATION_MODEL_VERSION,
-            'policy_version': JKM_HYBRID_POLICY_VERSION,
-            'code_revision': os.getenv('APP_CODE_REVISION', 'unknown'),
-        }
-        payload = publish_hybrid_surface(
-            get_database_engine(),
-            complete_surface,
-            expiry_results,
-            commodity=COMMODITY,
-            trading_date=trading_date,
-            settlement_cob=trading_date,
-            identity=identity,
-            created_by=str(identity.subject),
-            base_publication_id=(current_publication or {}).get('publication_id'),
-            expected_current_publication_id=_same_day_publication_id(
-                current_publication,
-                trading_date,
-            ),
-            idempotency_key=(
-                f"jkm:{pd.Timestamp(trading_date).date().isoformat()}:{uuid4()}"
-            ),
-            expected_expiries=rows_by_period.keys(),
-            notes=(
-                "Published from the governed JKM settlement nodes after complete "
-                "PCHIP-core/Wing-tail batch calibration."
-            ),
-            input_manifest=input_manifest,
+            if ready:
+                return (is_open, 100, "Calibration complete.", no_update, False,
+                        no_update, no_update, no_update, True)
+        current = build_background_payload(
+            product=COMMODITY,
+            trade_date=trade_date_str,
+            market_data_json=market_data_json,
+            table_data=table_data,
+            skip_good='skip_good' in (skip_good_opts or []),
+            publication_payload=publication_payload,
+        )
+        if checkpoint_digest(current) != job_reference['payload_fingerprint']:
+            raise ValueError("Inputs changed while the batch ran; reload and recalibrate.")
+        outcome = completed_batch(repo, job.job_id)
+        results = outcome['results']
+        updated = outcome['table_data']
+        state = _build_batch_state(
+            trade_date_str, market_data_json, updated,
+            publication_payload, results,
+        )
+        state['background_job_id'] = str(job.job_id)
+        state['background_code_fingerprint'] = job.payload['code_fingerprint']
+        return (
+            is_open, 100,
+            f"Completed: {outcome['success_count']} calibrated, {outcome['skip_count']} skipped",
+            html.Div([create_batch_summary(results), create_batch_results_table(results)]),
+            False, state, updated,
+            dbc.Badge("JKM calibration complete", color="success", pill=True), True,
         )
     except Exception as exc:
         return (
-            no_update,
-            dbc.Alert(
-                f"Publication blocked: {exc}",
-                color='danger',
-                className='py-2 px-3 mb-3 small',
-            ),
-            no_update,
+            is_open, progress, f"Cannot apply calibration: {exc}", [], False,
+            None, no_update,
+            dbc.Badge("JKM calibration needs review", color="warning", pill=True), True,
         )
-    return (
-        payload,
-        dbc.Alert(
-            f"Working calibrated base {payload.get('publication_date')} · "
-            f"published {payload.get('published_at')} · "
-            f"{payload.get('expiry_count')} expiries · "
-            f"{payload.get('row_count')} immutable points · "
-            f"revision {payload.get('publication_id')}",
-            color='success',
-            className='py-2 px-3 mb-3 small',
-        ),
-        None,
+
+
+@callback(
+    Output(f'{COMMODITY_LOWER}-batch-progress-text', 'children', allow_duplicate=True),
+    Input(f'{COMMODITY_LOWER}-batch-progress-cancel-btn', 'n_clicks'),
+    State(f'{COMMODITY_LOWER}-batch-job-store', 'data'),
+    prevent_initial_call=True,
+)
+def cancel_jkm_batch_job(_clicks, job_reference):
+    if not background_jobs_enabled() or not job_reference:
+        raise PreventUpdate
+    identity = (
+        resolve_request_identity(request.headers, remote_addr=request.remote_addr)
+        if has_request_context() else None
     )
+    actor = identity.subject if identity and identity.subject else f"local:{getpass.getuser()}"
+    job = job_repository().request_cancel(
+        job_id=UUID(job_reference['job_id']), created_by=actor,
+    )
+    return "Cancellation requested." if job else "Cancellation unavailable."

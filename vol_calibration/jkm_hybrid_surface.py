@@ -41,6 +41,8 @@ def fit_jkm_hybrid_candidate(
     *,
     n_starts: int = 3,
     seed: int = 42,
+    resume_start_count: int = 0,
+    resume_attempts=(),
 ) -> dict[str, Any]:
     """Fit the JKM Wing tails to the authoritative total-variance PCHIP core."""
     return _retag(
@@ -50,6 +52,8 @@ def fit_jkm_hybrid_candidate(
             n_starts=n_starts,
             seed=seed,
             commodity="JKM",
+            resume_start_count=resume_start_count,
+            resume_attempts=resume_attempts,
         )
     )
 

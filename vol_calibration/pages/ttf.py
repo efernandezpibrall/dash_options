@@ -8,16 +8,16 @@ Implements Framework Section 4.1:
 - Three-way comparison modal for calibration
 """
 from datetime import date
+import getpass
 import hashlib
 from io import StringIO, BytesIO
 import json
-import os
-from uuid import uuid4
+from uuid import UUID
 
 import pandas as pd
 import numpy as np
 import dash_bootstrap_components as dbc
-from dash import html, dcc, dash_table, callback, Input, Output, State, no_update, ctx
+from dash import html, dcc, dash_table, callback, clientside_callback, Input, Output, State, no_update, ctx
 from dash.exceptions import PreventUpdate
 from flask import has_request_context, request
 
@@ -44,7 +44,6 @@ from vol_calibration.components.batch_calibration_modal import (
 )
 from vol_calibration.feature_flags import (
     ttf_intraday_writes_enabled,
-    ttf_publication_enabled,
     writes_enabled as _legacy_writes_enabled,
 )
 from vol_calibration.auth import resolve_request_identity
@@ -58,12 +57,30 @@ from vol_calibration.model_version import (
     DEFAULT_CALIBRATION_MODEL_VERSION,
 )
 from vol_calibration.ttf_hybrid_surface import (
+    HybridFitNoCandidate,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
     evaluate_ttf_hybrid_candidate,
     fit_ttf_hybrid_candidate,
     hybrid_iv,
     operational_surface_frame as ttf_hybrid_operational_surface_frame,
+)
+from vol_calibration.observed_fit_pool import prefit_observed_expiries
+from vol_calibration.batch_job_runner import (
+    background_jobs_enabled,
+    build_payload as build_background_payload,
+    code_fingerprint as background_code_fingerprint,
+    completed_batch,
+    job_repository,
+    start_worker,
+    submit_batch,
+)
+from vol_calibration.jobs import JobStatus
+from vol_calibration.batch_checkpoints import (
+    digest as checkpoint_digest,
+    expiry_input_fingerprint,
+    make_checkpoint,
+    verified_checkpoint,
 )
 from vol_calibration.operational_surface import (
     create_operational_surface_status,
@@ -96,7 +113,6 @@ from vol_calibration.ttf_market_context import (
 )
 from vol_calibration.ttf_publication import (
     load_latest_ttf_publication,
-    publish_ttf_surface,
     ttf_publication_frame,
 )
 from options.ttf_volatility import delta_node_to_strike
@@ -692,12 +708,21 @@ def _run_ttf_candidate(
     needs_retry = basis == 'extrapolated' and not accepted_first
     if needs_retry:
         try:
+            resume = (
+                {
+                    'resume_start_count': starts,
+                    'resume_attempts': first_error.attempts,
+                }
+                if isinstance(first_error, HybridFitNoCandidate)
+                else {}
+            )
             attempts.append(
                 fit_ttf_hybrid_candidate(
                     observations,
                     _model_params(initial_params),
                     n_starts=TTF_EXTRAPOLATED_RETRY_STARTS,
                     seed=int(TTF_WING_V2_OPTIMIZER_OPTIONS.get('seed', 42)),
+                    **resume,
                 )
             )
         except Exception:
@@ -793,18 +818,6 @@ def create_header():
                     title="Calibrate all expiries at once",
                 ),
                 dbc.Button(
-                    [html.I(className="fas fa-save me-1"), "Save calibrated surface"],
-                    id=f'{COMMODITY_LOWER}-save-all-btn',
-                    color="success",
-                    outline=True,
-                    size="sm",
-                    disabled=True,
-                    title=(
-                        "Run Calibrate All Expiries successfully before saving "
-                        "the complete validated TTF surface."
-                    ),
-                ),
-                dbc.Button(
                     [html.I(className="fas fa-file-excel me-1"), "Export"],
                     id=f'{COMMODITY_LOWER}-export-btn',
                     color="info",
@@ -828,9 +841,12 @@ layout = dbc.Container([
     dcc.Store(id=f'{COMMODITY_LOWER}-params-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-comparison-data-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-results-store'),
+    dcc.Store(id=f'{COMMODITY_LOWER}-batch-job-store', storage_type='session'),
+    dcc.Interval(id=f'{COMMODITY_LOWER}-batch-job-poll', interval=5000),
     dcc.Store(id=f'{COMMODITY_LOWER}-final-nodes-store', storage_type='session'),
     dcc.Store(id='ttf-trading-context-store'),
     dcc.Store(id='ttf-published-surface-store'),
+    dcc.Store(id='ttf-batch-base-publication-store'),
     dcc.Store(id='ttf-intraday-trades-store', storage_type='session'),
     dcc.Store(id='ttf-adjustment-store', storage_type='session'),
 
@@ -1235,6 +1251,18 @@ def load_ttf_publication(trading_date, reload_clicks):
     return payload, status
 
 
+clientside_callback(
+    """function(payload) {
+        if (!payload) return null;
+        const keys = ['publication_id', 'input_manifest_fingerprint',
+                      'published_at', 'publication_date', 'policy_version'];
+        return Object.fromEntries(keys.map(key => [key, payload[key] ?? null]));
+    }""",
+    Output('ttf-batch-base-publication-store', 'data'),
+    Input('ttf-published-surface-store', 'data'),
+)
+
+
 @callback(
     [
         Output('ttf-workspace-expiry', 'options'),
@@ -1242,10 +1270,7 @@ def load_ttf_publication(trading_date, reload_clicks):
         Output('ttf-intraday-expiry', 'options'),
         Output('ttf-intraday-expiry', 'value'),
     ],
-    [
-        Input('ttf-param-table', 'data'),
-        Input('vol-calibration-requested-expiry', 'data', allow_optional=True),
-    ],
+    Input('ttf-param-table', 'data'),
     [
         State('ttf-workspace-expiry', 'value'),
         State('ttf-intraday-expiry', 'value'),
@@ -1254,7 +1279,6 @@ def load_ttf_publication(trading_date, reload_clicks):
 )
 def populate_ttf_expiry_controls(
     table_data,
-    requested_expiry,
     workspace_value,
     trade_value,
 ):
@@ -1272,19 +1296,10 @@ def populate_ttf_expiry_controls(
     ]
     values = [item['value'] for item in options]
     default = values[0] if values else None
-    requested_match = next(
-        (
-            value
-            for value in values
-            if requested_expiry is not None
-            and expiry_month(value) == expiry_month(requested_expiry)
-        ),
-        None,
-    )
     workspace = (
         workspace_value
         if workspace_value in values
-        else requested_match or default
+        else default
     )
     trade = trade_value if trade_value in values else workspace
     return options, workspace, options, trade
@@ -2708,6 +2723,11 @@ def _batch_state_ready(
         return False, "The calibration result is stale; run Calibrate All Expiries again."
     if batch_state.get('calibration_policy_version') != TTF_HYBRID_POLICY_VERSION:
         return False, "The calibration policy changed; run Calibrate All Expiries again."
+    if (
+        batch_state.get('background_code_fingerprint')
+        and batch_state['background_code_fingerprint'] != background_code_fingerprint()
+    ):
+        return False, "The calibration code changed; run Calibrate All Expiries again."
     if batch_state.get('calibration_target') != TTF_BATCH_CALIBRATION_TARGET:
         return False, "The calibration target changed; run Calibrate All Expiries again."
     try:
@@ -2766,266 +2786,6 @@ def _publication_created_by(
     raise ValueError(
         "Calibrate all expiries successfully or build a validated candidate "
         "before saving."
-    )
-
-
-@callback(
-    [
-        Output('ttf-save-all-btn', 'disabled'),
-        Output('ttf-save-all-btn', 'title'),
-    ],
-    [
-        Input('ttf-batch-results-store', 'data'),
-        Input('ttf-param-table', 'data'),
-        Input('ttf-date-picker', 'date'),
-        Input('ttf-market-data-store', 'data'),
-        Input('ttf-final-nodes-store', 'data'),
-        Input('ttf-published-surface-store', 'data'),
-    ],
-)
-def enable_ttf_batch_save(
-    batch_state,
-    table_data,
-    trading_date,
-    market_data_json,
-    node_store,
-    publication_payload,
-):
-    """Enable save only for the exact complete surface currently displayed."""
-    if not ttf_publication_enabled():
-        return True, "TTF calibrated-surface saving is disabled by configuration."
-    ready, reason = _batch_state_ready(
-        batch_state,
-        trading_date,
-        market_data_json,
-        table_data,
-        node_store,
-        publication_payload,
-    )
-    if not ready:
-        return True, reason
-    return (
-        False,
-        f"Save {len(table_data or [])} validated expiries for "
-        f"{_normalized_trading_date(trading_date)}.",
-    )
-
-
-@callback(
-    [
-        Output('ttf-published-surface-store', 'data', allow_duplicate=True),
-        Output('ttf-publication-status', 'children', allow_duplicate=True),
-        Output('ttf-adjustment-status', 'children', allow_duplicate=True),
-        Output('ttf-final-nodes-store', 'data', allow_duplicate=True),
-        Output('ttf-adjustment-store', 'data', allow_duplicate=True),
-        Output('ttf-adjust-level', 'value', allow_duplicate=True),
-        Output('ttf-adjust-skew', 'value', allow_duplicate=True),
-        Output('ttf-adjust-put-curvature', 'value', allow_duplicate=True),
-        Output('ttf-adjust-call-curvature', 'value', allow_duplicate=True),
-        Output('ttf-use-selected-trade', 'value', allow_duplicate=True),
-        Output('ttf-node-unlock', 'value', allow_duplicate=True),
-        Output('ttf-batch-results-store', 'data', allow_duplicate=True),
-    ],
-    [
-        Input('ttf-save-all-btn', 'n_clicks'),
-        Input('ttf-publish-btn', 'n_clicks'),
-    ],
-    [
-        State('ttf-date-picker', 'date'),
-        State('ttf-trading-context-store', 'data'),
-        State('ttf-published-surface-store', 'data'),
-        State('ttf-market-data-store', 'data'),
-        State('ttf-param-table', 'data'),
-        State('ttf-final-nodes-store', 'data'),
-        State('ttf-adjustment-store', 'data'),
-        State('ttf-intraday-trades-store', 'data'),
-        State('ttf-batch-results-store', 'data'),
-    ],
-    prevent_initial_call=True,
-)
-def publish_ttf_intraday_surface(
-    save_clicks,
-    publish_clicks,
-    trading_date,
-    trading_context,
-    current_publication,
-    market_data_json,
-    table_data,
-    node_store,
-    adjustment_store,
-    trade_store,
-    batch_state,
-):
-    triggered_id = ctx.triggered_id
-    if (
-        triggered_id not in {'ttf-save-all-btn', 'ttf-publish-btn'}
-        or not (save_clicks or publish_clicks)
-        or not market_data_json
-        or not table_data
-    ):
-        raise PreventUpdate
-    try:
-        if not ttf_publication_enabled():
-            raise PermissionError("TTF publication is disabled.")
-        identity = _current_identity()
-        market_data = pd.read_json(StringIO(market_data_json), orient='split')
-        rows_by_expiry = {
-            expiry_month(row.get('expiry')): row for row in table_data
-        }
-        batch_results = _batch_state_results(batch_state)
-        if triggered_id == 'ttf-save-all-btn':
-            ready, reason = _batch_state_ready(
-                batch_state,
-                trading_date,
-                market_data_json,
-                table_data,
-                node_store,
-                current_publication,
-            )
-            if not ready:
-                raise ValueError(reason)
-        surfaces = []
-        results = []
-        for expiry in sorted(market_data['expiry'].dropna().unique()):
-            period = expiry_month(expiry)
-            row = rows_by_expiry.get(period)
-            if row is None:
-                raise ValueError(f"Missing parameter row for {period}.")
-            surface, result = _publication_candidate_for_expiry(
-                market_data,
-                row,
-                expiry,
-                node_store,
-                adjustment_store,
-                current_publication,
-                calibration_target=(
-                    TTF_BATCH_CALIBRATION_TARGET
-                    if triggered_id == 'ttf-save-all-btn'
-                    else TTF_INTRADAY_CALIBRATION_TARGET
-                ),
-            )
-            surfaces.append(surface)
-            results.append(result)
-
-        complete_surface = pd.concat(surfaces, ignore_index=True)
-        expected_expiries = len(rows_by_expiry)
-        actual_expiries = pd.to_datetime(
-            complete_surface['contract_date'], errors='coerce'
-        ).dt.to_period('M').nunique()
-        if actual_expiries != expected_expiries:
-            raise ValueError(
-                f"Complete publication requires {expected_expiries} expiries; "
-                f"built {actual_expiries}."
-            )
-        created_by = _publication_created_by(
-            identity,
-            adjustment_store,
-            batch_results,
-            rows_by_expiry.keys(),
-        )
-        manual_trade_ids = [
-            str(trade.get('trade_id'))
-            for trade in (trade_store or {}).get('trades', [])
-            if trade.get('trade_id')
-        ]
-        input_manifest = {
-            'commodity': 'TTF',
-            'cob_date': pd.Timestamp(trading_date).date().isoformat(),
-            'source_snapshots': [
-                {
-                    'source': 'ICAP official smile plus ICE_TTF forward',
-                    'revision': (trading_context or {}).get('settlement_cob'),
-                    'observed_at': (trading_context or {}).get(
-                        'forward_observed_at'
-                    ),
-                }
-            ],
-            'raw_observations': json.loads(
-                market_data.to_json(orient='records', date_format='iso')
-            ),
-            'forward_context': trading_context or {},
-            'manual_trade_ids': manual_trade_ids,
-            'base_publication_id': (current_publication or {}).get(
-                'publication_id'
-            ),
-            'model_version': DEFAULT_CALIBRATION_MODEL_VERSION,
-            'policy_version': TTF_HYBRID_POLICY_VERSION,
-            'code_revision': os.getenv('APP_CODE_REVISION', 'unknown'),
-        }
-        payload = publish_ttf_surface(
-            get_database_engine(),
-            complete_surface,
-            results,
-            trading_date=trading_date,
-            settlement_cob=(trading_context or {}).get('settlement_cob'),
-            identity=identity,
-            created_by=created_by,
-            base_publication_id=(current_publication or {}).get('publication_id'),
-            expected_current_publication_id=_same_day_publication_id(
-                current_publication,
-                trading_date,
-            ),
-            idempotency_key=(
-                f"ttf:{pd.Timestamp(trading_date).date().isoformat()}:"
-                f"{uuid4()}"
-            ),
-            manual_trade_ids=manual_trade_ids,
-            expected_expiries=rows_by_expiry.keys(),
-            notes=(
-                'Published from selected settlement nodes after complete batch '
-                'calibration.'
-                if triggered_id == 'ttf-save-all-btn'
-                else 'Published from the TTF intraday adjustment workspace.'
-            ),
-            input_manifest=input_manifest,
-        )
-    except Exception as exc:
-        message = dbc.Alert(
-            f"Publication blocked: {exc}",
-            color='danger',
-            className='py-1 px-2 mb-0',
-        )
-        return (
-            no_update,
-            message,
-            message,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-        )
-
-    publication_status = dbc.Alert(
-        f"Working calibrated base {payload.get('publication_date')} · "
-        f"published {payload.get('published_at')} · "
-        f"revision {payload.get('publication_id')}",
-        color='success',
-        className='py-2 px-3 mb-3 small',
-    )
-    adjustment_status = dbc.Alert(
-        f"Published {payload.get('expiry_count')} expiries and "
-        f"{payload.get('row_count')} immutable points.",
-        color='success',
-        className='py-1 px-2 mb-0',
-    )
-    return (
-        payload,
-        publication_status,
-        adjustment_status,
-        {},
-        {},
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        [],
-        [],
-        [],
     )
 
 
@@ -3408,52 +3168,26 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
     return is_open, no_update
 
 
-@callback(
-    [Output(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
-     Output(f'{COMMODITY_LOWER}-batch-progress-bar', 'value'),
-     Output(f'{COMMODITY_LOWER}-batch-progress-text', 'children'),
-     Output(f'{COMMODITY_LOWER}-batch-results-container', 'children'),
-     Output(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'disabled'),
-     Output(f'{COMMODITY_LOWER}-batch-results-store', 'data'),
-     Output(f'{COMMODITY_LOWER}-param-table', 'data', allow_duplicate=True),
-     Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True)],
-    [Input(f'{COMMODITY_LOWER}-batch-confirm-btn', 'n_clicks'),
-     Input(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'n_clicks')],
-    [State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
-     State(f'{COMMODITY_LOWER}-param-table', 'data'),
-     State(f'{COMMODITY_LOWER}-batch-auto-save', 'value'),
-     State(f'{COMMODITY_LOWER}-batch-skip-good-fit', 'value'),
-     State(f'{COMMODITY_LOWER}-date-picker', 'date'),
-     State(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
-     State(f'{COMMODITY_LOWER}-final-nodes-store', 'data'),
-     State('ttf-published-surface-store', 'data')],
-    prevent_initial_call=True
-)
-def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_data,
-                          auto_save_opts, skip_good_opts, trade_date_str, is_open,
-                          node_store=None, publication_payload=None):
-    """Run batch calibration on all expiries."""
-    triggered_id = ctx.triggered_id
+def _fit_ttf_observed_task(task):
+    key, observations, initial_params = task
+    try:
+        return key, (True, _run_ttf_candidate(
+            observations, initial_params, basis='observed',
+            selected_expiry=False,
+        ))
+    except Exception as exc:
+        return key, (False, str(exc))
 
-    # Close button pressed
-    if triggered_id == f'{COMMODITY_LOWER}-batch-progress-close-btn':
-        return False, 0, "", [], True, no_update, no_update, no_update
 
-    # Confirm button pressed - run calibration
-    if triggered_id != f'{COMMODITY_LOWER}-batch-confirm-btn':
-        raise PreventUpdate
-
-    if market_data_json is None or table_data is None:
-        raise PreventUpdate
-
-    # Server-side publication invariant: the hybrid has no governed database
-    # provenance yet, so batch output is always session/export-only.
-    skip_good = 'skip_good' in (skip_good_opts or [])
-
-    market_data = pd.read_json(StringIO(market_data_json), orient='split')
+def calibrate_ttf_batch(
+    market_data, table_data, *, skip_good=False, node_store=None,
+    checkpoints=None, checkpoint_callback=None, cancellation_check=None,
+):
+    """Calibrate the settlement batch independently of the Dash callback."""
     params_df = parse_table_data(table_data)
 
     expiries = sorted(market_data['expiry'].dropna().unique())
+    checkpoints = checkpoints or {}
     results = []
     updated_table_data = table_data.copy()
     row_index_by_expiry = {}
@@ -3463,6 +3197,33 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
         except ValueError:
             continue
 
+    observed_tasks = []
+    if not skip_good and len(expiries) >= 8:
+        for expiry in expiries:
+            if pd.Timestamp(expiry).strftime('%Y-%m-%d') in checkpoints:
+                continue
+            try:
+                row_index = row_index_by_expiry[expiry_month(expiry)]
+                observations = _settlement_ttf_observations(market_data, expiry)
+                observations = _apply_node_edits(observations, node_store, expiry)
+                observations = _select_ttf_expiry_inputs(observations, expiry)
+                if (
+                    _calibration_basis(observations) == 'observed'
+                    and not calibration_eligibility_error(observations)
+                ):
+                    initial = _model_params(params_df.iloc[row_index].to_dict())
+                    observed_tasks.append(
+                        (pd.Timestamp(expiry).isoformat(), observations, initial)
+                    )
+            except (KeyError, IndexError, ValueError, TypeError):
+                # The chronological loop reports the original per-expiry error.
+                continue
+    prefitted = prefit_observed_expiries(
+        observed_tasks,
+        _fit_ttf_observed_task,
+        environment_variable='TTF_OBSERVED_FIT_WORKERS',
+    )
+
     success_count = 0
     skip_count = 0
     fail_count = 0
@@ -3471,8 +3232,34 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     for expiry in expiries:
         expiry_str = pd.to_datetime(expiry).strftime('%Y-%m-%d')
         row_index = row_index_by_expiry.get(expiry_month(expiry))
+        if cancellation_check is not None:
+            cancellation_check()
+        input_fingerprint = expiry_input_fingerprint(
+            market_data, expiry,
+            table_data[row_index] if row_index is not None else None,
+            policy=TTF_HYBRID_POLICY_VERSION,
+            skip_good=skip_good,
+            node_edits=(node_store or {}).get(str(expiry_month(expiry))),
+        )
+        dependency_fingerprint = checkpoint_digest(last_successful_params)
+        if expiry_str in checkpoints:
+            saved = verified_checkpoint(
+                checkpoints[expiry_str],
+                expiry=expiry_str,
+                input_fingerprint=input_fingerprint,
+                dependency_fingerprint=dependency_fingerprint,
+            )
+            updated_table_data[row_index] = dict(saved['updated_row'])
+            last_successful_params = dict(saved['warm_start_after'])
+            results.append(dict(saved['result_row']))
+            if saved['result_row']['status'] == 'Skipped':
+                skip_count += 1
+            else:
+                success_count += 1
+            continue
         basis = None
         old_rmse = None
+        result_count_before = len(results)
 
         try:
             if row_index is None or row_index >= len(params_df):
@@ -3555,12 +3342,20 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
                     "No successful observed TTF calibration is available to "
                     "seed the extrapolated tail."
                 )
-            result = _run_ttf_candidate(
-                exp_data,
-                initial_params,
-                basis=basis,
-                selected_expiry=False,
+            prefitted_result = (
+                prefitted.get(pd.Timestamp(expiry).isoformat())
+                if basis == 'observed' else None
             )
+            if prefitted_result is None:
+                result = _run_ttf_candidate(
+                    exp_data, initial_params, basis=basis,
+                    selected_expiry=False,
+                )
+            else:
+                succeeded, payload = prefitted_result
+                if not succeeded:
+                    raise ValueError(payload)
+                result = payload
             new_params = _model_params(result['params'])
             new_rmse = float(result['core_tv_rmse'])
 
@@ -3625,6 +3420,115 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
                 )
             )
             fail_count += 1
+        finally:
+            if checkpoint_callback is not None and len(results) > result_count_before:
+                checkpoint_callback(make_checkpoint(
+                    expiry=expiry_str,
+                    result_row=results[-1],
+                    updated_row=(
+                        updated_table_data[row_index]
+                        if row_index is not None else None
+                    ),
+                    warm_start_after=last_successful_params,
+                    input_fingerprint=input_fingerprint,
+                    dependency_fingerprint=dependency_fingerprint,
+                ))
+
+    return {
+        'results': results,
+        'table_data': updated_table_data,
+        'success_count': success_count,
+        'skip_count': skip_count,
+        'fail_count': fail_count,
+    }
+
+
+@callback(
+    [Output(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
+     Output(f'{COMMODITY_LOWER}-batch-progress-bar', 'value'),
+     Output(f'{COMMODITY_LOWER}-batch-progress-text', 'children'),
+     Output(f'{COMMODITY_LOWER}-batch-results-container', 'children'),
+     Output(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-batch-results-store', 'data'),
+     Output(f'{COMMODITY_LOWER}-param-table', 'data', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-job-store', 'data')],
+    [Input(f'{COMMODITY_LOWER}-batch-confirm-btn', 'n_clicks'),
+     Input(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'n_clicks')],
+    [State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+     State(f'{COMMODITY_LOWER}-param-table', 'data'),
+     State(f'{COMMODITY_LOWER}-batch-auto-save', 'value'),
+     State(f'{COMMODITY_LOWER}-batch-skip-good-fit', 'value'),
+     State(f'{COMMODITY_LOWER}-date-picker', 'date'),
+     State(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
+     State(f'{COMMODITY_LOWER}-final-nodes-store', 'data'),
+     State('ttf-published-surface-store', 'data')],
+    prevent_initial_call=True
+)
+def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_data,
+                          auto_save_opts, skip_good_opts, trade_date_str, is_open,
+                          node_store=None, publication_payload=None):
+    """Run batch calibration on all expiries."""
+    triggered_id = ctx.triggered_id
+
+    # Close button pressed
+    if triggered_id == f'{COMMODITY_LOWER}-batch-progress-close-btn':
+        return False, 0, "", [], True, no_update, no_update, no_update, no_update
+
+    # Confirm button pressed - run calibration
+    if triggered_id != f'{COMMODITY_LOWER}-batch-confirm-btn':
+        raise PreventUpdate
+
+    if market_data_json is None or table_data is None:
+        raise PreventUpdate
+
+    # Server-side publication invariant: the hybrid has no governed database
+    # provenance yet, so batch output is always session/export-only.
+    skip_good = 'skip_good' in (skip_good_opts or [])
+
+    if background_jobs_enabled():
+        try:
+            payload = build_background_payload(
+                product=COMMODITY,
+                trade_date=trade_date_str,
+                market_data_json=market_data_json,
+                table_data=table_data,
+                skip_good=skip_good,
+                node_store=node_store,
+                publication_payload=publication_payload,
+            )
+            identity = (
+                resolve_request_identity(
+                    request.headers, remote_addr=request.remote_addr,
+                ) if has_request_context() else None
+            )
+            actor = identity.subject if identity and identity.subject else f"local:{getpass.getuser()}"
+            job = submit_batch(job_repository(), payload, created_by=actor)
+            if job.status == JobStatus.QUEUED:
+                start_worker(job.job_id)
+            return (
+                True, 0, "Queued: 0 expiries completed", [], True,
+                None, no_update,
+                dbc.Badge("TTF calibration queued", color="info", pill=True),
+                {"job_id": str(job.job_id), "payload_fingerprint": checkpoint_digest(payload)},
+            )
+        except Exception as exc:
+            return (
+                True, 0, f"Could not start calibration: {exc}", [], False,
+                None, no_update,
+                dbc.Badge("TTF calibration not started", color="danger", pill=True),
+                None,
+            )
+
+    market_data = pd.read_json(StringIO(market_data_json), orient='split')
+    outcome = calibrate_ttf_batch(
+        market_data, table_data, skip_good=skip_good, node_store=node_store,
+    )
+    results = outcome['results']
+    updated_table_data = outcome['table_data']
+    success_count = outcome['success_count']
+    skip_count = outcome['skip_count']
+    fail_count = outcome['fail_count']
 
     # Create results display
     results_display = html.Div([
@@ -3656,4 +3560,134 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
         results,
     )
     return (True, 100, f"Completed: {success_count} calibrated, {skip_count} skipped, {fail_count} failed",
-            results_display, False, batch_state, updated_table_data, status_badge)
+            results_display, False, batch_state, updated_table_data, status_badge,
+            None)
+
+
+@callback(
+    [Output(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-bar', 'value', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-text', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-results-container', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-close-btn', 'disabled', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-results-store', 'data', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-param-table', 'data', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True),
+     Output(f'{COMMODITY_LOWER}-batch-progress-cancel-btn', 'disabled')],
+    [Input(f'{COMMODITY_LOWER}-batch-job-poll', 'n_intervals'),
+     Input(f'{COMMODITY_LOWER}-batch-job-store', 'data')],
+    [State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+     State(f'{COMMODITY_LOWER}-param-table', 'data'),
+     State(f'{COMMODITY_LOWER}-date-picker', 'date'),
+     State(f'{COMMODITY_LOWER}-final-nodes-store', 'data'),
+     State('ttf-batch-base-publication-store', 'data'),
+     State(f'{COMMODITY_LOWER}-batch-skip-good-fit', 'value'),
+     State(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
+     State(f'{COMMODITY_LOWER}-batch-results-store', 'data')],
+    prevent_initial_call=True,
+)
+def poll_ttf_batch_job(
+    _tick, job_reference, market_data_json, table_data, trade_date_str,
+    node_store, publication_payload, skip_good_opts, is_open, batch_state,
+):
+    if not background_jobs_enabled() or not job_reference:
+        raise PreventUpdate
+    try:
+        repo = job_repository()
+        job = repo.get(job_id=UUID(job_reference['job_id']))
+    except Exception:
+        return (is_open, no_update, "Waiting for calibration database connection.",
+                no_update, True, no_update, no_update, no_update, True)
+    if job is None:
+        return (is_open, 0, "Calibration job is missing.", [], False,
+                None, no_update, no_update, True)
+    progress = round(100 * job.completed_items / max(job.total_items, 1))
+    if job.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
+        if job.status == JobStatus.QUEUED or (
+            job.lease_expires_at is not None
+            and job.lease_expires_at < pd.Timestamp.now(tz='UTC').to_pydatetime()
+        ):
+            try:
+                start_worker(job.job_id)
+            except OSError as exc:
+                return (
+                    is_open, progress, f"Could not start calibration worker: {exc}",
+                    no_update, True, no_update, no_update, no_update, False,
+                )
+        return (
+            is_open, progress,
+            f"{job.completed_items} of {job.total_items} expiries completed",
+            no_update, True, no_update, no_update,
+            dbc.Badge("TTF calibration running", color="info", pill=True), False,
+        )
+    if job.status != JobStatus.SUCCEEDED:
+        return (
+            is_open, progress, job.last_error or f"Calibration {job.status.value}.",
+            [], False, None, no_update,
+            dbc.Badge("TTF calibration failed", color="danger", pill=True), True,
+        )
+    try:
+        if not market_data_json or not table_data or not trade_date_str or publication_payload is None:
+            return (is_open, 100, "Waiting for page inputs to load.",
+                    no_update, True, no_update, no_update, no_update, True)
+        if isinstance(batch_state, dict) and batch_state.get('background_job_id') == str(job.job_id):
+            ready, _ = _batch_state_ready(
+                batch_state, trade_date_str, market_data_json,
+                table_data, node_store, publication_payload,
+            )
+            if ready:
+                return (is_open, 100, "Calibration complete.", no_update, False,
+                        no_update, no_update, no_update, True)
+        current = build_background_payload(
+            product=COMMODITY,
+            trade_date=trade_date_str,
+            market_data_json=market_data_json,
+            table_data=table_data,
+            skip_good='skip_good' in (skip_good_opts or []),
+            node_store=node_store,
+            publication_payload=publication_payload,
+        )
+        if checkpoint_digest(current) != job_reference['payload_fingerprint']:
+            raise ValueError("Inputs changed while the batch ran; reload and recalibrate.")
+        outcome = completed_batch(repo, job.job_id)
+        results = outcome['results']
+        updated = outcome['table_data']
+        state = _build_ttf_batch_state(
+            trade_date_str, market_data_json, updated, node_store,
+            publication_payload, results,
+        )
+        state['background_job_id'] = str(job.job_id)
+        state['background_code_fingerprint'] = job.payload['code_fingerprint']
+        return (
+            is_open, 100,
+            f"Completed: {outcome['success_count']} calibrated, {outcome['skip_count']} skipped",
+            html.Div([create_batch_summary(results), create_batch_results_table(results)]),
+            False, state, updated,
+            dbc.Badge("TTF calibration complete", color="success", pill=True), True,
+        )
+    except Exception as exc:
+        return (
+            is_open, progress, f"Cannot apply calibration: {exc}", [], False,
+            None, no_update,
+            dbc.Badge("TTF calibration needs review", color="warning", pill=True), True,
+        )
+
+
+@callback(
+    Output(f'{COMMODITY_LOWER}-batch-progress-text', 'children', allow_duplicate=True),
+    Input(f'{COMMODITY_LOWER}-batch-progress-cancel-btn', 'n_clicks'),
+    State(f'{COMMODITY_LOWER}-batch-job-store', 'data'),
+    prevent_initial_call=True,
+)
+def cancel_ttf_batch_job(_clicks, job_reference):
+    if not background_jobs_enabled() or not job_reference:
+        raise PreventUpdate
+    identity = (
+        resolve_request_identity(request.headers, remote_addr=request.remote_addr)
+        if has_request_context() else None
+    )
+    actor = identity.subject if identity and identity.subject else f"local:{getpass.getuser()}"
+    job = job_repository().request_cancel(
+        job_id=UUID(job_reference['job_id']), created_by=actor,
+    )
+    return "Cancellation requested." if job else "Cancellation unavailable."

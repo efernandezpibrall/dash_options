@@ -943,6 +943,135 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
     assert output[5]["calibration_target"] == ttf.TTF_BATCH_CALIBRATION_TARGET
 
 
+def test_batch_uses_ordered_prefitted_observed_results(monkeypatch):
+    months = pd.date_range("2026-09-01", periods=8, freq="MS")
+    market_data = pd.concat(
+        [
+            *[
+                _valid_ttf_observations().assign(
+                    expiry=month,
+                    option_expiration_date=month - pd.Timedelta(days=5),
+                    dte=78.0 + 30.0 * index,
+                )
+                for index, month in enumerate(months)
+            ],
+            _valid_extrapolated_observations("2027-05-01", 320.0),
+        ],
+        ignore_index=True,
+    )
+    table_data = [
+        _table_row(month.strftime("%b-%y"), "observed", 0.30)
+        for month in months
+    ] + [_table_row("May-27", "extrapolated", 0.30)]
+
+    def fake_prefit(tasks, _worker, *, environment_variable):
+        assert environment_variable == "TTF_OBSERVED_FIT_WORKERS"
+        assert len(tasks) == 8
+        results = {}
+        for index, (key, _observations, initial) in enumerate(tasks):
+            results[key] = (True, {
+                "params": {**initial, "vr": 0.31 + index / 100},
+                "core_tv_rmse": 0.0,
+                "tail_fit_tv_rmse": 0.001,
+                "iv_rmse": 0.01,
+                "left_blend_width": 0.10,
+                "right_blend_width": 0.10,
+                "validation": {"is_valid": True, "min_g": 0.01},
+            })
+        return results
+
+    monkeypatch.setattr(ttf, "ctx", SimpleNamespace(triggered_id="ttf-batch-confirm-btn"))
+    monkeypatch.setattr(ttf, "prefit_observed_expiries", fake_prefit)
+    seen = []
+
+    def fake_run(_observations, initial, *, basis, selected_expiry):
+        seen.append((basis, initial["vr"], selected_expiry))
+        assert basis == "extrapolated"
+        return {
+            "params": {**initial, "vr": 0.40},
+            "core_tv_rmse": 0.0,
+            "tail_fit_tv_rmse": 0.001,
+            "iv_rmse": 0.01,
+            "left_blend_width": 0.10,
+            "right_blend_width": 0.10,
+            "validation": {"is_valid": True, "min_g": 0.01},
+        }
+
+    monkeypatch.setattr(ttf, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(
+        ttf, "_evaluate_existing_hybrid",
+        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+    )
+
+    output = ttf.run_batch_calibration(
+        1, None, market_data.to_json(date_format="iso", orient="split"),
+        table_data, [], [], "2026-07-30", False,
+    )
+
+    assert [row["status"] for row in output[5]["results"]] == ["Success"] * 9
+    assert seen == [("extrapolated", pytest.approx(0.38), False)]
+    assert [row["vr"] for row in output[6]] == pytest.approx(
+        [0.31 + index / 100 for index in range(8)] + [0.40]
+    )
+
+
+def test_ttf_batch_resumes_verified_prefix_and_warm_start(monkeypatch):
+    from vol_calibration.batch_checkpoints import StaleCalibrationCheckpoint
+
+    market = pd.concat([
+        _valid_ttf_observations().assign(
+            expiry=pd.Timestamp("2029-03-01"),
+            option_expiration_date=pd.Timestamp("2029-02-23"),
+            dte=938.0,
+        ),
+        _valid_extrapolated_observations("2029-04-01", 969.0),
+        _valid_extrapolated_observations("2029-05-01", 999.0),
+    ], ignore_index=True)
+    table = [
+        _table_row("Mar-29", "observed", 0.53),
+        _table_row("Apr-29", "extrapolated", 0.54),
+        _table_row("May-29", "extrapolated", 0.55),
+    ]
+    calls = []
+
+    def fake_run(observations, initial, *, basis, selected_expiry):
+        month = pd.Timestamp(observations["expiry"].iloc[0]).month
+        calls.append((month, basis, float(initial["vr"])))
+        return {
+            "params": {**initial, "vr": 0.30 + month / 100},
+            "core_tv_rmse": 0.0,
+            "tail_fit_tv_rmse": 0.001,
+            "iv_rmse": 0.01,
+            "left_blend_width": 0.10,
+            "right_blend_width": 0.10,
+            "validation": {"is_valid": True, "min_g": 0.01},
+        }
+
+    monkeypatch.setattr(ttf, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(
+        ttf, "_evaluate_existing_hybrid",
+        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+    )
+    saved = {}
+    full = ttf.calibrate_ttf_batch(
+        market, [dict(row) for row in table],
+        checkpoint_callback=lambda row: saved.update({row["expiry"]: row}),
+    )
+    assert full["fail_count"] == 0
+    calls.clear()
+    resumed = ttf.calibrate_ttf_batch(
+        market, [dict(row) for row in table],
+        checkpoints={key: saved[key] for key in list(saved)[:2]},
+    )
+    assert resumed == full
+    assert calls == [(5, "extrapolated", pytest.approx(0.34))]
+
+    changed = [dict(row) for row in table]
+    changed[0]["vr"] += 0.01
+    with pytest.raises(StaleCalibrationCheckpoint, match="2029-03-01"):
+        ttf.calibrate_ttf_batch(market, changed, checkpoints=saved)
+
+
 def test_hybrid_comparison_cannot_persist_even_when_writes_enabled(monkeypatch):
     monkeypatch.setattr(ttf, "writes_enabled", lambda: True)
     monkeypatch.setattr(

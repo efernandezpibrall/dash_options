@@ -137,6 +137,114 @@ def test_jkm_batch_fits_observed_independently_then_chains_tail(monkeypatch):
     assert all(row["arb_status"] == "Pass" for row in result["table_data"])
 
 
+def test_jkm_batch_resumes_verified_prefix_without_refitting(monkeypatch):
+    from vol_calibration.batch_checkpoints import StaleCalibrationCheckpoint
+
+    expiries = [
+        ("2026-09-01", "observed"),
+        ("2026-10-01", "observed"),
+        ("2026-11-01", "extrapolated"),
+    ]
+    market = _market(expiries)
+    table = _table(expiries)
+    calls = []
+
+    def fake_run(observations, initial, *, basis):
+        calls.append((basis, float(initial["vr"])))
+        return _candidate(
+            get_defaults("JKM"), vr=0.14 + float(observations["forward"].iloc[0]) / 100
+        )
+
+    monkeypatch.setattr(jkm, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(
+        jkm, "_evaluate_existing_hybrid",
+        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+    )
+    saved = {}
+    full = jkm.calibrate_jkm_batch(
+        market, table, checkpoint_callback=lambda row: saved.update({row["expiry"]: row}),
+    )
+    assert full["fail_count"] == 0
+    assert len(calls) == 3
+
+    calls.clear()
+    resumed = jkm.calibrate_jkm_batch(
+        market, table, checkpoints={key: saved[key] for key in list(saved)[:2]},
+    )
+    assert resumed == full
+    assert len(calls) == 1
+    assert calls[0][0] == "extrapolated"
+
+    edited = [dict(row) for row in table]
+    edited[0]["vr"] += 0.01
+    with pytest.raises(StaleCalibrationCheckpoint, match="2026-09-01"):
+        jkm.calibrate_jkm_batch(market, edited, checkpoints=saved)
+
+
+def test_jkm_interrupted_expiry_never_checkpoints_previous_result_as_current(monkeypatch):
+    expiries = [
+        ("2026-09-01", "observed"),
+        ("2026-10-01", "observed"),
+    ]
+    market = _market(expiries)
+    saved = []
+
+    def interrupt_on_second(observations, initial, *, basis):
+        if pd.Timestamp(observations["expiry"].iloc[0]).month == 10:
+            raise KeyboardInterrupt
+        return _candidate(get_defaults("JKM"), vr=0.31)
+
+    monkeypatch.setattr(jkm, "_run_jkm_candidate", interrupt_on_second)
+    monkeypatch.setattr(
+        jkm, "_evaluate_existing_hybrid",
+        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        jkm.calibrate_jkm_batch(
+            market, _table(expiries), checkpoint_callback=saved.append,
+        )
+    assert [row["expiry"] for row in saved] == ["2026-09-01"]
+
+
+def test_jkm_batch_consumes_parallel_observed_results_in_expiry_order(monkeypatch):
+    expiries = [
+        (pd.Timestamp("2026-09-01") + pd.DateOffset(months=index), "observed")
+        for index in range(8)
+    ] + [("2027-05-01", "extrapolated")]
+    market = _market(expiries)
+    table = _table(expiries)
+    seen = []
+
+    def fake_prefit(tasks, _worker, *, environment_variable):
+        assert environment_variable == "JKM_OBSERVED_FIT_WORKERS"
+        assert len(tasks) == 8
+        return {
+            key: (True, _candidate(get_defaults("JKM"), vr=0.31 + index / 100))
+            for index, (key, _observations, _initial) in enumerate(tasks)
+        }
+
+    def fake_run(_observations, initial, *, basis):
+        seen.append((basis, initial["vr"]))
+        assert basis == "extrapolated"
+        return _candidate(get_defaults("JKM"), vr=0.40)
+
+    monkeypatch.setattr(jkm, "prefit_observed_expiries", fake_prefit)
+    monkeypatch.setattr(jkm, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(
+        jkm, "_evaluate_existing_hybrid",
+        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+    )
+
+    result = jkm.calibrate_jkm_batch(market, table)
+
+    assert result["success_count"] == 9
+    assert result["fail_count"] == 0
+    assert seen == [("extrapolated", pytest.approx(0.38))]
+    assert [row["vr"] for row in result["table_data"][:8]] == pytest.approx(
+        [0.31 + index / 100 for index in range(8)]
+    )
+
+
 def test_jkm_batch_state_rejects_table_or_market_changes():
     expiries = [("2026-09-01", "observed")]
     table = _table(expiries)

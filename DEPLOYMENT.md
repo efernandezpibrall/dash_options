@@ -40,6 +40,12 @@ Set database and Trino values through environment variables or point
 `OPTIONS_CONFIG_PATH` at a mounted configuration file. Do not put credentials
 in the image.
 
+Calibration controls are mounted in Vol Trades at `/brent_vol_history`;
+`VOL_CALIBRATION_ENABLED` remains the shared feature gate. The retired
+`/vol_calibration` URL redirects to Vol Trades. The Vol Trades calibration
+button is visible by default; set `VOL_TRADES_INLINE_CALIBRATION_ENABLED=false`
+to hide it explicitly. Publication still uses separate write flags.
+
 The read-only release uses:
 
 ```text
@@ -47,6 +53,7 @@ VOL_CALIBRATION_ENABLED=true
 VOL_CALIBRATION_WRITES_ENABLED=false
 VOL_CALIBRATION_PUBLISH_ENABLED=false
 VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED=false
+VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED=false
 OPTIONS_TRUSTED_PROXY_AUTH_ENABLED=false
 BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED=false
 BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED=false
@@ -61,6 +68,7 @@ repository:
 WRITES_ENABLED = false
 PUBLISH_ENABLED = false
 BACKGROUND_JOBS_ENABLED = false
+GAS_BATCH_JOBS_ENABLED = false
 TTF_INTRADAY_WRITES_ENABLED = true
 TTF_PUBLICATION_ENABLED = true
 
@@ -97,6 +105,18 @@ identity mode is verified, and role mappings are tested. Background jobs remain
 independently disabled until their worker is deployed.
 Publication remains disabled until verified option-expiry calendars and source
 eligibility rules are complete for every enabled product.
+
+The TTF and JKM settlement batch worker is controlled separately by
+`VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED=true` (or
+`[VOL_CALIBRATION] GAS_BATCH_JOBS_ENABLED = true`). Apply Alembic revision
+`20260928_01` before enabling it. The Dash process launches a detached Python
+worker for each queued batch; the worker needs the same environment, database
+access and current `options`/`dash_options` code as the web process. The job
+stores one verified checkpoint per expiry, resumes after an interrupted lease,
+and rereads the official source before and after fitting. A finished job remains
+a candidate in the page; publication still requires its existing explicit
+action and product write flags. `/health/ready` checks the migration and queue
+tables when this flag is enabled.
 
 The Brent market-data refreshes have separate fail-closed intake flags. Apply
 BBG migrations `002` through `009` in numeric order; the worker-registry

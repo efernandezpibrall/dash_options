@@ -3730,87 +3730,10 @@ button:hover {
     grid-column: 1 / -1;
 }
 
-.professional-section-header.pricer-sticky-filter-bar {
-    position: sticky;
-    top: var(--dashboard-top-bar-height, 54px);
-    z-index: 1100;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    min-height: 42px;
-    padding: 7px 12px;
-    margin: -10px -16px 12px;
-    background: linear-gradient(180deg, #fbfdff 0%, #eef3f8 100%);
-    border: 0;
-    border-bottom: 1px solid #cbd5e1;
-    border-radius: 0;
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.72),
-        0 2px 8px rgba(15, 23, 42, 0.08);
-}
-
-.pricer-sticky-filter-group {
-    display: inline-flex;
-    flex: 0 1 370px;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 6px;
-    min-width: 0;
-    min-height: 34px;
-    padding: 2px 5px 2px 8px;
-    border: 1px solid rgba(180, 193, 209, 0.86);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.78),
-        0 1px 2px rgba(15, 23, 42, 0.035);
-}
-
-.pricer-sticky-filter-bar .filter-group-header {
-    flex: 0 0 auto;
-    margin: 0;
-    color: #475569;
-    font-size: 9.5px;
-    font-weight: 800;
-    line-height: 1;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
 .pricer-filter-dropdown {
     flex: 1 1 auto;
     min-width: 220px;
     font-size: 12px;
-}
-
-.pricer-sticky-filter-bar .Select-control {
-    min-height: 29px !important;
-    height: 29px !important;
-    border-color: rgba(203, 213, 225, 0.95) !important;
-    border-radius: 999px !important;
-    background: #ffffff;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.80);
-}
-
-.pricer-sticky-filter-bar .Select-value, .pricer-sticky-filter-bar .Select-placeholder {
-    line-height: 27px !important;
-}
-
-.pricer-sticky-filter-bar .Select-value-label, .pricer-sticky-filter-bar .Select-placeholder {
-    color: #0f172a !important;
-    font-size: 11.5px !important;
-    font-weight: 700;
-}
-
-.pricer-sticky-filter-bar .Select-input {
-    height: 27px !important;
-}
-
-.pricer-sticky-filter-bar .Select-menu-outer {
-    z-index: 1300 !important;
 }
 
 .pricer-section {
@@ -5160,43 +5083,6 @@ button:hover {
     font-weight: 820 !important;
 }
 
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-header-group-cell.pricer-result-column-group {
-    background: #dde8f3 !important;
-    border-top: 2px solid #8da9c3 !important;
-}
-
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-header-group-cell.pricer-result-column-group-position {
-    background: #dcefe5 !important;
-    border-top-color: #659979 !important;
-}
-
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-header-group-cell-label {
-    justify-content: center;
-    color: #172033;
-    font-size: 10.5px;
-    font-weight: 850;
-    letter-spacing: 0.035em;
-    text-transform: uppercase;
-}
-
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-tooltip {
-    padding: 6px 8px;
-    border: 1px solid #334155;
-    border-radius: 5px;
-    background: #172033;
-    box-shadow: 0 5px 14px rgba(15, 23, 42, 0.22);
-    color: #ffffff;
-    font-size: 11px;
-    font-weight: 700;
-    line-height: 1.2;
-}
-
-.ag-theme-alpine.mckinsey-ag-grid.pricer-combined-results-grid .ag-cell.pricer-metric-tooltip-cell {
-    cursor: help;
-    text-decoration: underline dotted rgba(51, 65, 85, 0.62);
-    text-underline-offset: 2px;
-}
-
 .pricer-config-section, .pricer-output-section {
     margin-bottom: 14px;
     padding-right: 12px;
@@ -6050,6 +5936,7 @@ button:hover {
 }
 
 .pricer-page .ag-theme-alpine.mckinsey-ag-grid.pricer-legs-grid .ag-tooltip {
+    max-width: min(340px, calc(100vw - 24px));
     padding: 6px 8px;
     border: 1px solid #334155;
     border-radius: 5px;
@@ -6059,6 +5946,8 @@ button:hover {
     font-size: 11px;
     font-weight: 700;
     line-height: 1.2;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .pricer-config-section .pricer-section-header, .pricer-output-section .pricer-section-header {
@@ -6083,11 +5972,6 @@ button:hover {
 @media (max-width: 1000px) {
     .pricer-output-body, .pricer-chart-grid, .pricer-market-sizing-layout {
         grid-template-columns: minmax(0, 1fr);
-    }
-
-    .pricer-sticky-filter-group {
-        flex: 1 1 100%;
-        max-width: none;
     }
 
     .pricer-filter-dropdown {
@@ -6142,11 +6026,6 @@ button:hover {
 
     .pricer-structure-panel .pricer-structure-header-actions > button, .pricer-analysis-selector-field {
         width: 100%;
-    }
-
-    .professional-section-header.pricer-sticky-filter-bar {
-        margin-left: -10px;
-        margin-right: -10px;
     }
 
     .pricer-config-toolbar, .pricer-payoff-controls {
@@ -6846,109 +6725,6 @@ button:hover {
     box-sizing: border-box;
 }
 
-.professional-section-header.valuation-sticky-filter-bar {
-    position: sticky;
-    top: var(--dashboard-top-bar-height, 54px);
-    z-index: 1100;
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: 8px;
-    min-height: 42px;
-    padding: 7px 12px;
-    margin: -10px -16px 12px;
-    background: linear-gradient(180deg, #fbfdff 0%, #eef3f8 100%);
-    border: 0;
-    border-bottom: 1px solid #cbd5e1;
-    border-radius: 0;
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.72),
-        0 2px 8px rgba(15, 23, 42, 0.08);
-}
-
-.valuation-sticky-filter-group {
-    display: inline-flex;
-    flex: 0 0 auto;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 6px;
-    min-width: 0;
-    min-height: 34px;
-    padding: 2px 5px 2px 8px;
-    border: 1px solid rgba(180, 193, 209, 0.86);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.78),
-        0 1px 2px rgba(15, 23, 42, 0.035);
-}
-
-.valuation-date-filter-group {
-    flex: 0 0 auto;
-}
-
-.valuation-strategy-filter-group {
-    flex: 1 1 520px;
-    max-width: 880px;
-}
-
-.valuation-sticky-filter-bar .filter-group-header {
-    flex: 0 0 auto;
-    margin: 0;
-    color: #475569;
-    font-size: 9.5px;
-    font-weight: 800;
-    line-height: 1;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
-.valuation-filter-dropdown {
-    flex: 1 1 auto;
-    min-width: 0;
-    font-size: 12px;
-}
-
-.valuation-date-dropdown {
-    width: 128px;
-}
-
-.valuation-strategy-dropdown {
-    width: 100%;
-    min-width: 360px;
-}
-
-.valuation-sticky-filter-bar .Select-control {
-    min-height: 29px !important;
-    height: 29px !important;
-    border-color: rgba(203, 213, 225, 0.95) !important;
-    border-radius: 999px !important;
-    background: #ffffff;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.80);
-}
-
-.valuation-sticky-filter-bar .Select-value,
-.valuation-sticky-filter-bar .Select-placeholder {
-    line-height: 27px !important;
-}
-
-.valuation-sticky-filter-bar .Select-value-label,
-.valuation-sticky-filter-bar .Select-placeholder {
-    color: #0f172a !important;
-    font-size: 11.5px !important;
-    font-weight: 700;
-}
-
-.valuation-sticky-filter-bar .Select-input {
-    height: 27px !important;
-}
-
-.valuation-sticky-filter-bar .Select-menu-outer {
-    z-index: 1300 !important;
-}
-
 /* Valuation reuses the compact Greeks monitoring toolbar grammar while keeping
    its page-specific controls and source-status mount. */
 .valuation-monitor-controls.greeks-sticky-filter-bar .valuation-monitor-selector-row {
@@ -7289,21 +7065,6 @@ button:hover {
 }
 
 @media (max-width: 900px) {
-    .professional-section-header.valuation-sticky-filter-bar {
-        flex-wrap: wrap;
-        align-items: stretch;
-        gap: 7px;
-    }
-
-    .valuation-sticky-filter-group,
-    .valuation-strategy-filter-group {
-        flex: 1 1 100%;
-        max-width: none;
-    }
-
-    .valuation-strategy-dropdown {
-        min-width: 220px;
-    }
 
     .valuation-section {
         padding: 0 10px 10px;
@@ -7361,68 +7122,6 @@ button:hover {
     border: 0;
 }
 
-.professional-section-header.trades-sticky-filter-bar {
-    position: relative;
-    z-index: 1100;
-    display: flex;
-    align-items: center;
-    flex-wrap: nowrap;
-    gap: 8px;
-    min-height: 42px;
-    padding: 7px 12px;
-    margin: 0 0 12px;
-    background: linear-gradient(180deg, #fbfdff 0%, #eef3f8 100%);
-    border: 0;
-    border-bottom: 1px solid #cbd5e1;
-    border-radius: 0;
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.72),
-        0 2px 8px rgba(15, 23, 42, 0.08);
-}
-
-.trades-sticky-filter-group {
-    display: inline-flex;
-    flex: 0 0 auto;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-start;
-    gap: 6px;
-    min-width: 0;
-    min-height: 34px;
-    padding: 2px 5px 2px 8px;
-    border: 1px solid rgba(180, 193, 209, 0.86);
-    border-radius: 999px;
-    background: rgba(255, 255, 255, 0.78);
-    box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.78),
-        0 1px 2px rgba(15, 23, 42, 0.035);
-}
-
-.trades-date-filter-group {
-    flex: 0 0 auto;
-}
-
-.trades-strategy-filter-group {
-    flex: 1 1 520px;
-    max-width: 860px;
-}
-
-.trades-sticky-filter-bar .trades-export-button {
-    margin-left: auto;
-}
-
-.trades-sticky-filter-bar .filter-group-header {
-    flex: 0 0 auto;
-    margin: 0;
-    color: #475569;
-    font-size: 9.5px;
-    font-weight: 800;
-    line-height: 1;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    white-space: nowrap;
-}
-
 .trades-filter-dropdown {
     flex: 1 1 auto;
     min-width: 0;
@@ -7436,35 +7135,6 @@ button:hover {
 .trades-strategy-dropdown {
     width: 100%;
     min-width: 340px;
-}
-
-.trades-sticky-filter-bar .Select-control {
-    min-height: 29px !important;
-    height: 29px !important;
-    border-color: rgba(203, 213, 225, 0.95) !important;
-    border-radius: 999px !important;
-    background: #ffffff;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.80);
-}
-
-.trades-sticky-filter-bar .Select-value,
-.trades-sticky-filter-bar .Select-placeholder {
-    line-height: 27px !important;
-}
-
-.trades-sticky-filter-bar .Select-value-label,
-.trades-sticky-filter-bar .Select-placeholder {
-    color: #0f172a !important;
-    font-size: 11.5px !important;
-    font-weight: 700;
-}
-
-.trades-sticky-filter-bar .Select-input {
-    height: 27px !important;
-}
-
-.trades-sticky-filter-bar .Select-menu-outer {
-    z-index: 1300 !important;
 }
 
 /* Trades uses the same compact monitoring toolbar contract as Greeks and
@@ -7880,25 +7550,8 @@ button:hover {
         font-size: 23px;
     }
 
-    .professional-section-header.trades-sticky-filter-bar {
-        flex-wrap: wrap;
-        align-items: stretch;
-        gap: 7px;
-    }
-
-    .trades-sticky-filter-group,
-    .trades-strategy-filter-group {
-        flex: 1 1 100%;
-        max-width: none;
-    }
-
     .trades-strategy-dropdown {
         min-width: 0;
-    }
-
-    .trades-sticky-filter-bar .trades-export-button {
-        width: 100%;
-        margin-left: 0;
     }
 
     .trades-section {
@@ -7915,12 +7568,6 @@ button:hover {
     .options-dashboard-container.trades-page {
         padding-right: 8px;
         padding-left: 8px;
-    }
-
-    .trades-sticky-filter-group {
-        align-items: stretch;
-        flex-direction: column;
-        border-radius: 10px;
     }
 
     .trades-date-dropdown,
@@ -9198,6 +8845,37 @@ button:hover {
     right: 0;
     border: 1px solid #0f766e;
     background: #ffffff;
+}
+
+.brent-vol-history-legend-ice-bid::after,
+.brent-vol-history-legend-ice-offer::after,
+.brent-vol-history-legend-ice-single::after {
+    position: absolute;
+    top: 1px;
+    left: 5px;
+    width: 8px;
+    height: 8px;
+    border: 1px solid #ffffff;
+    border-radius: 50%;
+    background: #6941c6;
+    content: "";
+}
+
+.brent-vol-history-legend-ice-bid::after {
+    border-radius: 1px;
+    transform: rotate(45deg);
+    background: #b42318;
+}
+
+.brent-vol-history-legend-ice-offer::after {
+    border-radius: 1px;
+    transform: rotate(45deg);
+    background: #067647;
+}
+
+.brent-vol-history-ice-overlay-status {
+    color: #64748b;
+    font-size: 11px;
 }
 
 .brent-vol-history-legend-eligible {

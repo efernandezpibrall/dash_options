@@ -8,7 +8,6 @@ from io import StringIO
 import json
 import os
 from typing import Any
-from uuid import uuid4
 
 import dash_bootstrap_components as dbc
 import numpy as np
@@ -27,7 +26,6 @@ from runtime_config import get_database_engine
 from vol_calibration.auth import resolve_request_identity
 from vol_calibration.feature_flags import (
     brent_publication_enabled,
-    inline_calibration_enabled,
     jkm_publication_enabled,
     ttf_publication_enabled,
 )
@@ -81,11 +79,11 @@ def _prepare_embedded_layout(product: str, context: dict[str, Any]):
     elif product == "TFO":
         workspace = copy.deepcopy(ttf.layout)
         date_id = "ttf-date-picker"
-        hidden_actions = {"ttf-save-all-btn", "ttf-publish-btn"}
+        hidden_actions = set()
     elif product == "JKM":
         workspace = copy.deepcopy(jkm.layout)
         date_id = "jkm-date-picker"
-        hidden_actions = {"jkm-save-all-btn"}
+        hidden_actions = set()
     else:
         return hh_governed.create_layout(
             context["cob_date"], context["calibration_source_id"]
@@ -836,6 +834,7 @@ def publish_inline_brent(
             expected_expiries=surface["contract_date"].unique(),
             notes="Controlled inline Brent self-publication after complete batch validation.",
             input_manifest=manifest,
+            return_surface=False,
         )
         return dbc.Alert(
             f"Published Brent revision {payload['publication_id']} with "

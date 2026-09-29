@@ -74,6 +74,9 @@ def load_runtime_config() -> configparser.ConfigParser:
         ("VOL_CALIBRATION", "BACKGROUND_JOBS_ENABLED"): (
             "VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED",
         ),
+        ("VOL_CALIBRATION", "GAS_BATCH_JOBS_ENABLED"): (
+            "VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED",
+        ),
         ("VOL_CALIBRATION", "TTF_INTRADAY_WRITES_ENABLED"): (
             "VOL_CALIBRATION_TTF_INTRADAY_WRITES_ENABLED",
         ),

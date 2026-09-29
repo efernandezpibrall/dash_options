@@ -223,3 +223,41 @@ def test_publication_readiness_fails_on_stale_migration_head(monkeypatch):
 def test_publication_migration_requirement_accepts_descendant_head():
     assert health._migration_lineage_contains("20260902_02", "20260902_02") is True
     assert health._migration_lineage_contains("20260902_01", "20260902_02") is False
+
+
+def test_gas_batch_readiness_requires_checkpoint_migration(monkeypatch):
+    _disable_calibration_mutations(monkeypatch)
+    monkeypatch.setattr(health, "writes_enabled", lambda: False)
+    monkeypatch.setattr(health, "background_jobs_enabled", lambda: False)
+    monkeypatch.setattr(health, "gas_batch_jobs_enabled", lambda: True)
+    monkeypatch.setattr(health, "intraday_refresh_enabled", lambda: False)
+    monkeypatch.setattr(health, "settlement_refresh_enabled", lambda: False)
+    monkeypatch.setenv("OPTIONS_AUTH_MODE", "trusted_proxy")
+    monkeypatch.setenv("OPTIONS_TRUSTED_PROXY_SHARED_SECRET", "test-secret")
+
+    class Result:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar_one_or_none(self):
+            return self.value
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, statement, parameters=None):
+            if "to_regclass" in str(statement):
+                return Result(parameters["relation"])
+            return Result("20260902_02")
+
+    monkeypatch.setattr(
+        health, "get_database_engine",
+        lambda required=False: SimpleNamespace(connect=lambda: Connection()),
+    )
+    ready, details = health.readiness_status()
+    assert ready is False
+    assert details["required_migration_head"] == "20260928_01"

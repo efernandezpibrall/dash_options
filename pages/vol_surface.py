@@ -3,7 +3,6 @@ import hashlib
 import io
 import json
 import threading
-from urllib.parse import urlencode
 
 from dash import html, dcc, callback, Output, Input, State
 import dash
@@ -44,7 +43,7 @@ SURFACE_COLUMNS = [
     'delta_pct',
 ]
 SURFACE_SOURCE_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF', 'NBP'}
-CALIBRATION_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF'}
+VOL_TRADES_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF'}
 SURFACE_PRODUCT_DISPLAY_MAP = {'BRENT': 'Brent'}
 ICE_SUMMER_MONTHS = {4, 5, 6, 7, 8, 9}
 SURFACE_EXPIRY_MONTH = 'month'
@@ -2204,9 +2203,9 @@ layout = html.Div([
             'Volatility Surface',
             actions=[
                 dcc.Link(
-                    'Open in Vol Calibration',
-                    id='open-vol-calibration-link',
-                    href='/vol_calibration?product=ttf',
+                    'Open Vol Trades',
+                    id='open-vol-trades-link',
+                    href='/brent_vol_history',
                     className='custom-export-btn volatility-export-button',
                     style={'display': 'none'},
                 ),
@@ -3050,30 +3049,18 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
     return expiry_options, selected_expiry, visible_style
 
 
-def build_calibration_link(active_product, selected_date, selected_expiry):
-    """Build a calibration deep link only for supported products."""
+def vol_trades_link_style(active_product):
+    """Show the market workspace for products supported by Vol Trades."""
     product = str(active_product or '').upper()
-    if product not in CALIBRATION_PRODUCTS:
-        return '/vol_calibration?product=ttf', {'display': 'none'}
-
-    query = {'product': product.lower()}
-    if selected_date:
-        query['cob_date'] = pd.to_datetime(selected_date).date().isoformat()
-    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
-    if expiry_type == SURFACE_EXPIRY_MONTH:
-        query['expiry'] = pd.to_datetime(expiry_key).strftime('%b-%y')
-    return f"/vol_calibration?{urlencode(query)}", {'display': 'inline-flex'}
+    return {'display': 'inline-flex' if product in VOL_TRADES_PRODUCTS else 'none'}
 
 
 @callback(
-    Output('open-vol-calibration-link', 'href'),
-    Output('open-vol-calibration-link', 'style'),
+    Output('open-vol-trades-link', 'style'),
     Input('surface-product-tabs', 'value'),
-    Input('table-date-picker', 'date'),
-    Input('surface-expiry-dropdown', 'value'),
 )
-def update_calibration_link(active_product, selected_date, selected_expiry):
-    return build_calibration_link(active_product, selected_date, selected_expiry)
+def update_vol_trades_link(active_product):
+    return vol_trades_link_style(active_product)
 
 
 @callback(

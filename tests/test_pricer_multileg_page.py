@@ -1109,6 +1109,7 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
                 "surface_atm_input_vol": 0.29,
                 "surface_skew_input_vol": 0.02,
                 "surface_pricing_vol": pricing_volatility,
+                "surface_smile_coordinate": 1.0,
                 "surface_input_tooltip": "Published: 2026-07-29 07:00 UTC",
             }
         },
@@ -1170,6 +1171,12 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
             "smile_vol_adjustment": 0.5,
         }
     )
+    adjusted_reference = {
+        **surface_reference,
+        "_ui_reference_signature": pricer._surface_reference_input_signature(
+            "TTF", "black76", adjusted_rows, context, "2026-07-29"
+        ),
+    }
     adjusted_snapshot, adjusted_status, _grid_options, _baseline = (
         pricer.calculate_structure_instance_callback(
             2,
@@ -1185,12 +1192,12 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
             param_ids,
             date_ids,
             None,
-            surface_reference=surface_reference,
+            surface_reference=adjusted_reference,
             pathname="/pricer",
         )
     )
 
-    effective_input_vol = 0.31 + 0.01 * (1.0 - 0.25 + 0.5)
+    effective_input_vol = 0.31 + 0.01 * (1.0 - 0.125 + 0.5)
     assert adjusted_status.className.endswith("success")
     assert adjusted_snapshot["legs"][0]["raw_volatility"] == pytest.approx(
         effective_input_vol
@@ -1289,6 +1296,7 @@ def test_structure_panels_have_unique_scoped_ids_and_persistence_keys():
             "pricer-calculation-store",
             "pricer-grid-pricing-options",
             "pricer-published-surface-reference",
+            "pricer-grid-refresh-ack",
             "pricer-calculate-all-baseline",
             "pricer-calculate-all-ack",
         }
@@ -1308,6 +1316,7 @@ def test_structure_panels_have_unique_scoped_ids_and_persistence_keys():
             "pricer-calculation-store": "memory",
             "pricer-grid-pricing-options": "memory",
             "pricer-published-surface-reference": "memory",
+            "pricer-grid-refresh-ack": "memory",
             "pricer-calculate-all-baseline": "memory",
             "pricer-calculate-all-ack": "memory",
         }
@@ -2331,6 +2340,78 @@ def test_leg_reducer_enforces_maximum_leg_count(monkeypatch):
     )
     assert len(output[2]) == pricer.MAX_LEGS
     assert f"at most {pricer.MAX_LEGS}" in output[5]
+
+
+def test_grid_edit_commits_atm_adjustment_when_row_data_lags(monkeypatch):
+    row = pricer._rows_with_volatility_adjustments(
+        "black76", [pricer.default_leg("black76", 1)]
+    )[0]
+    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
+    output = pricer.manage_structure_legs(
+        "black76",
+        None,
+        None,
+        None,
+        [{
+            "colId": "atm_vol_adjustment",
+            "oldValue": 0.0,
+            "newValue": 20.0,
+            "data": {**row, "atm_vol_adjustment": 20.0},
+        }],
+        [row],
+        [],
+        {"model": "black76", "legs": [row], "next_leg_sequence": 2},
+        pathname="/pricer",
+    )
+    assert output[2][0]["atm_vol_adjustment"] == 20.0
+    assert output[4]["legs"][0]["atm_vol_adjustment"] == 20.0
+    assert row["atm_vol_adjustment"] == 0.0
+
+
+def test_surface_adjustment_edit_applies_to_every_leg_in_structure(monkeypatch):
+    rows = pricer._rows_with_volatility_adjustments(
+        "black76", [pricer.default_leg("black76", 1), pricer.default_leg("black76", 2)]
+    )
+    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
+    output = pricer.manage_structure_legs(
+        "black76",
+        None,
+        None,
+        None,
+        [{
+            "colId": "skew_vol_adjustment",
+            "oldValue": 0.0,
+            "newValue": -4.0,
+            "data": {**rows[1], "skew_vol_adjustment": -4.0},
+        }],
+        rows,
+        [],
+        {"model": "black76", "legs": rows, "next_leg_sequence": 3},
+        pathname="/pricer",
+    )
+    assert [row["skew_vol_adjustment"] for row in output[2]] == [-4.0, -4.0]
+    assert [row["skew_vol_adjustment"] for row in output[4]["legs"]] == [
+        -4.0, -4.0
+    ]
+    assert all(row["skew_vol_adjustment"] == 0.0 for row in rows)
+
+
+def test_lagging_surface_edit_handoff_shares_overlay_across_legs():
+    rows = pricer._rows_with_volatility_adjustments(
+        "black76", [pricer.default_leg("black76", 1), pricer.default_leg("black76", 2)]
+    )
+    event = [{
+        "colId": "smile_vol_adjustment",
+        "oldValue": 0.0,
+        "newValue": 3.0,
+        "data": {**rows[1], "smile_vol_adjustment": 3.0},
+    }]
+    committed = pricer._rows_with_committed_leg_edit(rows, event)
+    assert [row["smile_vol_adjustment"] for row in committed] == [3.0, 3.0]
+    assert [row["smile_vol_adjustment"] for row in rows] == [0.0, 0.0]
+
+    newer_rows = [dict(row, smile_vol_adjustment=5.0) for row in rows]
+    assert pricer._rows_with_committed_leg_edit(newer_rows, event) == newer_rows
 
 
 def test_model_switch_resets_incompatible_legs_and_context(monkeypatch):
