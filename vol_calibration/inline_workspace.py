@@ -8,7 +8,6 @@ from io import StringIO
 import json
 import os
 from typing import Any
-from uuid import uuid4
 
 import dash_bootstrap_components as dbc
 import numpy as np
@@ -25,15 +24,17 @@ from options.hh_lne_calibration import (
 )
 from runtime_config import get_database_engine
 from vol_calibration.auth import resolve_request_identity
+from vol_calibration.brent_single_candidate import active_brent_publication
 from vol_calibration.feature_flags import (
     brent_publication_enabled,
-    inline_calibration_enabled,
     jkm_publication_enabled,
     ttf_publication_enabled,
 )
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
-from vol_calibration.pages import brent, jkm, ttf
+from vol_calibration.pages import jkm, ttf
 from vol_calibration.pages import hh_governed
+from vol_calibration import brent_single_workspace
+from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
 from vol_calibration.ttf_hybrid_surface import (
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
@@ -75,17 +76,15 @@ def _walk_components(component):
 
 def _prepare_embedded_layout(product: str, context: dict[str, Any]):
     if product == "BRENT":
-        workspace = copy.deepcopy(brent.layout)
-        date_id = "brent-date-picker"
-        hidden_actions = {"brent-save-all-btn"}
+        return copy.deepcopy(brent_single_workspace.layout)
     elif product == "TFO":
         workspace = copy.deepcopy(ttf.layout)
         date_id = "ttf-date-picker"
-        hidden_actions = {"ttf-save-all-btn", "ttf-publish-btn"}
+        hidden_actions = set()
     elif product == "JKM":
         workspace = copy.deepcopy(jkm.layout)
         date_id = "jkm-date-picker"
-        hidden_actions = {"jkm-save-all-btn"}
+        hidden_actions = set()
     else:
         return hh_governed.create_layout(
             context["cob_date"], context["calibration_source_id"]
@@ -130,9 +129,9 @@ def resolve_inline_context(engine, snapshot: dict[str, Any], product: str) -> di
             raise ValueError("Brent calibration requires the selected snapshot UUID.")
         source_id = str(market_snapshot_id)
         source_identity = "Bloomberg Brent exact pinned snapshot"
-        pricing_model = "American futures-style SVI residual"
-        policy_version = "brent_svi_intraday_residual_v1"
-        engine_version = "brent-svi-intraday-residual-v1"
+        pricing_model = "American futures-style single SVI"
+        policy_version = BRENT_SINGLE_SURFACE_POLICY_VERSION
+        engine_version = BRENT_SINGLE_SURFACE_POLICY_VERSION
     elif product == "TFO":
         source_id = cob_date
         source_identity = "Exact-COB ICAP TTF smile + ICE_TTF forward"
@@ -164,11 +163,15 @@ def resolve_inline_context(engine, snapshot: dict[str, Any], product: str) -> di
         policy_version = JKM_HYBRID_POLICY_VERSION
         engine_version = DEFAULT_CALIBRATION_MODEL_VERSION
 
-    publication = load_latest_hybrid_publication(
-        engine,
-        cob_date,
-        commodity=commodity,
-        as_of=market_as_of,
+    publication = (
+        active_brent_publication(engine, cob_date)
+        if product == "BRENT"
+        else load_latest_hybrid_publication(
+            engine,
+            cob_date,
+            commodity=commodity,
+            as_of=market_as_of,
+        )
     )
     return {
         "market_product": product,
@@ -314,16 +317,6 @@ def enable_inline_ttf_publication(confirmation):
 def enable_inline_jkm_publication(confirmation):
     return not (
         jkm_publication_enabled() and "confirmed" in (confirmation or [])
-    )
-
-
-@callback(
-    Output("vol-trades-inline-brent-publish", "disabled"),
-    Input("vol-trades-inline-brent-confirm", "value"),
-)
-def enable_inline_brent_publication(confirmation):
-    return not (
-        brent_publication_enabled() and "confirmed" in (confirmation or [])
     )
 
 
@@ -579,271 +572,6 @@ def publish_inline_jkm(
         )
     except Exception as exc:
         return no_update, dbc.Alert(f"Publication blocked: {exc}", color="danger")
-
-
-def _brent_publication_candidate(
-    market: pd.DataFrame,
-    table_data,
-    operational_payload,
-    context,
-):
-    from vol_calibration.brent_intraday import (
-        ADJUSTMENT_PARAMS,
-        evaluate_adjustment,
-        prepare_adjustment_fit,
-        select_expiry_rows,
-        select_surface_slice,
-        validate_adjustment,
-    )
-    from vol_calibration.components.brent_adjustment_table import (
-        parse_brent_adjustment_rows,
-    )
-    from vol_calibration.operational_surface import operational_surface_frame
-
-    if not context or not context.get("market_snapshot_id"):
-        raise ValueError("A pinned Brent market snapshot is required.")
-    if (
-        not operational_payload
-        or operational_payload.get("requested_cob")
-        != operational_payload.get("actual_cob")
-    ):
-        raise ValueError("An exact-COB official Brent SVI baseline is required.")
-    baseline = operational_surface_frame(operational_payload)
-    rows = parse_brent_adjustment_rows(table_data)
-    surfaces = []
-    results = []
-    for _, row in rows.iterrows():
-        expiry = pd.Timestamp(row["expiry"])
-        observations = select_expiry_rows(market, expiry)
-        baseline_slice = select_surface_slice(baseline, expiry)
-        prepared, nodes = prepare_adjustment_fit(observations, baseline_slice)
-        params = {name: float(row[name]) for name in ADJUSTMENT_PARAMS}
-        forward = float(prepared["forward"].iloc[0])
-        dte = float(prepared["dte"].iloc[0])
-        validation = validate_adjustment(
-            params,
-            nodes,
-            forward=forward,
-            dte=dte,
-            expiry=expiry,
-            full_surface=baseline,
-            cob_date=context["cob_date"],
-        )
-        if not validation.get("is_valid"):
-            raise ValueError(
-                f"Brent {expiry:%Y-%m} failed validation: {validation.get('reason')}"
-            )
-        checked = validation["nodes"].copy()
-        expiration = pd.to_datetime(
-            observations.get("expiration_date"), errors="coerce"
-        ).dropna()
-        if expiration.empty:
-            raise ValueError(f"Brent {expiry:%Y-%m} has no exact option expiry.")
-        candidate = pd.DataFrame(
-            {
-                "contract_date": expiry.normalize(),
-                "option_expiration_date": expiration.iloc[0].normalize(),
-                "strike": checked["candidate_strike"],
-                "delta": checked["call_delta"],
-                "volatility": checked["candidate_iv"],
-                "total_variance": checked["candidate_iv"] ** 2 * dte / 365.0,
-                "working_forward": forward,
-                "surface_region": "svi_residual",
-                "blend_classification": np.where(
-                    checked["adjustment"].abs() > 1e-12,
-                    "adjusted_node",
-                    "baseline_node",
-                ),
-                "calibration_basis": "observed",
-                "source_name": (
-                    "Bloomberg Brent snapshot="
-                    + str(context["market_snapshot_id"])
-                ),
-            }
-        )
-        fit = evaluate_adjustment(params, prepared)
-        surfaces.append(candidate)
-        results.append(
-            {
-                "option_expiration_date": expiration.iloc[0].date(),
-                "parameters": params,
-                "diagnostics": {
-                    "eligible_points": int(len(prepared)),
-                    "max_abs_node_shift": float(checked["adjustment"].abs().max()),
-                    "pricing_model": "American futures-style",
-                },
-                "validation": {
-                    "is_valid": True,
-                    "butterfly": True,
-                    "calendar": True,
-                },
-                "weighted_rmse": float(fit["weighted_rmse"]),
-                "unweighted_rmse": float(fit["rmse"]),
-                "max_error": float(fit["max_error"]),
-                "optimizer_success": True,
-            }
-        )
-    source_surface = pd.concat(surfaces, ignore_index=True)
-    try:
-        from options.calibration_engine.converters.delta import delta_to_strike
-        from options.hh_lne_calibration import (
-            project_fixed_delta_pchip_term_structure,
-        )
-        from vol_calibration.ttf_hybrid_surface import (
-            densify_bounded_source_surface,
-        )
-
-        projected = source_surface.rename(
-            columns={
-                "contract_date": "maturity_date",
-                "volatility": "vol",
-                "working_forward": "forward",
-            }
-        ).copy()
-        projected["t"] = (
-            projected["total_variance"].astype(float)
-            / projected["vol"].astype(float) ** 2
-        )
-        projected["source_suffix"] = "fit"
-        projected["point_type"] = projected["blend_classification"].astype(str)
-        projected, projection_diagnostics = (
-            project_fixed_delta_pchip_term_structure(projected)
-        )
-        projected["contract_date"] = pd.to_datetime(projected["maturity_date"])
-        projected["volatility"] = projected["vol"].astype(float)
-        projected["working_forward"] = projected["forward"].astype(float)
-        projected["strike"] = [
-            delta_to_strike(
-                float(item.delta),
-                float(item.forward),
-                float(item.vol),
-                float(item.t) * 365.0,
-                option_type="call",
-                r=0.0,
-            )
-            for item in projected.itertuples(index=False)
-        ]
-        projected["blend_classification"] = projected["point_type"].astype(str)
-        projected["source_name"] = (
-            projected["source_name"].astype(str)
-            + ":joint_butterfly_calendar_projection_v1"
-        )
-        projected = projected[source_surface.columns]
-        dense, dense_results = densify_bounded_source_surface(
-            projected,
-            commodity="BRENT",
-        )
-        source_results = {
-            item["option_expiration_date"]: item for item in results
-        }
-        for item in dense_results:
-            source = source_results[item["option_expiration_date"]]
-            item["parameters"] = source["parameters"]
-            item["diagnostics"] = {
-                **(source.get("diagnostics") or {}),
-                **item["diagnostics"],
-                "joint_projection": projection_diagnostics,
-            }
-            item["weighted_rmse"] = source.get("weighted_rmse")
-            item["unweighted_rmse"] = source.get("unweighted_rmse")
-            item["max_error"] = source.get("max_error")
-        return dense, dense_results
-    except Exception as exc:
-        raise ValueError(f"Brent dense governed finalization failed: {exc}") from exc
-
-
-@callback(
-    Output("vol-trades-inline-brent-publication-status", "children"),
-    Input("vol-trades-inline-brent-publish", "n_clicks"),
-    State("vol-trades-inline-brent-confirm", "value"),
-    State("brent-date-picker", "date"),
-    State("brent-market-data-store", "data"),
-    State("brent-param-table", "data"),
-    State("brent-batch-results-store", "data"),
-    State("brent-operational-surface-store", "data"),
-    State("brent-vol-history-calibration-context", "data"),
-    prevent_initial_call=True,
-)
-def publish_inline_brent(
-    clicks,
-    confirmation,
-    trading_date,
-    market_data_json,
-    table_data,
-    batch_results,
-    operational_payload,
-    context,
-):
-    if not clicks:
-        raise PreventUpdate
-    try:
-        _confirmed(confirmation)
-        if not brent_publication_enabled():
-            raise PermissionError("Brent publication is disabled.")
-        if not market_data_json or not table_data:
-            raise ValueError("A complete Brent batch is required.")
-        statuses = [str(item.get("status", "")).lower() for item in (batch_results or [])]
-        if len(statuses) != len(table_data) or any(
-            status not in {"success", "skipped"} for status in statuses
-        ):
-            raise ValueError("Run a successful complete Brent batch before publication.")
-        if any(str(row.get("validation")) != "Pass" for row in table_data):
-            raise ValueError("Every Brent expiry must pass validation.")
-        market = pd.read_json(StringIO(market_data_json), orient="split")
-        surface, results = _brent_publication_candidate(
-            market, table_data, operational_payload, context
-        )
-        current = load_latest_hybrid_publication(
-            get_database_engine(),
-            trading_date,
-            commodity="BRENT",
-            as_of=pd.to_datetime(context["market_as_of"], utc=True),
-        )
-        manifest = {
-            "commodity": "BRENT",
-            "cob_date": pd.Timestamp(trading_date).date().isoformat(),
-            "source_snapshots": [{
-                "source": "Bloomberg Brent exact pinned snapshot",
-                "snapshot_id": context["market_snapshot_id"],
-                "observed_at": context["market_as_of"],
-            }],
-            "raw_observations": json.loads(
-                market.to_json(orient="records", date_format="iso")
-            ),
-            "weights_and_parameters": table_data,
-            "official_svi_baseline": operational_payload,
-            "manual_trade_ids": [],
-            "base_publication_id": current.get("publication_id"),
-            "model_version": "brent_svi_intraday_residual_v1",
-            "policy_version": "brent_svi_intraday_residual_v1",
-            "code_revision": os.getenv("APP_CODE_REVISION", "unknown"),
-        }
-        identity = _identity()
-        payload = publish_hybrid_surface(
-            get_database_engine(),
-            surface,
-            results,
-            commodity="BRENT",
-            trading_date=trading_date,
-            settlement_cob=trading_date,
-            identity=identity,
-            created_by=str(identity.subject),
-            base_publication_id=current.get("publication_id"),
-            expected_current_publication_id=_same_day_publication_id(
-                current, trading_date
-            ),
-            idempotency_key=_manifest_key("BRENT", trading_date, manifest),
-            expected_expiries=surface["contract_date"].unique(),
-            notes="Controlled inline Brent self-publication after complete batch validation.",
-            input_manifest=manifest,
-        )
-        return dbc.Alert(
-            f"Published Brent revision {payload['publication_id']} with "
-            f"{payload['row_count']} freshly read-back points.",
-            color="success",
-        )
-    except Exception as exc:
-        return dbc.Alert(f"Publication blocked: {exc}", color="danger")
 
 
 __all__ = [

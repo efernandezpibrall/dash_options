@@ -19,12 +19,12 @@ def calibration_enabled() -> bool:
 
 
 def inline_calibration_enabled() -> bool:
-    """Expose the lazy Vol Trades calibration mount without changing routes."""
+    """Expose the Vol Trades calibration workspace unless explicitly disabled."""
 
     return calibration_enabled() and _enabled(
         "VOL_TRADES_INLINE_CALIBRATION_ENABLED",
         "VOL_TRADES_INLINE_CALIBRATION_ENABLED",
-        False,
+        True,
     )
 
 
@@ -44,6 +44,15 @@ def background_jobs_enabled() -> bool:
     return writes_enabled() and _enabled(
         "VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED",
         "BACKGROUND_JOBS_ENABLED",
+        False,
+    )
+
+
+def gas_batch_jobs_enabled() -> bool:
+    """Durable TTF/JKM batch calculation; publication stays separately gated."""
+    return calibration_enabled() and _enabled(
+        "VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED",
+        "GAS_BATCH_JOBS_ENABLED",
         False,
     )
 

@@ -7,15 +7,14 @@ import pytest
 from dash.exceptions import PreventUpdate
 import numpy as np
 
-from pages import vol_calibration
 from vol_calibration.components import comparison_modal, smile_grid
 from vol_calibration.components.parameter_table import create_parameter_table
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
-from vol_calibration.pages import brent, hh, jkm, ttf
+from vol_calibration.pages import brent, jkm, ttf
 from vol_calibration.session_state import persist_product_table, restore_product_table
 
 
-PRODUCT_MODULES = (brent, hh, ttf, jkm)
+PRODUCT_MODULES = (brent, ttf, jkm)
 
 
 def _walk(component):
@@ -36,34 +35,6 @@ def _components_by_id(component):
         for item in _walk(component)
         if isinstance(getattr(item, "id", None), str)
     }
-
-
-def test_query_parsing_defaults_and_preserves_deep_link_fields():
-    assert vol_calibration.parse_calibration_query(None)["product"] == "ttf"
-    invalid = vol_calibration.parse_calibration_query("?product=power")
-    assert invalid["product"] == "ttf"
-    assert invalid["invalid_product"] == "power"
-
-    updated = vol_calibration.update_product_query(
-        "?product=ttf&cob_date=2026-07-08&expiry=Sep-26",
-        "brent",
-    )
-    assert updated == "?product=brent&cob_date=2026-07-08&expiry=Sep-26"
-
-
-def test_layout_lazily_renders_only_requested_product_and_applies_cob_date():
-    layout = vol_calibration.create_layout(
-        "?product=brent&cob_date=2026-07-08&expiry=Sep-26"
-    )
-    components = _components_by_id(layout)
-
-    assert components["vol-calibration-product-tabs"].active_tab == "brent"
-    assert components["brent-date-picker"].date == "2026-07-08"
-    assert components["vol-calibration-requested-expiry"].data == "Sep-26"
-    assert components["vol-calibration-session-state"].storage_type == "session"
-    assert "ttf-date-picker" not in components
-    assert "hh-date-picker" not in components
-    assert "jkm-date-picker" not in components
 
 
 def test_product_edits_restore_only_for_the_same_session_product_and_cob():
@@ -154,23 +125,15 @@ def test_excel_summary_records_model_version(module):
     assert excel_file.sheet_names == ["Parameters", "Summary"]
 
 
-@pytest.mark.parametrize("module", (hh, ttf))
-def test_comparison_save_is_rejected_server_side_when_writes_disabled(monkeypatch, module):
-    monkeypatch.setattr(module, "writes_enabled", lambda: False)
+def test_comparison_save_is_rejected_server_side_when_writes_disabled(monkeypatch):
+    monkeypatch.setattr(ttf, "writes_enabled", lambda: False)
     monkeypatch.setattr(
-        module,
+        ttf,
         "ctx",
-        SimpleNamespace(triggered_id=f"{module.COMMODITY_LOWER}-comparison-save-btn"),
+        SimpleNamespace(triggered_id="ttf-comparison-save-btn"),
     )
-    if hasattr(module, "ParameterStore"):
-        monkeypatch.setattr(
-            module,
-            "ParameterStore",
-            lambda *args, **kwargs: pytest.fail("ParameterStore must not be constructed"),
-        )
-
     with pytest.raises(PreventUpdate):
-        module.handle_calibration(
+        ttf.handle_calibration(
             None,
             None,
             1,
@@ -188,98 +151,70 @@ def test_comparison_save_is_rejected_server_side_when_writes_disabled(monkeypatc
         )
 
 
-@pytest.mark.parametrize("module", (hh, ttf))
-def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch, module):
-    monkeypatch.setattr(module, "writes_enabled", lambda: False)
+def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch):
+    monkeypatch.setattr(ttf, "writes_enabled", lambda: False)
     monkeypatch.setattr(
-        module,
+        ttf,
         "ctx",
-        SimpleNamespace(triggered_id=f"{module.COMMODITY_LOWER}-batch-confirm-btn"),
+        SimpleNamespace(triggered_id="ttf-batch-confirm-btn"),
     )
     monkeypatch.setattr(
-        module,
+        ttf,
         "get_database_engine",
         lambda: pytest.fail("database engine must not be requested"),
     )
     monkeypatch.setattr(
-        module,
+        ttf,
         "ParameterStore",
         lambda *args, **kwargs: pytest.fail("ParameterStore must not be constructed"),
         raising=False,
     )
-    if module is ttf:
-        monkeypatch.setattr(
-            module,
-            "fit_ttf_hybrid_candidate",
-            lambda observations, initial_params, **kwargs: {
-                "params": initial_params,
-                "core_tv_rmse": 0.0,
-                "tail_fit_tv_rmse": 0.001,
-                "iv_rmse": 0.01,
-                "left_blend_width": 0.10,
-                "right_blend_width": 0.10,
-                "success": True,
-                "butterfly": {"is_valid": True},
-                "validation": {"is_valid": True, "min_g": 0.01},
-            },
-        )
-    else:
-        monkeypatch.setattr(
-            module,
-            "evaluate_fit",
-            lambda *args, **kwargs: {"rmse": 0.02},
-        )
-        monkeypatch.setattr(
-            module,
-            "calibrate",
-            lambda *args, **kwargs: {
-                "params": kwargs.get("initial_params", {"vr": 0.25}),
-                "rmse": 0.01,
-                "success": True,
-                "butterfly": {"is_valid": True},
-            },
-        )
-        monkeypatch.setattr(
-            module,
-            "update_arb_status_in_row",
-            lambda *args, **kwargs: "Pass",
-        )
+    monkeypatch.setattr(
+        ttf,
+        "fit_ttf_hybrid_candidate",
+        lambda observations, initial_params, **kwargs: {
+            "params": initial_params,
+            "core_tv_rmse": 0.0,
+            "tail_fit_tv_rmse": 0.001,
+            "iv_rmse": 0.01,
+            "left_blend_width": 0.10,
+            "right_blend_width": 0.10,
+            "success": True,
+            "butterfly": {"is_valid": True},
+            "validation": {"is_valid": True, "min_g": 0.01},
+        },
+    )
 
     expiry = pd.Timestamp("2026-09-01")
-    if module is ttf:
-        deltas = np.asarray(
-            [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99]
-        )
-        market_data = pd.DataFrame(
-            {
-                "expiry": expiry,
-                "option_expiration_date": pd.Timestamp("2026-08-27"),
-                "forward": 1.0,
-                "strike": np.nan,
-                "iv": np.linspace(0.30, 0.24, len(deltas)),
-                "delta": deltas,
-                "dte": 50.0,
-                "delta_convention": "undiscounted_call_delta",
-                "source_name": "official",
-                "quote_class": "observed",
-                "weight": 1.0,
-            }
-        )
-    else:
-        market_data = pd.DataFrame(
-            [{"expiry": expiry, "forward": 1.0, "strike": 1.0, "iv": 0.25, "delta": 0.5}]
-        )
+    deltas = np.asarray(
+        [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99]
+    )
+    market_data = pd.DataFrame(
+        {
+            "expiry": expiry,
+            "option_expiration_date": pd.Timestamp("2026-08-27"),
+            "forward": 1.0,
+            "strike": np.nan,
+            "iv": np.linspace(0.30, 0.24, len(deltas)),
+            "delta": deltas,
+            "dte": 50.0,
+            "delta_convention": "undiscounted_call_delta",
+            "source_name": "official",
+            "quote_class": "observed",
+            "weight": 1.0,
+        }
+    )
     table_data = [
         {
             "expiry": "Sep-26",
-            **(ttf.get_defaults("TTF") if module is ttf else {"vr": 0.20}),
-            "calibration_basis": "Observed" if module is ttf else "",
+            **ttf.get_defaults("TTF"),
+            "calibration_basis": "Observed",
             "rmse": "2.00%",
             "arb_status": "Pass",
         }
     ]
 
-    result = module.run_batch_calibration(
+    result = ttf.run_batch_calibration(
         1,
         None,
         market_data.to_json(date_format="iso", orient="split"),
@@ -290,10 +225,7 @@ def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch,
         False,
     )
     assert result[1] == 100
-    batch_results = (
-        result[5]["results"] if module is ttf else result[5]
-    )
-    assert batch_results[0]["status"] == "Success"
+    assert result[5]["results"][0]["status"] == "Success"
 
 
 def test_jkm_batch_auto_save_option_never_uses_legacy_parameter_store(monkeypatch):
@@ -338,18 +270,16 @@ def test_jkm_batch_auto_save_option_never_uses_legacy_parameter_store(monkeypatc
     assert result[5]["results"][0]["status"] == "Success"
 
 
-def test_save_controls_are_disabled_by_default(monkeypatch):
+def test_comparison_save_and_auto_save_are_disabled_by_default(monkeypatch):
     monkeypatch.setenv("VOL_CALIBRATION_WRITES_ENABLED", "false")
-    layout = vol_calibration.create_layout("?product=ttf")
-    components = _components_by_id(layout)
+    components = _components_by_id(ttf.layout)
 
-    assert components["ttf-save-all-btn"].disabled is True
     assert components["ttf-comparison-save-btn"].disabled is True
     auto_save_option = components["ttf-batch-auto-save"].options[0]
     assert auto_save_option["disabled"] is True
 
 
-def test_ttf_batch_save_requires_one_accepted_result_per_expiry(monkeypatch):
+def test_ttf_batch_publication_requires_one_accepted_result_per_expiry():
     expected = ["Oct-26", "Nov-26"]
     complete = [
         {"expiry": "2026-10-01", "status": "Success"},
@@ -364,7 +294,6 @@ def test_ttf_batch_save_requires_one_accepted_result_per_expiry(monkeypatch):
     ) is False
     assert ttf._batch_results_ready([complete[0], complete[0]], expected) is False
 
-    monkeypatch.setattr(ttf, "ttf_publication_enabled", lambda: True)
     rows = []
     for value in expected:
         rows.append(
@@ -386,50 +315,50 @@ def test_ttf_batch_save_requires_one_accepted_result_per_expiry(monkeypatch):
     batch_state = ttf._build_ttf_batch_state(
         "2026-07-30", market_json, rows, {}, {}, complete
     )
-    disabled, _ = ttf.enable_ttf_batch_save(
+    ready, _ = ttf._batch_state_ready(
         batch_state,
-        rows,
         "2026-07-30",
         market_json,
+        rows,
         {},
         {},
     )
-    assert disabled is False
+    assert ready is True
 
     stale_state = {**batch_state, "trading_date": "2026-07-29"}
-    disabled, title = ttf.enable_ttf_batch_save(
+    ready, title = ttf._batch_state_ready(
         stale_state,
-        rows,
         "2026-07-30",
         market_json,
+        rows,
         {},
         {},
     )
-    assert disabled is True
+    assert ready is False
     assert "different trading date" in title
 
     edited_rows = [dict(row) for row in rows]
     edited_rows[0]["vr"] += 0.01
-    disabled, title = ttf.enable_ttf_batch_save(
+    ready, title = ttf._batch_state_ready(
         batch_state,
-        edited_rows,
         "2026-07-30",
         market_json,
+        edited_rows,
         {},
         {},
     )
-    assert disabled is True
+    assert ready is False
     assert "parameter table changed" in title.lower()
 
-    disabled, title = ttf.enable_ttf_batch_save(
+    ready, title = ttf._batch_state_ready(
         complete,
-        rows,
         "2026-07-30",
         market_json,
+        rows,
         {},
         {},
     )
-    assert disabled is True
+    assert ready is False
     assert "Run Calibrate All" in title
 
 
@@ -561,23 +490,31 @@ def test_basis_and_hybrid_diagnostics_are_exposed_for_ttf_and_jkm():
     assert "jkm-comparison-basis" in jkm_modal
 
 
-def test_host_app_registers_route_callbacks_without_overwriting_url_search():
+def test_host_app_registers_vol_trades_without_standalone_calibration_page():
     import index_options
     from app import app
 
     app._setup_server()
     assert "page-content.children" in app.callback_map
     assert "nav-active-sink.children" in app.callback_map
-    url_search_callbacks = [
-        callback_id for callback_id in app.callback_map if callback_id.startswith("url.search")
-    ]
-    assert len(url_search_callbacks) == 1
-    assert index_options.display_page(
-        "/vol_calibration",
-        "?product=jkm",
-    ).className == "vol-calibration-page"
+    persistence_inputs = {
+        entry["inputs"][0]["id"]
+        for output, entry in app.callback_map.items()
+        if output.startswith("vol-calibration-session-state.data")
+    }
+    assert persistence_inputs == {"jkm-param-table"}
+    assert index_options.display_page("/brent_vol_history", None) is index_options.pages.brent_vol_history.layout
+    retired = index_options.display_page("/vol_calibration", "?product=jkm")
+    assert retired.pathname == "/brent_vol_history"
+    response = index_options.server.test_client().get("/vol_calibration?product=jkm")
+    assert response.status_code == 302
+    assert response.location.endswith("/brent_vol_history")
 
     validation_components = _components_by_id(app.validation_layout)
-    assert "vol-calibration-product-tabs" in validation_components
-    assert "vol-calibration-workspace" in validation_components
-    assert "vol-calibration-requested-expiry" in validation_components
+    assert "vol-calibration-product-tabs" not in validation_components
+    assert "brent-single-calibrate" in validation_components
+    assert "brent-param-table" not in validation_components
+    assert "ttf-date-picker" in validation_components
+    assert "jkm-date-picker" in validation_components
+    assert "hh-governed-date" in validation_components
+    assert validation_components["vol-calibration-session-state"].storage_type == "session"
