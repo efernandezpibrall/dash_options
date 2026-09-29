@@ -15,6 +15,8 @@ Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
 Use a dedicated virtual environment for this application; other tools in the
 shared repository environment have incompatible `requests` requirements.
+The pinned NumPy, pandas, SciPy, and SQLAlchemy versions reproduce the reviewed
+Brent calibration and its 25 September publication to persisted precision.
 
 Build and install the analytics wheel before installing this application:
 
