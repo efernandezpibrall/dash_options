@@ -169,6 +169,7 @@ def resolve_inline_context(engine, snapshot: dict[str, Any], product: str) -> di
             cob_date,
             commodity=commodity,
             as_of=market_as_of,
+            prefer_exact_cob=(commodity == "HH"),
         )
     )
     return {

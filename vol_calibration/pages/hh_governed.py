@@ -445,6 +445,7 @@ def load_hh_governed_inputs(trade_date, _reload_clicks, requested_snapshot_id):
             trade_date,
             commodity="HH",
             as_of=pd.to_datetime(reference["observed_at"], utc=True),
+            prefer_exact_cob=True,
         )
         expiry_rows = []
         for expiry, group in market.groupby("expiry", sort=True):

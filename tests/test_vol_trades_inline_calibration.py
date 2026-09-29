@@ -65,8 +65,8 @@ def test_context_mapping_pins_exact_sources_and_one_shared_hh_publication(monkey
     publication_calls = []
     lne_calls = []
 
-    def fake_publication(_engine, cob_date, *, commodity, as_of):
-        publication_calls.append((cob_date, commodity, as_of))
+    def fake_publication(_engine, cob_date, *, commodity, as_of, prefer_exact_cob=False):
+        publication_calls.append((cob_date, commodity, as_of, prefer_exact_cob))
         return {
             "publication_id": f"active-{commodity.lower()}",
             "published_at": "2026-08-28T18:00:00Z",
@@ -116,6 +116,7 @@ def test_context_mapping_pins_exact_sources_and_one_shared_hh_publication(monkey
         ("2026-08-28", "lne-uuid"),
     ]
     assert [call[1] for call in publication_calls] == ["HH", "HH", "JKM"]
+    assert [call[3] for call in publication_calls] == [True, True, False]
 
 
 def test_lne_intraday_is_rejected_before_any_calibration_load(monkeypatch):
