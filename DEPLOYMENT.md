@@ -7,22 +7,22 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.2.0`, built from reviewed `options` commit
-`6854666f03bfc181c6eeae155e873e0843db7c54`, and this repository's
+`at-options-analytics==1.2.1`, built from reviewed `options` commit
+`f2f6ad123864153d881154c966d9874fc7942186`, and this repository's
 requirements. The release wheel SHA-256 is
-`58ef4a25b711220479a1793752914e201aefc814c9a8807b4fa52ae5911b21e0`.
+`bb73cf74a82c3af1909fa1a13e2fb143da5af8b56c1ef966305d71031ed78b32`.
 Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
 
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout 6854666f03bfc181c6eeae155e873e0843db7c54
-python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-echo "58ef4a25b711220479a1793752914e201aefc814c9a8807b4fa52ae5911b21e0  dist/at_options_analytics-1.2.0-py3-none-any.whl" | shasum -a 256 -c -
-python -m pip install dist/at_options_analytics-1.2.0-py3-none-any.whl
+git -C /path/to/options checkout f2f6ad123864153d881154c966d9874fc7942186
+SOURCE_DATE_EPOCH=$(git -C /path/to/options show -s --format=%ct HEAD) python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
+echo "bb73cf74a82c3af1909fa1a13e2fb143da5af8b56c1ef966305d71031ed78b32  dist/at_options_analytics-1.2.1-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.1-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.0'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.1'"
 ```
 
 Run before producing the deployment artifact:
@@ -45,6 +45,13 @@ Calibration controls are mounted in Vol Trades at `/brent_vol_history`;
 `/vol_calibration` URL redirects to Vol Trades. The Vol Trades calibration
 button is visible by default; set `VOL_TRADES_INLINE_CALIBRATION_ENABLED=false`
 to hide it explicitly. Publication still uses separate write flags.
+
+Brent calibration fits observed strikes from a pinned settlement or intraday
+snapshot with one SVI model. The 11 saved deltas are output samples for sharing,
+not calibration targets. The Brent residual/PCHIP callback is removed from the
+app path. After verifying the source, expiry calendar, and publisher identity,
+enable `VOL_CALIBRATION_BRENT_WRITES_ENABLED` and
+`VOL_CALIBRATION_BRENT_PUBLICATION_ENABLED`; other product gates remain separate.
 
 The read-only release uses:
 

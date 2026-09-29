@@ -24,5 +24,5 @@ def _register_table_persistence(product: str):
     return persist_table_state
 
 
-for _product in ("brent", "jkm"):
+for _product in ("jkm",):
     _register_table_persistence(_product)

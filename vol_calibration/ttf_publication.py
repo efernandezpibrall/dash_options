@@ -21,14 +21,13 @@ from sqlalchemy import inspect, text
 from vol_calibration.auth import Identity, Permission, authorize
 from vol_calibration.calibration_inputs import TTF_CALL_DELTA_NODES
 from vol_calibration.ttf_hybrid_surface import (
-    BRENT_HYBRID_METHOD,
-    BRENT_HYBRID_POLICY_VERSION,
     GAS_HYBRID_POLICY_VERSIONS,
     HH_HYBRID_METHOD,
     HH_HYBRID_POLICY_VERSION,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
 )
+from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
 
 
 PUBLICATION_TABLE = "at_lng.vol_surface_publications"
@@ -41,9 +40,9 @@ PUBLICATION_ENGINE_VERSION = "ttf-intraday-pchip-wing-v1"
 JKM_HYBRID_POLICY_VERSION = "jkm_pchip_core_wing_tail_hybrid_v1"
 _HYBRID_PUBLICATION_POLICIES = {
     "BRENT": {
-        "method": BRENT_HYBRID_METHOD,
-        "policy_version": BRENT_HYBRID_POLICY_VERSION,
-        "engine_version": "brent-svi-projected-pchip-core-v2",
+        "method": "single_svi_actual_strikes",
+        "policy_version": BRENT_SINGLE_SURFACE_POLICY_VERSION,
+        "engine_version": BRENT_SINGLE_SURFACE_POLICY_VERSION,
     },
     "TTF": {
         "method": TTF_HYBRID_METHOD,

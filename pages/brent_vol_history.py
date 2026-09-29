@@ -38,6 +38,7 @@ from options.calibration_engine.io.brent_market import (
     MIN_OPEN_INTEREST,
     prepare_brent_calibration_observations,
 )
+from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
 from runtime_config import get_database_engine
 from brent_option_chain_refresh import (
     INTRADAY_REQUEST_KIND,
@@ -207,22 +208,30 @@ def load_available_snapshots(
             WHERE date_rank = 1
             ORDER BY business_date DESC
             LIMIT :limit
-        ), today_intraday AS (
+        ), recent_intraday AS (
             SELECT *,
                    row_number() OVER (
+                       PARTITION BY business_date
                        ORDER BY observed_at DESC, created_at DESC, snapshot_id DESC
                    ) AS intraday_rank
             FROM available
             WHERE snapshot_kind = :intraday_kind
               AND has_chain
-              AND business_date =
-                  (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Dubai')::date
+              AND (
+                  :product = 'BRENT'
+                  OR business_date =
+                      (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Dubai')::date
+              )
+        ), intraday_dates AS (
+            SELECT * FROM recent_intraday
+            WHERE intraday_rank = 1
+            ORDER BY business_date DESC
+            LIMIT 5
         ), selected AS (
             SELECT snapshot_id, business_date, observed_at, input_fingerprint,
                    option_quote_count, forward_count, metadata, snapshot_kind,
                    0 AS sort_group
-            FROM today_intraday
-            WHERE intraday_rank = 1
+            FROM intraday_dates
             UNION ALL
             SELECT snapshot_id, business_date, observed_at, input_fingerprint,
                    option_quote_count, forward_count, metadata, snapshot_kind,
@@ -1181,9 +1190,8 @@ def load_latest_calibrated_surface(
 ) -> pd.DataFrame:
     """Load the latest active calibrated publication for the selected product.
 
-    This is a current-publication comparison, not a point-in-time reconstruction:
-    the latest active revision remains visible alongside an older selected market
-    snapshot, with both the publication COB and timestamp carried into the chart.
+    Brent uses the active revision for the selected exact COB. Other products
+    retain their current-publication comparison with a labelled publication COB.
     """
     product = _normalize_product(product)
     db_engine = engine or get_database_engine(required=False)
@@ -1202,6 +1210,7 @@ def load_latest_calibrated_surface(
     if pd.isna(selected_cob) or not normalized_contracts:
         return _empty_calibrated_surface("invalid_selection")
     commodity = _product_spec(product)["published_product"]
+    cob_filter = "AND p.cob_date = :selected_cob" if product == "BRENT" else ""
     catalog_query = text(
         f"""
         SELECT p.publication_id,
@@ -1214,6 +1223,7 @@ def load_latest_calibrated_surface(
         WHERE p.commodity = :commodity
           AND p.status = 'published'
           AND p.is_active
+          {cob_filter}
         ORDER BY p.cob_date DESC, p.published_at DESC, p.created_at DESC
         LIMIT 1
         """
@@ -1221,7 +1231,10 @@ def load_latest_calibrated_surface(
     catalog = pd.read_sql(
         catalog_query,
         db_engine,
-        params={"commodity": commodity},
+        params={
+            "commodity": commodity,
+            **({"selected_cob": selected_cob.date()} if product == "BRENT" else {}),
+        },
     )
     if catalog.empty:
         return _empty_calibrated_surface(
@@ -3157,15 +3170,37 @@ def build_expiry_figure(
         )
         commodity = str(metadata.get("commodity") or spec["published_product"])
         publication_id = str(metadata.get("publication_id") or "unavailable")
+        brent_policy = (
+            calibrated["calibration_policy_version"].dropna().astype(str).unique().tolist()
+            if resolved_product == "BRENT" and "calibration_policy_version" in calibrated
+            else []
+        )
+        current_brent_policy = brent_policy == [BRENT_SINGLE_SURFACE_POLICY_VERSION]
+        brent_surface_label = (
+            "BRENT surface" if current_brent_policy else "Legacy BRENT surface"
+        )
+        hover_surface_label = (
+            brent_surface_label
+            if resolved_product == "BRENT"
+            else f"Calibrated {commodity} publication"
+        )
         figure.add_trace(
             go.Scatter(
                 x=calibrated["_axis_x"],
                 y=100.0 * calibrated["volatility"],
                 mode="lines",
-                name=f"Calibrated {commodity} · COB {cob_label}",
+                name=(
+                    f"{brent_surface_label} · COB {cob_label}"
+                    if resolved_product == "BRENT"
+                    else f"Calibrated {commodity} · COB {cob_label}"
+                ),
                 legendrank=35,
                 meta={"legend_layer": "calibrated"},
-                line={"color": "#7C3AED", "width": 2.4, "dash": "dash"},
+                line=(
+                    {"color": "#E69525", "width": 2.8}
+                    if resolved_product == "BRENT"
+                    else {"color": "#7C3AED", "width": 2.4, "dash": "dash"}
+                ),
                 customdata=np.column_stack(
                     [
                         calibrated["strike"],
@@ -3176,7 +3211,7 @@ def build_expiry_figure(
                     ]
                 ),
                 hovertemplate=(
-                    f"<b>Calibrated {commodity} publication</b>"
+                    f"<b>{hover_surface_label}</b>"
                     "<br>Strike %{customdata[0]:.3f}"
                     + axis_hover
                     + " · IV <b>%{y:.2f}%</b>"
@@ -5408,6 +5443,7 @@ layout = html.Main(
             id="brent-vol-history-calibration-context",
             storage_type="memory",
         ),
+        dcc.Store(id="brent-single-publication-revision", storage_type="memory"),
         html.Div(
             id="brent-vol-history-calibration-panel",
             className="brent-vol-history-calibration-panel",
@@ -5665,7 +5701,11 @@ def update_inline_calibration_state(
 ):
     current = state or {"open": False}
     trigger = ctx.triggered_id
-    if trigger == "brent-vol-history-calibration-toggle":
+    clicks = int(_n_clicks or 0)
+    toggle_clicked = (
+        "brent-vol-history-calibration-toggle.n_clicks" in ctx.triggered_prop_ids
+    )
+    if toggle_clicked and clicks:
         is_open = not bool(current.get("open"))
     elif bool(current.get("open")) and trigger in {
         "brent-vol-history-product",
@@ -6548,10 +6588,11 @@ def update_history_dates(
         observed = pd.to_datetime(snapshot.observed_at, errors="coerce", utc=True)
         if str(snapshot.snapshot_kind).upper() == "INTRADAY":
             local = observed.tz_convert("Asia/Dubai") if not pd.isna(observed) else observed
+            date_label = pd.Timestamp(snapshot.business_date).strftime("%d %b")
             label = (
-                f"Intraday {local.strftime('%H:%M')} GST"
+                f"{date_label} · Intraday {local.strftime('%H:%M')} GST"
                 if not pd.isna(local)
-                else "Intraday"
+                else f"{date_label} · Intraday"
             )
         else:
             label = pd.Timestamp(snapshot.business_date).strftime("%d %b %Y")
@@ -6686,6 +6727,7 @@ def _render_jkm_history(
     Input("brent-vol-history-date", "value"),
     Input("brent-vol-history-x-axis", "value"),
     Input("brent-vol-history-product", "value"),
+    Input("brent-single-publication-revision", "data"),
     State("brent-vol-history-detail-expiry", "value"),
     State("brent-vol-history-trade-window-state", "data"),
     State("brent-vol-history-expiry-layers", "options"),
@@ -6695,6 +6737,7 @@ def render_history(
     selected_snapshot_id,
     x_axis=X_AXIS_STRIKE,
     product=PRODUCT,
+    _published_revision=None,
     current_detail_expiry=None,
     current_trade_window=None,
     current_legend_options=None,
@@ -6826,7 +6869,7 @@ def render_history(
                     )
                 except Exception:
                     prior_settlement_chain = pd.DataFrame()
-        if snapshot_kind == "INTRADAY":
+        if product == "BRENT" or snapshot_kind == "INTRADAY":
             published = pd.DataFrame()
         elif product == "TFO":
             published = load_icap_settlement_surface(selected_date)

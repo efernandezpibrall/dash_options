@@ -22,7 +22,8 @@ import pages.pricer_new
 import pages.correlations
 import pages.scenarios
 import pages.pnl_explain
-from vol_calibration.pages import brent, hh_governed, jkm, ttf
+from vol_calibration.pages import hh_governed, jkm, ttf
+from vol_calibration.brent_single_workspace import layout as brent_single_layout
 import vol_calibration.session_callbacks  # noqa: F401 - Register Vol Trades table persistence.
 
 
@@ -629,7 +630,7 @@ app.validation_layout = html.Div([
     pages.valuation.layout,
     pages.trades.layout,
     pages.vol_surface.layout,
-    brent.layout,
+    brent_single_layout,
     hh_governed.layout,
     jkm.layout,
     ttf.layout,

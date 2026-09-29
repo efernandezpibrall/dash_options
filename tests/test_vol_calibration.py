@@ -317,9 +317,9 @@ def test_ttf_batch_publication_requires_one_accepted_result_per_expiry():
     )
     ready, _ = ttf._batch_state_ready(
         batch_state,
-        rows,
         "2026-07-30",
         market_json,
+        rows,
         {},
         {},
     )
@@ -328,9 +328,9 @@ def test_ttf_batch_publication_requires_one_accepted_result_per_expiry():
     stale_state = {**batch_state, "trading_date": "2026-07-29"}
     ready, title = ttf._batch_state_ready(
         stale_state,
-        rows,
         "2026-07-30",
         market_json,
+        rows,
         {},
         {},
     )
@@ -341,9 +341,9 @@ def test_ttf_batch_publication_requires_one_accepted_result_per_expiry():
     edited_rows[0]["vr"] += 0.01
     ready, title = ttf._batch_state_ready(
         batch_state,
-        edited_rows,
         "2026-07-30",
         market_json,
+        edited_rows,
         {},
         {},
     )
@@ -352,9 +352,9 @@ def test_ttf_batch_publication_requires_one_accepted_result_per_expiry():
 
     ready, title = ttf._batch_state_ready(
         complete,
-        rows,
         "2026-07-30",
         market_json,
+        rows,
         {},
         {},
     )
@@ -502,7 +502,7 @@ def test_host_app_registers_vol_trades_without_standalone_calibration_page():
         for output, entry in app.callback_map.items()
         if output.startswith("vol-calibration-session-state.data")
     }
-    assert persistence_inputs == {"brent-param-table", "jkm-param-table"}
+    assert persistence_inputs == {"jkm-param-table"}
     assert index_options.display_page("/brent_vol_history", None) is index_options.pages.brent_vol_history.layout
     retired = index_options.display_page("/vol_calibration", "?product=jkm")
     assert retired.pathname == "/brent_vol_history"
@@ -512,7 +512,8 @@ def test_host_app_registers_vol_trades_without_standalone_calibration_page():
 
     validation_components = _components_by_id(app.validation_layout)
     assert "vol-calibration-product-tabs" not in validation_components
-    assert "brent-date-picker" in validation_components
+    assert "brent-single-calibrate" in validation_components
+    assert "brent-param-table" not in validation_components
     assert "ttf-date-picker" in validation_components
     assert "jkm-date-picker" in validation_components
     assert "hh-governed-date" in validation_components
