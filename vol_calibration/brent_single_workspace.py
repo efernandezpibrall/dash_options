@@ -78,7 +78,7 @@ def calibrate_selected_brent(clicks, context):
         }
         summary = (
             f"{diagnostics['observed_expiries']} fitted expiries; "
-            f"{diagnostics['target_expiries']} published expiries; "
+            f"{diagnostics['target_expiries']} target expiries; "
             f"minimum implied density "
             f"{diagnostics['validation']['minimum_implied_density']:.4f}. "
             f"Selected {diagnostics['source_kind'].lower()} snapshot."
