@@ -8,7 +8,6 @@ import math
 from datetime import date, timedelta
 
 import dash_ag_grid as dag
-import numpy as np
 import plotly.graph_objects as go
 from dash import (
     ALL,
@@ -25,7 +24,6 @@ from dash import (
     no_update,
 )
 
-from options.options_library import asian_76, black_76
 from pricer_exchange_registry import (
     DEFAULT_EXCHANGE_MAPPING_ID,
     canonical_exchange_mapping_id,
@@ -39,6 +37,7 @@ from pricer_surface_reference import (
     REFERENCE_SCHEMA_VERSION,
     build_published_surface_reference,
     build_surface_comparison_views,
+    volatility_overlay_points,
 )
 from pricer_structure import (
     DEFAULT_ASSET,
@@ -60,7 +59,6 @@ from pricer_structure import (
     build_delivery_month_component,
     calculate_structure,
     correlation_sensitivity_series,
-    count_business_days,
     default_contract_size,
     default_context,
     default_leg,
@@ -71,7 +69,6 @@ from pricer_structure import (
     payoff_series,
     rate_sensitivity_series,
     time_decay_series,
-    volatility_adjustment,
 )
 
 
@@ -511,6 +508,13 @@ def parse_date(date_str, default_date=None):
 def _get_pricer_triggered_id():
     try:
         return ctx.triggered_id
+    except Exception:
+        return None
+
+
+def _get_pricer_triggered_properties():
+    try:
+        return {key.rsplit(".", 1)[-1] for key in ctx.triggered_prop_ids}
     except Exception:
         return None
 
@@ -1806,16 +1810,11 @@ def _published_pricer_volatility_columns():
     input_vol_column = _published_pricer_volatility_column(
         "surface_input_vol",
         "Input vol",
-        calculated_field="raw_volatility",
         width=82,
         tooltip=(
-            "Effective input volatility: published strike-specific volatility plus "
-            "the ATM, Skew, and Smile adjustments."
+            "Original published strike-specific volatility before ATM, Skew, "
+            "and Smile adjustments."
         ),
-    )
-    input_vol_column["valueGetter"] = _surface_or_calculated_value_getter(
-        "surface_effective_input_vol",
-        "raw_volatility",
     )
     return {
         "headerName": "Volatility",
@@ -1849,7 +1848,8 @@ def _published_pricer_pricing_volatility_columns():
         calculated_field="volatility_used",
         width=82,
         tooltip=(
-            "Effective Input vol after the governed contract-date adjustment."
+            "Published volatility plus the ATM, Skew, and Smile adjustments, "
+            "then the governed contract-date adjustment."
         ),
     )
     column["valueGetter"] = _surface_or_calculated_value_getter(
@@ -1867,6 +1867,28 @@ def _published_pricer_pricing_volatility_columns():
 
 
 def _volatility_adjustment_column(field, header):
+    explanation = {
+        "atm_vol_adjustment": (
+            "ATM moves the whole published surface up or down. Enter +1 to add "
+            "one volatility percentage point at every strike."
+        ),
+        "skew_vol_adjustment": (
+            "Skew tilts the surface. Enter +1 to add 0.5 volatility points "
+            "at the 25-delta call strike and remove 0.5 at the 25-delta put "
+            "strike. The original ATM point stays the same. Negative values "
+            "reverse the tilt."
+        ),
+        "smile_vol_adjustment": (
+            "Smile moves both wings relative to the middle. Enter +1 to add "
+            "one volatility point at both 25-delta wing strikes. The original "
+            "ATM point stays the same. Negative values lower both wings."
+        ),
+    }[field]
+    note = (
+        f"{header} adjustment in volatility percentage points. {explanation} "
+        "Editing one leg updates every leg in this structure. Input vol stays "
+        "original; Pricing vol shows the adjustment."
+    )
     return {
         "headerName": header,
         "field": field,
@@ -1892,10 +1914,7 @@ def _volatility_adjustment_column(field, header):
                 f"Math.abs(Number(params.value)) > {MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT!r})"
             )
         },
-        "headerTooltip": (
-            f"{header} adjustment in volatility percentage points; "
-            "1.00 adds one vol point and -1.00 removes one vol point."
-        ),
+        "headerTooltip": note,
     }
 
 
@@ -2293,7 +2312,10 @@ def _apply_current_pricer_leg_geometry(column_defs):
                 "pricer-table-number-header",
             )
 
-        if "tooltipValueGetter" not in column:
+        if (
+            column_id not in VOLATILITY_ADJUSTMENT_FIELDS
+            and "tooltipValueGetter" not in column
+        ):
             column["tooltipValueGetter"] = {
                 "function": (
                     "params.valueFormatted != null && params.valueFormatted !== '' "
@@ -2608,7 +2630,6 @@ def _leg_grid_options(snapshot=None, surface_reference=None, *, compact=False):
         "enableBrowserTooltips": False,
         "tooltipShowDelay": 0,
         "tooltipHideDelay": 3000,
-        **({"tooltipShowMode": "whenTruncated"} if compact else {}),
         "rowSelection": {
             "mode": "singleRow",
             "checkboxes": not compact,
@@ -2734,173 +2755,6 @@ def _result_numeric_column(
     return column
 
 
-def _result_greek_column(field, label, *, prefix, decimal_places):
-    display_label = label
-    cell_tooltip_field = None
-    if field == "vega":
-        display_label = "Vega"
-        cell_tooltip_field = "_vega_tooltip"
-    elif field == "rho":
-        display_label = "Rho"
-        cell_tooltip_field = "_rho_tooltip"
-    return _result_numeric_column(
-        f"{prefix}_{field}",
-        display_label,
-        decimal_places=decimal_places,
-        cell_tooltip_field=cell_tooltip_field,
-    )
-
-
-def _combined_result_columns(snapshot):
-    model = snapshot["model"]
-    price_unit_label = snapshot["context"].get("price_unit_label", "unit")
-    trade_currency = snapshot["context"].get("trade_currency", "currency")
-    columns = [
-        {
-            "headerName": "Leg",
-            "field": "name",
-            "pinned": "left",
-            "minWidth": 84,
-            "cellClass": "pricer-table-text-cell",
-            "headerClass": "pricer-table-text-header",
-        },
-        {
-            "headerName": "Side",
-            "field": "side",
-            "minWidth": 58,
-            "cellClass": "pricer-table-text-cell",
-            "headerClass": "pricer-table-text-header",
-        },
-        {
-            "headerName": "Lots",
-            "field": "ratio",
-            "minWidth": 60,
-            "type": "numericColumn",
-            "cellClass": "pricer-table-number-cell",
-        },
-        {
-            "headerName": "C/P",
-            "field": "call_put",
-            "minWidth": 50,
-            "cellClass": "pricer-table-text-cell",
-            "headerClass": "pricer-table-text-header",
-        },
-        _result_numeric_column(
-            "strike",
-            "Strike",
-            min_width=70,
-            sign_coloring=False,
-        ),
-    ]
-    if model in SINGLE_ASSET_MODELS:
-        columns.extend(
-            [
-                {
-                    "headerName": "Quote",
-                    "field": "quote_basis",
-                    "minWidth": 76,
-                    "cellClass": "pricer-table-text-cell",
-                    "headerClass": "pricer-table-text-header",
-                },
-                _result_numeric_column(
-                    "entered_premium",
-                    "Input premium",
-                    min_width=100,
-                    sign_coloring=False,
-                ),
-                _result_numeric_column(
-                    "raw_volatility",
-                    "Contract vol",
-                    min_width=92,
-                    sign_coloring=False,
-                ),
-                _result_numeric_column(
-                    "volatility_used",
-                    "Pricing vol",
-                    min_width=88,
-                    sign_coloring=False,
-                ),
-            ]
-        )
-    else:
-        columns.extend(
-            [
-                _result_numeric_column(
-                    "raw_volatility_asset_1",
-                    "Asset 1 vol",
-                    min_width=86,
-                    sign_coloring=False,
-                ),
-                _result_numeric_column(
-                    "raw_volatility_asset_2",
-                    "Asset 2 vol",
-                    min_width=86,
-                    sign_coloring=False,
-                ),
-                _result_numeric_column(
-                    "volatility_asset_1_used",
-                    "Asset 1 pricing vol",
-                    min_width=104,
-                    sign_coloring=False,
-                ),
-                _result_numeric_column(
-                    "volatility_asset_2_used",
-                    "Asset 2 pricing vol",
-                    min_width=104,
-                    sign_coloring=False,
-                ),
-            ]
-        )
-    columns.extend(
-        [
-            {
-                "headerName": f"Position · {trade_currency}",
-                "headerClass": (
-                    "pricer-result-column-group "
-                    "pricer-result-column-group-position"
-                ),
-                "children": [
-                    _result_numeric_column(
-                        "trade_value",
-                        "Value",
-                        decimal_places=2,
-                    ),
-                    *[
-                        _result_greek_column(
-                            field,
-                            snapshot["greek_labels"][field],
-                            prefix="trade",
-                            decimal_places=2,
-                        )
-                        for field in snapshot["greek_fields"]
-                    ],
-                ],
-            },
-            {
-                "headerName": f"Unit · {price_unit_label}",
-                "headerClass": "pricer-result-column-group",
-                "children": [
-                    _result_numeric_column(
-                        "unit_value",
-                        "Value",
-                        decimal_places=4,
-                    ),
-                    *[
-                        _result_greek_column(
-                            field,
-                            snapshot["greek_labels"][field],
-                            prefix="unit",
-                            decimal_places=4,
-                        )
-                        for field in snapshot["greek_fields"]
-                    ],
-                ],
-            },
-        ]
-    )
-    return columns
-
-
 def _combined_result_rows(snapshot):
     vega_tooltip = (
         "Adjusted pricing vol, 1 point"
@@ -2976,50 +2830,16 @@ def _combined_result_rows(snapshot):
     return rows, total
 
 
-def _build_combined_result_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
-    rows, total = _combined_result_rows(snapshot)
-    options = {
-        "domLayout": "autoHeight",
-        "rowHeight": 31,
-        "headerHeight": 44,
-        "groupHeaderHeight": 30,
-        "enableCellTextSelection": True,
-        "ensureDomOrder": True,
-        "animateRows": False,
-        "suppressColumnVirtualisation": True,
-        "pinnedBottomRowData": [total],
-        "enableBrowserTooltips": False,
-        "tooltipShowDelay": 0,
-        "tooltipHideDelay": 3000,
-    }
-    return dag.AgGrid(
-        id=_instance_id("pricer-combined-results-grid", structure_id),
-        rowData=rows,
-        columnDefs=_combined_result_columns(snapshot),
-        defaultColDef={
-            "sortable": False,
-            "filter": False,
-            "resizable": True,
-            "suppressHeaderMenuButton": True,
-            "suppressHeaderFilterButton": True,
-            "wrapHeaderText": True,
-            "autoHeaderHeight": True,
-        },
-        dashGridOptions=options,
-        columnSize="autoSize",
-        columnSizeOptions={"skipHeader": False},
-        getRowId="params.data.leg_id",
-        className=(
-            "ag-theme-alpine mckinsey-ag-grid pricer-data-grid "
-            "pricer-results-grid pricer-combined-results-grid"
-        ),
-        style={"width": "100%"},
-        dangerously_allow_code=True,
-    )
-
-
 def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
     context = snapshot["context"]
+    published_surface = (snapshot.get("_ui_input_signature") or {}).get(
+        "published_surface"
+    ) or {}
+    surface_rows = {
+        row["leg_id"]: row
+        for row in published_surface.get("rows") or []
+        if isinstance(row, dict) and row.get("leg_id")
+    }
     is_jkm = context.get("asset") == "JKM"
     is_nbp = context.get("asset") == "NBP"
     has_exchange_mapping = bool(context.get("exchange_mapping_id"))
@@ -3031,6 +2851,14 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
     is_asian = snapshot.get("model") == "asian76"
     rows = []
     for leg in snapshot["legs"]:
+        surface_row = surface_rows.get(leg["leg_id"], {})
+        component_adjustments = {
+            item["contract_month"]: 0.01 * volatility_overlay_points(
+                surface_row, item["smile_coordinate"]
+            )
+            for item in surface_row.get("component_volatilities") or []
+            if item.get("smile_coordinate") is not None
+        }
         for component in leg.get("components") or []:
             rows.append(
                 {
@@ -3067,7 +2895,13 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
                         if str(component["expiry_status"]).startswith("TFO ")
                         else component["expiry_status"].title()
                     ),
-                    "input_vol_pct": component["input_volatility"] * 100.0,
+                    "input_vol_pct": (
+                        component["input_volatility"]
+                        - component_adjustments.get(component["contract_month"], 0.0)
+                    ) * 100.0,
+                    "pricing_vol_pct": component.get(
+                        "pricing_volatility", component["input_volatility"]
+                    ) * 100.0,
                     "unit_value": component["unit_value"],
                     "weighted_unit_value": component["weighted_unit_value"],
                     "delta": component["greeks"]["delta"],
@@ -3177,6 +3011,13 @@ def _build_strip_component_grid(snapshot, structure_id=DEFAULT_STRUCTURE_ID):
                 "input_vol_pct",
                 "Input vol %",
                 min_width=82,
+                sign_coloring=False,
+                decimal_places=3,
+            ),
+            _result_numeric_column(
+                "pricing_vol_pct",
+                "Pricing vol %",
+                min_width=88,
                 sign_coloring=False,
                 decimal_places=3,
             ),
@@ -3889,6 +3730,10 @@ def _build_structure_panel(
                     "pricer-published-surface-reference",
                     structure_id,
                 ),
+                storage_type="memory",
+            ),
+            dcc.Store(
+                id=_instance_id("pricer-grid-refresh-ack", structure_id),
                 storage_type="memory",
             ),
             dcc.Store(
@@ -5487,14 +5332,16 @@ def manage_structure_legs(
         if len(rows) >= MAX_LEGS:
             status = f"A structure can contain at most {MAX_LEGS} legs."
         else:
-            rows.append(
-                _default_leg_for_lot_mode(
-                    model,
-                    next_sequence,
-                    signed_lots=signed_lots,
-                    use_published_surface=use_published_surface,
-                )
+            added_row = _default_leg_for_lot_mode(
+                model,
+                next_sequence,
+                signed_lots=signed_lots,
+                use_published_surface=use_published_surface,
             )
+            if use_published_surface and rows:
+                for field in VOLATILITY_ADJUSTMENT_FIELDS:
+                    added_row[field] = rows[0][field]
+            rows.append(added_row)
             next_sequence += 1
             status = f"Added Leg {next_sequence - 1}."
     elif triggered_type == "pricer-duplicate-leg":
@@ -5532,11 +5379,35 @@ def manage_structure_legs(
         )
     else:
         latest_event = None
+    committed_edit = False
     if isinstance(latest_event, dict):
         column = latest_event.get("column")
         column_id = latest_event.get("colId") or (
             column.get("colId") if isinstance(column, dict) else None
         )
+        edited_leg_id = (latest_event.get("data") or {}).get("leg_id")
+        if (
+            edited_leg_id
+            and column_id not in (None, "leg_id")
+            and "newValue" in latest_event
+            and latest_event.get("oldValue") != latest_event["newValue"]
+        ):
+            shared_adjustment = (
+                use_published_surface
+                and column_id in VOLATILITY_ADJUSTMENT_FIELDS
+            )
+            for row in rows:
+                if (
+                    column_id in row
+                    and (shared_adjustment or row.get("leg_id") == edited_leg_id)
+                ):
+                    # AG Grid may emit cellValueChanged before its rowData prop
+                    # reaches this callback. Preserve the committed edit when
+                    # returning rowData and persisting the draft.
+                    committed_edit |= row[column_id] != latest_event["newValue"]
+                    row[column_id] = latest_event["newValue"]
+                    if not shared_adjustment:
+                        break
         basis_changed = (
             column_id == "quote_basis"
             and latest_event.get("oldValue") != latest_event.get("newValue")
@@ -5560,7 +5431,10 @@ def manage_structure_legs(
         "next_leg_sequence": next_sequence,
     }
     row_output = (
-        no_update if triggered_type == "pricer-legs-grid" and not basis_changed else rows
+        no_update
+        if triggered_type == "pricer-legs-grid"
+        and not (basis_changed or committed_edit)
+        else rows
     )
     return (
         no_update,
@@ -6501,11 +6375,52 @@ def _surface_reference_input_signature(
                 "leg_id": str(row.get("leg_id") or ""),
                 "call_put": copy.deepcopy(row.get("call_put")),
                 "strike": copy.deepcopy(row.get("strike")),
+                **{
+                    field: copy.deepcopy(row.get(field, 0.0))
+                    for field in VOLATILITY_ADJUSTMENT_FIELDS
+                },
             }
             for row in rows or []
             if isinstance(row, dict)
         ],
     }
+
+
+def _rows_with_committed_leg_edit(rows, cell_value_changed):
+    updated = copy.deepcopy(rows) if isinstance(rows, list) else []
+    event = (
+        cell_value_changed[-1]
+        if isinstance(cell_value_changed, list) and cell_value_changed
+        else cell_value_changed
+    )
+    if not isinstance(event, dict):
+        return updated
+    leg_id = (event.get("data") or {}).get("leg_id")
+    column = event.get("column")
+    field = event.get("colId") or (
+        column.get("colId") if isinstance(column, dict) else None
+    )
+    if not leg_id or not field or field == "leg_id" or "newValue" not in event:
+        return updated
+    shared_adjustment = field in VOLATILITY_ADJUSTMENT_FIELDS
+    if shared_adjustment and not any(
+        isinstance(row, dict)
+        and row.get("leg_id") == leg_id
+        and row.get(field) in (event.get("oldValue"), event["newValue"])
+        for row in updated
+    ):
+        return updated
+    for row in updated:
+        if (
+            isinstance(row, dict)
+            and field in row
+            and (shared_adjustment or row.get("leg_id") == leg_id)
+            and (shared_adjustment or row[field] == event.get("oldValue"))
+        ):
+            row[field] = event["newValue"]
+            if not shared_adjustment:
+                break
+    return updated
 
 
 @callback(
@@ -6522,6 +6437,10 @@ def _surface_reference_input_signature(
         Input({"type": "pricer-option-type", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-mapping-id", "structure_id": MATCH}, "value"),
         Input({"type": "pricer-legs-grid", "structure_id": MATCH}, "rowData"),
+        Input(
+            {"type": "pricer-legs-grid", "structure_id": MATCH},
+            "cellValueChanged",
+        ),
         Input(
             {
                 "type": "pricer-context-param",
@@ -6572,6 +6491,7 @@ def update_published_surface_reference(
     model,
     mapping_id,
     rows,
+    cell_value_changed,
     param_values,
     date_values,
     valuation_date_value,
@@ -6587,7 +6507,9 @@ def update_published_surface_reference(
     )
     if mapping_id is not None:
         context["exchange_mapping_id"] = mapping_id
-    normalized_rows = _quote_ready_rows(model, rows)
+    normalized_rows = _quote_ready_rows(
+        model, _rows_with_committed_leg_edit(rows, cell_value_changed)
+    )
     payload = build_published_surface_reference(
         asset,
         model,
@@ -6640,6 +6562,35 @@ def render_leg_grid_options(pricing_options, surface_reference):
         surface_rows = copy.deepcopy(surface_reference["rows"])
     context["surfaceRows"] = surface_rows
     return rendered
+
+
+clientside_callback(
+    """async function (options, gridId) {
+        if (!options || !gridId || !options.context) {
+            return window.dash_clientside.no_update;
+        }
+        const id = JSON.stringify({
+            structure_id: gridId.structure_id,
+            type: 'pricer-legs-grid'
+        });
+        const api = await dash_ag_grid.getApiAsync(id);
+        api.setGridOption('context', options.context);
+        api.refreshCells({force: true});
+        return window.dash_clientside.no_update;
+    }""",
+    Output(
+        {"type": "pricer-grid-refresh-ack", "structure_id": MATCH},
+        "data",
+    ),
+    Input(
+        {"type": "pricer-legs-grid", "structure_id": MATCH},
+        "dashGridOptions",
+    ),
+    State(
+        {"type": "pricer-legs-grid", "structure_id": MATCH},
+        "id",
+    ),
+)
 
 
 def _normalized_signature_context(context):
@@ -6778,7 +6729,6 @@ def _published_surface_calculation_rows(
             "warnings": copy.deepcopy(surface_reference.get("warnings") or []),
             "rows": signature_rows,
         }
-    source_kind = str(surface_reference.get("source_kind") or "governed")
     publication_fields = ("publication_id", "publication_cob", "published_at")
     if any(
         surface_reference.get(field) in (None, "")
@@ -6861,10 +6811,33 @@ def _published_surface_calculation_rows(
                     f"{MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT:.0f} vol points."
                 )
             adjustment_values[field] = adjustment
-        total_adjustment = VOLATILITY_ADJUSTMENT_SCALE * sum(
-            adjustment_values.values()
+        smile_coordinate = surface_row.get("surface_smile_coordinate")
+        if smile_coordinate is None:
+            has_shape_adjustment = any(
+                adjustment_values[field]
+                for field in VOLATILITY_ADJUSTMENT_FIELDS[1:]
+            )
+            if has_shape_adjustment and not surface_row.get(
+                "surface_component_volatilities"
+            ):
+                raise StructureValidationError(
+                    f"Leg {position}: the published surface smile position is unavailable."
+                )
+            smile_coordinate = 0.0
+        try:
+            smile_coordinate = float(smile_coordinate)
+        except (TypeError, ValueError, OverflowError):
+            raise StructureValidationError(
+                f"Leg {position}: the published surface smile position is invalid."
+            ) from None
+        if not math.isfinite(smile_coordinate) or abs(smile_coordinate) > 2.0:
+            raise StructureValidationError(
+                f"Leg {position}: the published surface smile position is invalid."
+            )
+        effective_input_volatility = input_volatility + (
+            VOLATILITY_ADJUSTMENT_SCALE
+            * volatility_overlay_points(adjustment_values, smile_coordinate)
         )
-        effective_input_volatility = input_volatility + total_adjustment
         effective_pricing_volatility = pricing_volatility * (
             effective_input_volatility / input_volatility
         )
@@ -6890,6 +6863,7 @@ def _published_surface_calculation_rows(
                     contract_month = str(component_row["contract_month"])
                     component_input = float(component_row["input_volatility"])
                     component_pricing = float(component_row["pricing_volatility"])
+                    component_coordinate = float(component_row["smile_coordinate"])
                     expiry_factor = float(
                         component_row["expiry_adjustment_factor"]
                     )
@@ -6898,7 +6872,12 @@ def _published_surface_calculation_rows(
                         f"Leg {position}: published component {component_position} "
                         "volatility metadata is invalid."
                     ) from None
-                effective_component_input = component_input + total_adjustment
+                effective_component_input = component_input + (
+                    VOLATILITY_ADJUSTMENT_SCALE
+                    * volatility_overlay_points(
+                        adjustment_values, component_coordinate
+                    )
+                )
                 effective_component_pricing = (
                     effective_component_input * expiry_factor
                 )
@@ -6907,6 +6886,8 @@ def _published_surface_calculation_rows(
                     and 0.005 <= component_input <= 2.0
                     and math.isfinite(component_pricing)
                     and 0.005 <= component_pricing <= 2.0
+                    and math.isfinite(component_coordinate)
+                    and abs(component_coordinate) <= 2.0
                     and math.isfinite(expiry_factor)
                     and expiry_factor > 0.0
                     and math.isclose(
@@ -6929,6 +6910,7 @@ def _published_surface_calculation_rows(
                         "contract_month": contract_month,
                         "input_volatility": effective_component_input,
                         "pricing_volatility": effective_component_pricing,
+                        "smile_coordinate": component_coordinate,
                         "expiry_adjustment_factor": expiry_factor,
                     }
                 )
@@ -6945,6 +6927,23 @@ def _published_surface_calculation_rows(
                     f"Leg {position}: the premium-equivalent Pricing Vol "
                     "could not be resolved."
                 ) from None
+            if len(component_volatilities) == 1 and not (
+                math.isclose(
+                    effective_input_volatility,
+                    component_volatilities[0]["input_volatility"],
+                    rel_tol=1e-10,
+                    abs_tol=1e-12,
+                )
+                and math.isclose(
+                    effective_pricing_volatility,
+                    component_volatilities[0]["pricing_volatility"],
+                    rel_tol=1e-10,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise StructureValidationError(
+                    f"Leg {position}: the adjusted surface volatility is inconsistent."
+                )
         if not (
             math.isfinite(effective_input_volatility)
             and 0.005 <= effective_input_volatility <= 2.0
@@ -7447,6 +7446,7 @@ def _calculate_structure_instance_dash_callback(
     workflow="legacy",
     pathname=None,
 ):
+    rows = _rows_with_committed_leg_edit(rows, cell_value_changed)
     triggered = _get_pricer_triggered_id()
     triggered_type = triggered.get("type") if isinstance(triggered, dict) else triggered
     use_published_surface = pathname == "/pricer"
@@ -7499,8 +7499,13 @@ def _calculate_structure_instance_dash_callback(
         if isinstance(cell_value_changed, list) and cell_value_changed
         else cell_value_changed
     )
+    triggered_properties = _get_pricer_triggered_properties()
     committed_grid_edit = (
         triggered_type == "pricer-legs-grid"
+        and (
+            triggered_properties is None
+            or "cellValueChanged" in triggered_properties
+        )
         and isinstance(latest_cell_event, dict)
         and latest_cell_event.get("oldValue") != latest_cell_event.get("newValue")
     )
@@ -8636,523 +8641,3 @@ def render_structure_sensitivity_charts(snapshot):
                 f"Correlation sensitivity unavailable ({type(exc).__name__})."
             )
     return vol_fig, rate_fig, time_fig, extension_fig, correlation_fig
-
-
-# ---------------------------------------------------------------------------
-# Compatibility helpers
-# ---------------------------------------------------------------------------
-# These wrappers preserve the direct-call contracts exercised by the existing
-# Asian-76 tests while the active Dash page uses the structure snapshot above.
-
-
-def _values_by_param(values, ids, model):
-    result = {}
-    for value, component_id in zip(values or [], ids or []):
-        if isinstance(component_id, dict) and component_id.get("model") == model:
-            result[component_id.get("param")] = value
-    return result
-
-
-def _count_pricer_business_days(start_date, end_date):
-    return count_business_days(parse_date(start_date), parse_date(end_date))
-
-
-def _adjust_pricer_volatility(raw_volatility, expiration_date, contract_expiration_date):
-    factor, option_days, contract_days = volatility_adjustment(
-        date.today(),
-        parse_date(expiration_date),
-        parse_date(contract_expiration_date),
-    )
-    return raw_volatility * factor, factor, option_days, contract_days
-
-
-def _parse_asian76_model_inputs(
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    params = _values_by_param(all_params, all_param_ids, "asian76")
-    dates = _values_by_param(all_dates, all_date_ids, "asian76")
-    if not all_param_ids:
-        ordered = list(all_params or [])
-        params = {
-            "forward-price": ordered[0] if len(ordered) > 0 else 100,
-            "strike-price": ordered[1] if len(ordered) > 1 else 100,
-            "risk-free-rate": ordered[2] if len(ordered) > 2 else 0.05,
-            "volatility": ordered[3] if len(ordered) > 3 else 0.2,
-        }
-    if not all_date_ids:
-        ordered_dates = list(all_dates or [])
-        dates = {
-            "averaging-start-date": (
-                ordered_dates[0]
-                if len(ordered_dates) > 0
-                else (date.today() + timedelta(days=7)).isoformat()
-            ),
-            "expiration-date": (
-                ordered_dates[1]
-                if len(ordered_dates) > 1
-                else (date.today() + timedelta(days=30)).isoformat()
-            ),
-            "contract-expiration-date": (
-                ordered_dates[2]
-                if len(ordered_dates) > 2
-                else (date.today() + timedelta(days=30)).isoformat()
-            ),
-        }
-    forward = _coerce_pricer_float(params.get("forward-price"), 100)
-    strike = _coerce_pricer_float(params.get("strike-price"), 100)
-    rate = _coerce_pricer_float(params.get("risk-free-rate"), 0.05)
-    raw_volatility = _coerce_pricer_float(params.get("volatility"), 0.2)
-    averaging_start = parse_date(
-        dates.get("averaging-start-date"),
-        date.today() + timedelta(days=7),
-    )
-    expiration = parse_date(
-        dates.get("expiration-date"),
-        date.today() + timedelta(days=30),
-    )
-    contract_expiration = parse_date(
-        dates.get("contract-expiration-date"),
-        expiration,
-    )
-    context = {
-        "premium_convention": "upfront",
-        "forward": forward,
-        "rate": rate,
-        "averaging_start_date": averaging_start.isoformat(),
-        "expiration_date": expiration.isoformat(),
-        "contract_expiration_date": contract_expiration.isoformat(),
-    }
-    leg = {
-        "leg_id": "leg-1",
-        "name": "Leg 1",
-        "side": "BUY",
-        "ratio": 1,
-        "call_put": "C",
-        "strike": strike,
-        "volatility": raw_volatility,
-    }
-    snapshot = calculate_structure(
-        "asian76",
-        context,
-        {"structure_quantity": 1, "contract_multiplier": 1},
-        [leg],
-        as_of=date.today(),
-    )
-    normalized_context = snapshot["context"]
-    normalized_leg = snapshot["legs"][0]
-    return {
-        "F": forward,
-        "K": strike,
-        "r": rate,
-        "raw_v": raw_volatility,
-        "v": normalized_leg["volatility_used"],
-        "averaging_start_date": averaging_start,
-        "expiration_date": expiration,
-        "contract_expiration_date": contract_expiration,
-        "vol_adjustment_factor": normalized_context["vol_adjustment_factor"],
-        "option_business_days": normalized_context["option_business_days"],
-        "contract_business_days": normalized_context["contract_business_days"],
-        "days_to_averaging_start": (averaging_start - date.today()).days,
-        "days_to_expiry": (expiration - date.today()).days,
-        "T_A": normalized_context["time_to_averaging_start"],
-        "T": normalized_context["time_to_expiry"],
-    }
-
-
-def _parse_asian76_params(
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    inputs = _parse_asian76_model_inputs(
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    return (
-        inputs["F"],
-        inputs["K"],
-        inputs["r"],
-        inputs["v"],
-        inputs["averaging_start_date"],
-        inputs["expiration_date"],
-        inputs["days_to_expiry"],
-        inputs["T_A"],
-        inputs["T"],
-    )
-
-
-def _price_single_asset_option(
-    model,
-    call_put,
-    forward,
-    strike,
-    time_to_expiry,
-    rate,
-    volatility,
-    time_to_averaging_start=None,
-):
-    if model == "black76":
-        return black_76(
-            call_put,
-            forward,
-            strike,
-            time_to_expiry,
-            rate,
-            volatility,
-        )
-    if model == "asian76":
-        if (
-            time_to_averaging_start is None
-            or time_to_averaging_start < 0
-            or time_to_averaging_start > time_to_expiry
-        ):
-            raise ValueError(
-                "Asian-76 requires 0 <= time to averaging start <= time to expiration."
-            )
-        return asian_76(
-            call_put,
-            forward,
-            strike,
-            time_to_expiry,
-            time_to_averaging_start,
-            rate,
-            volatility,
-        )
-    raise ValueError(f"Unsupported single-asset model: {model}")
-
-
-def _build_pricer_greeks_grid(grid_id, rows, columns):
-    row_data = []
-    for row in rows:
-        item = dict(row)
-        for column in columns:
-            field = column["id"]
-            if field == "greek":
-                continue
-            item[f"__{field}_raw"] = item.get(field)
-        row_data.append(item)
-    return dag.AgGrid(
-        id=grid_id,
-        rowData=row_data,
-        columnDefs=[
-            {
-                "headerName": column["name"],
-                "field": column["id"],
-                "minWidth": 110,
-            }
-            for column in columns
-        ],
-        dashGridOptions={"domLayout": "autoHeight"},
-        className="ag-theme-alpine mckinsey-ag-grid pricer-data-grid",
-    )
-
-
-def calculate_option(
-    n_clicks,
-    option_type,
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    if _get_pricer_triggered_id() == "option-type":
-        return (
-            _build_pricer_message("Click Calculate to see results."),
-            _build_pricer_message("Greeks will appear here."),
-            _build_pricer_message("Time information will appear here."),
-            _build_pricer_message("Calculate to confirm model inputs."),
-            None,
-        )
-    if not n_clicks:
-        return (
-            _build_pricer_message("No calculation performed."),
-            _build_pricer_message("Greeks will appear here."),
-            _build_pricer_message("Time information will appear here."),
-            _build_pricer_message("Calculate to confirm model inputs."),
-            None,
-        )
-    if option_type != "asian76":
-        raise ValueError(
-            "The compatibility callback is retained for Asian-76 direct tests only; "
-            "the active page uses calculate_structure_callback."
-        )
-    inputs = _parse_asian76_model_inputs(
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    context = {
-        "premium_convention": "upfront",
-        "forward": inputs["F"],
-        "rate": inputs["r"],
-        "averaging_start_date": inputs["averaging_start_date"].isoformat(),
-        "expiration_date": inputs["expiration_date"].isoformat(),
-        "contract_expiration_date": inputs["contract_expiration_date"].isoformat(),
-    }
-    leg = {
-        "leg_id": "leg-1",
-        "name": "Leg 1",
-        "side": "BUY",
-        "ratio": 1,
-        "call_put": call_put,
-        "strike": inputs["K"],
-        "volatility": inputs["raw_v"],
-    }
-    snapshot = calculate_structure(
-        "asian76",
-        context,
-        {"structure_quantity": 1, "contract_multiplier": 1},
-        [leg],
-        as_of=date.today(),
-    )
-    result_leg = snapshot["legs"][0]
-    greeks = result_leg["unit"]["greeks"]
-    snapshot["value"] = result_leg["unit"]["value"]
-    snapshot["params"] = {
-        "F": inputs["F"],
-        "K": inputs["K"],
-        "T": inputs["T"],
-        "T_A": inputs["T_A"],
-        "r": inputs["r"],
-        "raw_v": inputs["raw_v"],
-        "v": inputs["v"],
-        "vol_adjustment_factor": inputs["vol_adjustment_factor"],
-        "option_business_days": inputs["option_business_days"],
-        "contract_business_days": inputs["contract_business_days"],
-        "call_put": call_put,
-        "averaging_start_date": inputs["averaging_start_date"].isoformat(),
-        "expiration_date": inputs["expiration_date"].isoformat(),
-        "contract_expiration_date": inputs["contract_expiration_date"].isoformat(),
-    }
-    greeks_grid = _build_pricer_greeks_grid(
-        "pricer-asian76-greeks-grid",
-        [
-            {"greek": "Delta", "value": greeks["delta"]},
-            {"greek": "Gamma", "value": greeks["gamma"]},
-            {"greek": "Theta (Pre-Averaging)", "value": greeks["theta"]},
-            {"greek": "Vega (Input Vol)", "value": greeks["vega"]},
-            {"greek": "Rho", "value": greeks["rho"]},
-        ],
-        [{"name": "Greek", "id": "greek"}, {"name": "Value", "id": "value"}],
-    )
-    return (
-        _build_pricer_result_card(
-            "Option Value",
-            _format_number(result_leg["unit"]["value"]),
-            "Asian-76 continuous arithmetic-average approximation",
-            tone="primary",
-        ),
-        greeks_grid,
-        _build_pricer_result_card(
-            "Time to Expiration",
-            f"{inputs['T']:.4f} years",
-            f"Averaging starts in {inputs['days_to_averaging_start']} days",
-        ),
-        _model_inputs_summary(snapshot),
-        snapshot,
-    )
-
-
-def _legacy_asian_snapshot(
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    return calculate_option(
-        1,
-        "asian76",
-        call_put,
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )[-1]
-
-
-def update_volatility_chart(
-    n_clicks,
-    option_type,
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    if _get_pricer_triggered_id() == "option-type" or not n_clicks:
-        return _empty_pricer_figure("Calculate option price first.")
-    if option_type != "asian76":
-        return _empty_pricer_figure("Compatibility chart is available for Asian-76.")
-    snapshot = _legacy_asian_snapshot(
-        call_put,
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    inputs = _parse_asian76_model_inputs(
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    raw_vols = np.linspace(0.05, 1.0, 40)
-    values = [
-        asian_76(
-            call_put,
-            inputs["F"],
-            inputs["K"],
-            inputs["T"],
-            inputs["T_A"],
-            inputs["r"],
-            raw_vol * inputs["vol_adjustment_factor"],
-        )[0]
-        for raw_vol in raw_vols
-    ]
-    fig = _line_figure(
-        raw_vols,
-        values,
-        "Input Contract Volatility (σ)",
-        marker_x=inputs["raw_v"],
-        marker_y=snapshot["value"],
-    )
-    return fig
-
-
-def update_rate_chart(
-    n_clicks,
-    option_type,
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    if _get_pricer_triggered_id() == "option-type" or not n_clicks:
-        return _empty_pricer_figure("Calculate option price first.")
-    if option_type != "asian76":
-        return _empty_pricer_figure("Compatibility chart is available for Asian-76.")
-    inputs = _parse_asian76_model_inputs(
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    rates = np.linspace(-0.02, 0.15, 40)
-    values = [
-        asian_76(
-            call_put,
-            inputs["F"],
-            inputs["K"],
-            inputs["T"],
-            inputs["T_A"],
-            candidate,
-            inputs["v"],
-        )[0]
-        for candidate in rates
-    ]
-    current = asian_76(
-        call_put,
-        inputs["F"],
-        inputs["K"],
-        inputs["T"],
-        inputs["T_A"],
-        inputs["r"],
-        inputs["v"],
-    )[0]
-    return _line_figure(
-        rates,
-        values,
-        "Risk-Free Rate (r)",
-        marker_x=inputs["r"],
-        marker_y=current,
-    )
-
-
-def update_time_chart(
-    n_clicks,
-    option_type,
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    if _get_pricer_triggered_id() == "option-type" or not n_clicks:
-        return _empty_pricer_figure("Calculate option price first.")
-    if option_type != "asian76":
-        return _empty_pricer_figure("Compatibility chart is available for Asian-76.")
-    snapshot = _legacy_asian_snapshot(
-        call_put,
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    series = time_decay_series(snapshot, max_points=60)
-    return _line_figure(
-        series["dates"],
-        series["values"],
-        "Valuation Date",
-        annotation=(
-            "Averaging starts; realized fixings required afterward."
-            if series["truncated_at_averaging_start"]
-            else None
-        ),
-    )
-
-
-def update_extension_chart(
-    n_clicks,
-    option_type,
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    if _get_pricer_triggered_id() == "option-type" or not n_clicks:
-        return _empty_pricer_figure("Calculate option price first.")
-    if option_type != "asian76":
-        return _empty_pricer_figure("Compatibility chart is available for Asian-76.")
-    snapshot = _legacy_asian_snapshot(
-        call_put,
-        all_params,
-        all_dates,
-        all_param_ids,
-        all_date_ids,
-    )
-    series = expiration_extension_series(snapshot)
-    return _line_figure(
-        series["dates"],
-        series["values"],
-        "Expiration / Averaging End",
-    )
-
-
-def update_correlation_chart(
-    n_clicks,
-    option_type,
-    call_put,
-    all_params,
-    all_dates,
-    all_param_ids=None,
-    all_date_ids=None,
-):
-    del call_put, all_params, all_dates, all_param_ids, all_date_ids
-    if _get_pricer_triggered_id() == "option-type" or not n_clicks:
-        return _empty_pricer_figure("Calculate option price first.")
-    if option_type != "kirk":
-        return _empty_pricer_figure(
-            "Correlation sensitivity is only available for Kirk spread options."
-        )
-    return _empty_pricer_figure("Use the active structure correlation chart.")

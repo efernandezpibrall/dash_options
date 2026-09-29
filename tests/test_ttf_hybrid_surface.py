@@ -1,5 +1,7 @@
 import base64
 from io import BytesIO
+import logging
+import pickle
 
 import numpy as np
 import pandas as pd
@@ -31,6 +33,7 @@ from vol_calibration.ttf_hybrid_surface import (
     operational_surface_frame,
 )
 from vol_calibration.pages import ttf
+from vol_calibration import ttf_hybrid_surface as hybrid_module
 from vol_calibration.components.smile_grid import create_smile_grid_figure
 
 
@@ -38,6 +41,8 @@ def _hybrid_observations():
     x = np.asarray(
         [-0.60, -0.40, -0.25, -0.12, -0.04, 0.00, 0.08, 0.20, 0.40, 0.70, 1.10]
     )
+
+
     forward = 50.0
     iv = 0.70 + 0.10 * x + 0.03 * x**2
     return pd.DataFrame(
@@ -56,6 +61,121 @@ def _hybrid_observations():
             "calibration_basis": "observed",
         }
     )
+
+
+def test_expanded_retry_reuses_failed_deterministic_starts(monkeypatch):
+    monkeypatch.setenv("GAS_START_WORKERS", "1")
+    starts = []
+
+    def failed_minimize(_objective, start, **_kwargs):
+        starts.append(tuple(np.asarray(start, dtype=float)))
+        return type("FailedFit", (), {
+            "fun": np.nan,
+            "x": np.full(len(start), np.nan),
+            "success": False,
+            "nit": 0,
+            "message": "No finite candidate",
+        })()
+
+    monkeypatch.setattr(hybrid_module, "minimize", failed_minimize)
+    observations = _hybrid_observations()
+    initial = get_defaults("TTF")
+    with pytest.raises(hybrid_module.HybridFitNoCandidate) as first:
+        hybrid_module.fit_ttf_hybrid_candidate(
+            observations, initial, n_starts=3, seed=42
+        )
+    first_starts = starts.copy()
+    starts.clear()
+    with pytest.raises(hybrid_module.HybridFitNoCandidate) as resumed:
+        hybrid_module.fit_ttf_hybrid_candidate(
+            observations, initial, n_starts=9, seed=42,
+            resume_start_count=3, resume_attempts=first.value.attempts,
+        )
+    new_starts = starts.copy()
+    starts.clear()
+    with pytest.raises(hybrid_module.HybridFitNoCandidate) as full:
+        hybrid_module.fit_ttf_hybrid_candidate(
+            observations, initial, n_starts=9, seed=42
+        )
+
+    assert len(first_starts) == 3
+    assert len(new_starts) == 6
+    assert starts == first_starts + new_starts
+    assert resumed.value.attempts == full.value.attempts
+    assert pickle.loads(pickle.dumps(first.value)).attempts == first.value.attempts
+
+
+def test_parallel_start_collection_preserves_ordered_retry_attempts(monkeypatch):
+    class InlinePool:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, tasks):
+            return map(function, tasks)
+
+    starts = []
+
+    def failed_minimize(_objective, start, **_kwargs):
+        starts.append(tuple(np.asarray(start, dtype=float)))
+        return type("FailedFit", (), {
+            "fun": np.nan,
+            "x": np.full(len(start), np.nan),
+            "success": False,
+            "nit": 0,
+            "message": "No finite candidate",
+        })()
+
+    monkeypatch.setenv("GAS_START_WORKERS", "4")
+    monkeypatch.setattr(hybrid_module, "ProcessPoolExecutor", InlinePool)
+    monkeypatch.setattr(hybrid_module, "minimize", failed_minimize)
+    observations = _hybrid_observations()
+    initial = get_defaults("TTF")
+    with pytest.raises(hybrid_module.HybridFitNoCandidate) as first:
+        hybrid_module.fit_ttf_hybrid_candidate(
+            observations, initial, n_starts=3, seed=42
+        )
+    assert len(starts) == 3
+    with pytest.raises(hybrid_module.HybridFitNoCandidate) as resumed:
+        hybrid_module.fit_ttf_hybrid_candidate(
+            observations, initial, n_starts=9, seed=42,
+            resume_start_count=3, resume_attempts=first.value.attempts,
+        )
+    assert len(starts) == 9
+    assert [attempt["start"] for attempt in resumed.value.attempts] == list(range(9))
+    assert len(set(starts)) == 9
+
+
+def test_start_pool_failure_runs_the_original_serial_starts(monkeypatch):
+    starts = []
+
+    def unavailable_pool(**_kwargs):
+        raise RuntimeError("process creation failed")
+
+    def failed_minimize(_objective, start, **_kwargs):
+        starts.append(tuple(np.asarray(start, dtype=float)))
+        return type("FailedFit", (), {
+            "fun": np.nan,
+            "x": np.full(len(start), np.nan),
+            "success": False,
+            "nit": 0,
+            "message": "No finite candidate",
+        })()
+
+    monkeypatch.setenv("GAS_START_WORKERS", "4")
+    monkeypatch.setattr(hybrid_module, "ProcessPoolExecutor", unavailable_pool)
+    monkeypatch.setattr(hybrid_module, "minimize", failed_minimize)
+    with pytest.raises(hybrid_module.HybridFitNoCandidate) as failure:
+        hybrid_module.fit_ttf_hybrid_candidate(
+            _hybrid_observations(), get_defaults("TTF"), n_starts=3, seed=42
+        )
+    assert len(starts) == 3
+    assert [attempt["start"] for attempt in failure.value.attempts] == [0, 1, 2]
 
 
 def test_pchip_core_reproduces_nodes_and_total_variance_units_exactly():
@@ -97,6 +217,22 @@ def test_hybrid_fit_is_deterministic_and_passes_complete_arbitrage_gate():
         second["tail_fit_tv_rmse"], abs=1e-12
     )
     assert first["params"] == pytest.approx(second["params"], abs=1e-10)
+
+
+def test_optional_solver_stage_timing_preserves_fit_output(monkeypatch, caplog):
+    observations = _hybrid_observations()
+    initial = get_defaults("TTF")
+    monkeypatch.delenv("CALIBRATION_TIMING", raising=False)
+    baseline = fit_ttf_hybrid_candidate(observations, initial, n_starts=1)
+    monkeypatch.setenv("CALIBRATION_TIMING", "1")
+    with caplog.at_level(logging.INFO, logger=hybrid_module.__name__):
+        timed = fit_ttf_hybrid_candidate(observations, initial, n_starts=1)
+
+    assert timed["params"] == baseline["params"]
+    assert timed["validation"] == baseline["validation"]
+    assert timed["attempts"] == baseline["attempts"]
+    stages = {record.message.split("stage=")[1].split()[0] for record in caplog.records if "stage=" in record.message}
+    assert {"core_preparation", "wing_solve", "blend_gate", "fit_total"} <= stages
 
 
 def test_hybrid_is_c1_at_core_and_wing_join_points():

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from datetime import date
 from hashlib import sha256
+from time import perf_counter
 from typing import Callable, Mapping, Sequence
 
 import numpy as np
@@ -47,6 +49,15 @@ from vol_calibration.ttf_publication import PUBLICATION_TABLE, SURFACE_TABLE
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _log_pricer_surface_timing(stage, started, **details):
+    if os.getenv("CALIBRATION_TIMING", "").lower() in {"1", "true", "yes", "on"}:
+        suffix = " ".join(f"{key}={value}" for key, value in details.items())
+        LOGGER.info(
+            "calibration_timing product=PRICER stage=%s seconds=%.6f %s",
+            stage, perf_counter() - started, suffix,
+        )
 REFERENCE_SCHEMA_VERSION = 3
 SUPPORTED_SURFACE_ASSETS = {"BRENT", "HH", "JKM", "NBP", "TTF"}
 # Kept as an empty compatibility export for callers which imported the old
@@ -93,6 +104,7 @@ def _next_month(value: date) -> date:
 
 
 def _load_publication_catalog(engine, asset: str, valuation_date: date) -> dict | None:
+    started = perf_counter()
     query = text(
         f"""
         SELECT p.publication_id, p.run_id, p.cob_date, p.published_at,
@@ -111,6 +123,9 @@ def _load_publication_catalog(engine, asset: str, valuation_date: date) -> dict 
             query,
             {"commodity": asset, "valuation_date": valuation_date},
         ).mappings().first()
+    _log_pricer_surface_timing(
+        "catalog_read", started, asset=asset, found=bool(row),
+    )
     if row is None:
         return None
     return {
@@ -128,6 +143,7 @@ def _load_publication_points(
     publication_id: str,
     contract_months: tuple[date, ...],
 ) -> pd.DataFrame:
+    started = perf_counter()
     predicates = []
     params: dict[str, object] = {"publication_id": publication_id}
     for index, month in enumerate(contract_months):
@@ -151,6 +167,9 @@ def _load_publication_points(
     )
     with engine.connect() as connection:
         points = pd.read_sql(query, connection, params=params)
+    _log_pricer_surface_timing(
+        "surface_slice_read", started, months=len(contract_months), rows=len(points),
+    )
     for column in ("contract_date", "option_expiration_date", "created_at"):
         if column in points.columns:
             points[column] = pd.to_datetime(points[column], errors="coerce")
@@ -162,6 +181,7 @@ def _load_publication_expiry_points(
     publication_id: str,
     reference_expiry: date,
 ) -> pd.DataFrame:
+    started = perf_counter()
     query = text(
         f"""
         SELECT run_id, commodity, cob_date, contract_date,
@@ -182,6 +202,9 @@ def _load_publication_expiry_points(
                 "reference_expiry": reference_expiry,
             },
         )
+    _log_pricer_surface_timing(
+        "surface_expiry_read", started, rows=len(points),
+    )
     for column in ("cob_date", "contract_date", "option_expiration_date", "created_at"):
         if column in points.columns:
             points[column] = pd.to_datetime(points[column], errors="coerce")
@@ -540,6 +563,16 @@ def _source_call_delta(row: Mapping) -> float:
     return call_delta
 
 
+def volatility_overlay_points(adjustments: Mapping, smile_coordinate: float) -> float:
+    """Vol-point overlay: parallel ATM, 25-delta call-minus-put, and wings."""
+    x = float(smile_coordinate)
+    return (
+        float(adjustments.get("atm_vol_adjustment") or 0.0)
+        + 0.5 * float(adjustments.get("skew_vol_adjustment") or 0.0) * x
+        + float(adjustments.get("smile_vol_adjustment") or 0.0) * x * x
+    )
+
+
 def _prepare_component_surface(
     points: pd.DataFrame,
     component: Mapping,
@@ -682,6 +715,7 @@ def _prepare_component_surface(
         "component": dict(component),
         "strike_nodes": selected["rebased_strike"].to_numpy(dtype=float),
         "log_moneyness_nodes": selected["log_moneyness"].to_numpy(dtype=float),
+        "source_call_delta_nodes": selected["source_call_delta"].to_numpy(dtype=float),
         "volatility_nodes": selected["volatility"].to_numpy(dtype=float),
     }
 
@@ -710,6 +744,14 @@ def _prepared_component_result(
             np.asarray(prepared["volatility_nodes"], dtype=float),
         )
     )
+    source_call_delta = float(
+        np.interp(
+            target_log_moneyness,
+            np.asarray(prepared["log_moneyness_nodes"], dtype=float),
+            np.asarray(prepared["source_call_delta_nodes"], dtype=float),
+        )
+    )
+    smile_coordinate = (0.5 - source_call_delta) / 0.25
     pricing_volatility = reference_volatility * float(
         prepared["surface_adjustment_factor"]
     )
@@ -725,34 +767,10 @@ def _prepared_component_result(
     return {
         **dict(prepared),
         "reference_volatility": reference_volatility,
+        "smile_coordinate": smile_coordinate,
         "pricing_volatility": pricing_volatility,
         "call_delta": call_delta,
     }
-
-
-def _surface_component_volatility(
-    points: pd.DataFrame,
-    component: Mapping,
-    *,
-    asset: str,
-    model: str,
-    valuation_date: date,
-    current_forward: float,
-    strike: float,
-) -> dict:
-    prepared = _prepare_component_surface(
-        points,
-        component,
-        asset=asset,
-        valuation_date=valuation_date,
-        current_forward=current_forward,
-    )
-    return _prepared_component_result(
-        prepared,
-        model=model,
-        current_forward=current_forward,
-        strike=strike,
-    )
 
 
 def _component_price(
@@ -2040,14 +2058,16 @@ def build_published_surface_reference(
                 )
             skew_input_volatility = input_volatility - atm_input_volatility
             try:
-                manual_adjustment = 0.01 * sum(
-                    float(row.get(field) or 0.0)
+                adjustment_values = {
+                    field: float(row.get(field) or 0.0)
                     for field in (
                         "atm_vol_adjustment",
                         "skew_vol_adjustment",
                         "smile_vol_adjustment",
                     )
-                )
+                }
+                if not all(math.isfinite(value) for value in adjustment_values.values()):
+                    raise ValueError("Volatility adjustments must be finite.")
             except (TypeError, ValueError, OverflowError) as exc:
                 raise SurfaceReferenceError(
                     "Volatility adjustments must be finite."
@@ -2056,9 +2076,14 @@ def build_published_surface_reference(
                 {
                     **item,
                     "input_volatility": item["reference_volatility"]
-                    + manual_adjustment,
+                    + 0.01 * volatility_overlay_points(
+                        adjustment_values, item["smile_coordinate"]
+                    ),
                     "pricing_volatility": (
-                        item["reference_volatility"] + manual_adjustment
+                        item["reference_volatility"]
+                        + 0.01 * volatility_overlay_points(
+                            adjustment_values, item["smile_coordinate"]
+                        )
                     )
                     * item["surface_adjustment_factor"],
                 }
@@ -2108,6 +2133,11 @@ def build_published_surface_reference(
                 "surface_atm_input_vol": atm_input_volatility,
                 "surface_skew_input_vol": skew_input_volatility,
                 "surface_pricing_vol": pricing_volatility,
+                "surface_smile_coordinate": (
+                    component_results[0]["smile_coordinate"]
+                    if len(component_results) == 1
+                    else None
+                ),
                 "surface_effective_input_vol": effective_input_volatility,
                 "surface_effective_pricing_vol": effective_pricing_volatility,
                 "surface_input_tooltip": tooltip,
@@ -2117,6 +2147,7 @@ def build_published_surface_reference(
                         "contract_month": item["contract_month"].isoformat(),
                         "input_volatility": item["reference_volatility"],
                         "pricing_volatility": item["pricing_volatility"],
+                        "smile_coordinate": item["smile_coordinate"],
                         "expiry_adjustment_factor": item[
                             "surface_adjustment_factor"
                         ],

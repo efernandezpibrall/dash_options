@@ -38,7 +38,6 @@ from options.option_expiry_engine import (
     business_days_between,
     get_business_calendar,
     get_surface_calendar_mapping,
-    require_platts_asia_lng_publication_year,
     resolve_asian_averaging_schedule,
     resolve_option_expiry,
     resolve_surface_expiry,

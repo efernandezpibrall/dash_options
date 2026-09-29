@@ -241,10 +241,10 @@ def test_new_pricer_consolidates_surface_vols_and_places_premium_then_value():
         "surfaceRows" in column["valueGetter"]["function"]
         for column in volatility_columns
     )
-    assert "pricingRows" in volatility_columns[0]["valueGetter"]["function"]
-    assert "surface_effective_input_vol" in volatility_columns[0][
-        "valueGetter"
-    ]["function"]
+    input_vol_getter = volatility_columns[0]["valueGetter"]["function"]
+    assert "surface_input_vol" in input_vol_getter
+    assert "pricingRows" not in input_vol_getter
+    assert "surface_effective_input_vol" not in input_vol_getter
     adjustment_columns = definitions[3]["children"]
     assert [column["headerName"] for column in adjustment_columns] == [
         "ATM",
@@ -258,6 +258,12 @@ def test_new_pricer_consolidates_surface_vols_and_places_premium_then_value():
     ]
     assert all(column["editable"] for column in adjustment_columns)
     assert all("volatility percentage points" in column["headerTooltip"] for column in adjustment_columns)
+    assert "whole published surface" in adjustment_columns[0]["headerTooltip"]
+    assert "25-delta call strike" in adjustment_columns[1]["headerTooltip"]
+    assert "both 25-delta wing strikes" in adjustment_columns[2]["headerTooltip"]
+    assert all(
+        "tooltipValueGetter" not in column for column in adjustment_columns
+    )
     pricing_vol_group = definitions[4]
     assert pricing_vol_group["headerName"] == ""
     assert "pricer-result-column-group-volatility" in pricing_vol_group[
@@ -329,7 +335,16 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
             for column in columns
             if (column.get("field") or column.get("colId")) != "name"
         )
-        assert all(column.get("tooltipValueGetter") for column in columns)
+        assert all(
+            column.get("tooltipValueGetter")
+            for column in columns
+            if column.get("field") not in pricer.VOLATILITY_ADJUSTMENT_FIELDS
+        )
+        assert all(
+            "tooltipValueGetter" not in column
+            for column in columns
+            if column.get("field") in pricer.VOLATILITY_ADJUSTMENT_FIELDS
+        )
 
     definitions = pricer._leg_column_defs(
         "black76",
@@ -359,7 +374,7 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
     assert current_grid.dashGridOptions["rowHeight"] == 28
     assert current_grid.dashGridOptions["headerHeight"] == 30
     assert current_grid.dashGridOptions["groupHeaderHeight"] == 24
-    assert current_grid.dashGridOptions["tooltipShowMode"] == "whenTruncated"
+    assert "tooltipShowMode" not in current_grid.dashGridOptions
     assert current_grid.dashGridOptions["rowSelection"]["checkboxes"] is False
     assert "selectionColumnDef" not in current_grid.dashGridOptions
     current_name = next(
@@ -729,6 +744,102 @@ def test_phe_allows_the_governed_one_day_january_2033_surface_extension():
     assert result["surface_pricing_vol"] > 0.5
     assert "2032-12-27 to 2032-12-28" in result["surface_pricing_tooltip"]
     assert "extended" in result["surface_pricing_tooltip"]
+
+
+def test_committed_atm_edit_reaches_surface_when_row_data_lags():
+    context, _component = _monthly_context(
+        "TTF", "black76", "2026-10-01", forward=12.0
+    )
+    row = {
+        **_leg(strike=12.0),
+        "atm_vol_adjustment": 0.0,
+        "skew_vol_adjustment": 0.0,
+        "smile_vol_adjustment": 0.0,
+    }
+    event = [{
+        "colId": "atm_vol_adjustment",
+        "oldValue": 0.0,
+        "newValue": 20.0,
+        "data": {**row, "atm_vol_adjustment": 20.0},
+    }]
+    edited = pricer._rows_with_committed_leg_edit([row], event)
+    assert edited[0]["atm_vol_adjustment"] == 20.0
+    assert row["atm_vol_adjustment"] == 0.0
+    assert pricer._surface_reference_input_signature(
+        "TTF", "black76", edited, context, AS_OF.isoformat()
+    ) != pricer._surface_reference_input_signature(
+        "TTF", "black76", [row], context, AS_OF.isoformat()
+    )
+
+    payload = surface_reference.build_published_surface_reference(
+        "TTF",
+        "black76",
+        context,
+        edited,
+        AS_OF,
+        surface_loader=_loader({(2026, 10): 0.4}),
+    )
+    factor = payload["rows"]["leg-1"]["surface_component_volatilities"][0][
+        "expiry_adjustment_factor"
+    ]
+    assert payload["rows"]["leg-1"]["surface_input_vol"] == pytest.approx(0.4)
+    assert payload["rows"]["leg-1"]["surface_effective_input_vol"] == pytest.approx(
+        0.6
+    )
+    assert payload["rows"]["leg-1"]["surface_effective_pricing_vol"] == pytest.approx(
+        0.6 * factor
+    )
+
+
+def test_skew_and_smile_change_published_25_delta_wings():
+    context, component = _monthly_context(
+        "TTF", "black76", "2026-10-01", forward=100.0
+    )
+    expiry = date.fromisoformat(component["option_expiration_date"])
+    time_to_expiry = (expiry - AS_OF).days / 365.25
+    legs = [
+        {
+            **_leg(
+                f"leg-{index}",
+                strike=delta_node_to_strike(100.0, time_to_expiry, delta, 0.4),
+                call_put=call_put,
+            ),
+            "atm_vol_adjustment": 1.0,
+            "skew_vol_adjustment": 4.0,
+            "smile_vol_adjustment": 3.0,
+        }
+        for index, (delta, call_put) in enumerate(
+            ((0.75, "P"), (0.5, "C"), (0.25, "C"), (0.25, "P")),
+            start=1,
+        )
+    ]
+    payload = surface_reference.build_published_surface_reference(
+        "TTF",
+        "black76",
+        context,
+        legs,
+        AS_OF,
+        surface_loader=_loader({(2026, 10): 0.4}, saved_forward=100.0),
+    )
+    rows = payload["rows"]
+    assert [
+        rows[f"leg-{index}"]["surface_smile_coordinate"]
+        for index in range(1, 5)
+    ] == pytest.approx([-1.0, 0.0, 1.0, 1.0])
+    assert [
+        rows[f"leg-{index}"]["surface_input_vol"]
+        for index in range(1, 5)
+    ] == pytest.approx([0.4] * 4)
+    assert [
+        rows[f"leg-{index}"]["surface_effective_input_vol"]
+        for index in range(1, 5)
+    ] == pytest.approx([0.42, 0.41, 0.46, 0.46])
+    for index in range(1, 5):
+        row = rows[f"leg-{index}"]
+        factor = row["surface_component_volatilities"][0]["expiry_adjustment_factor"]
+        assert row["surface_effective_pricing_vol"] == pytest.approx(
+            row["surface_effective_input_vol"] * factor
+        )
 
 
 @pytest.mark.parametrize(
@@ -1287,10 +1398,14 @@ def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility(
     component_vols = calculation_rows[0]["component_volatilities"]
     assert len(component_vols) == 3
     assert source_signature["rows"][0]["component_volatilities"] == component_vols
-    manual_adjustment = 0.0125
+    coordinates = []
     for component_volatility in component_vols:
         month = date.fromisoformat(component_volatility["contract_month"])
-        expected_input = vols[(month.year, month.month)] + manual_adjustment
+        x = component_volatility["smile_coordinate"]
+        coordinates.append(x)
+        expected_input = vols[(month.year, month.month)] + 0.01 * (
+            1.0 - 0.125 * x + 0.5 * x * x
+        )
         assert component_volatility["input_volatility"] == pytest.approx(
             expected_input
         )
@@ -1298,6 +1413,7 @@ def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility(
             expected_input
             * component_volatility["expiry_adjustment_factor"]
         )
+    assert len({round(x, 6) for x in coordinates}) > 1
     assert source_signature["rows"][0]["effective_pricing_vol"] == pytest.approx(
         payload["rows"]["leg-1"]["surface_effective_pricing_vol"],
         abs=1e-12,
@@ -1314,8 +1430,17 @@ def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility(
     assert [item["pricing_volatility"] for item in components] == pytest.approx(
         [item["pricing_volatility"] for item in component_vols]
     )
-    assert snapshot["input"]["legs"][0]["component_volatilities"] == (
-        component_vols
+    assert snapshot["input"]["legs"][0]["component_volatilities"] == [
+        {key: value for key, value in item.items() if key != "smile_coordinate"}
+        for item in component_vols
+    ]
+    snapshot["_ui_input_signature"] = {"published_surface": source_signature}
+    strip_grid = pricer._build_strip_component_grid(snapshot)
+    assert [row["input_vol_pct"] for row in strip_grid.rowData] == pytest.approx(
+        [35.0, 42.0, 48.0]
+    )
+    assert [row["pricing_vol_pct"] for row in strip_grid.rowData] == pytest.approx(
+        [100.0 * component["pricing_volatility"] for component in components]
     )
     expected_value = 0.0
     expected_delta = 0.0
@@ -1417,7 +1542,8 @@ def test_monthly_manual_vol_adjustment_precedes_the_mandatory_expiry_factor(
     factor = payload["rows"]["leg-1"]["surface_component_volatilities"][0][
         "expiry_adjustment_factor"
     ]
-    manual_adjustment = 0.0125
+    x = payload["rows"]["leg-1"]["surface_smile_coordinate"]
+    manual_adjustment = 0.01 * (1.0 - 0.125 * x + 0.5 * x * x)
     expected_pricing_volatility = (0.4 + manual_adjustment) * factor
     signature_row = source_signature["rows"][0]
 

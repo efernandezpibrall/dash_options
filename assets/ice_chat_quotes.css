@@ -1,9 +1,10 @@
 .ice-chat-quotes-page {
+    scroll-margin-top: 110px;
     width: 100%;
     max-width: none;
     box-sizing: border-box;
     margin: 0;
-    padding: 20px 24px 32px;
+    padding: 12px 0 24px;
     color: var(--color-text-primary);
     background: var(--color-bg-light);
 }
@@ -16,9 +17,9 @@
     margin-bottom: 14px;
 }
 
-.ice-chat-page-header h1 {
+.ice-chat-page-header h2 {
     margin: 0;
-    font-size: 24px;
+    font-size: 18px;
     font-weight: 650;
     letter-spacing: -0.02em;
 }
@@ -39,6 +40,15 @@
     border-radius: 9px;
     background: var(--color-bg-white);
     box-shadow: var(--shadow-sm);
+}
+
+.ice-chat-feed-unavailable {
+    padding: 8px 10px;
+    border: 1px solid var(--color-border-light);
+    border-radius: 9px;
+    color: var(--color-text-secondary);
+    background: var(--color-bg-white);
+    font-size: 12px;
 }
 
 .ice-chat-status-item {
@@ -90,9 +100,7 @@
 }
 
 .ice-chat-filter-bar {
-    position: sticky;
-    top: 97px;
-    z-index: 20;
+    position: static;
     display: flex;
     align-items: flex-end;
     gap: 10px;
@@ -130,7 +138,7 @@
     margin-bottom: 7px;
 }
 
-.ice-chat-section-header h2 { margin: 0; font-size: 16px; font-weight: 650; }
+.ice-chat-section-header h3 { margin: 0; font-size: 16px; font-weight: 650; }
 
 .ice-chat-card {
     margin-bottom: 14px;
@@ -159,7 +167,7 @@
     background: linear-gradient(180deg, #ffffff 0%, #f5faf9 100%);
 }
 
-.ice-chat-edge-card > .ice-chat-section-header h2 {
+.ice-chat-edge-card > .ice-chat-section-header h3 {
     color: #0f172a;
     font-size: 17px;
     font-weight: 750;
@@ -202,7 +210,7 @@
     box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
 }
 
-.ice-chat-table-card > .ice-chat-section-header h2 {
+.ice-chat-table-card > .ice-chat-section-header h3 {
     color: #0f172a;
     font-size: 17px;
     font-weight: 750;
@@ -503,7 +511,7 @@
 }
 
 @media (max-width: 640px) {
-    .ice-chat-quotes-page { padding: 16px; }
+    .ice-chat-quotes-page { padding: 12px 0; }
     .ice-chat-status-item { flex: 1 1 42%; border-right: 0; }
     .ice-chat-filter-group,
     .ice-chat-filter-window,
@@ -515,6 +523,6 @@
 }
 
 @media (max-width: 360px) {
-    .ice-chat-quotes-page { padding: 12px; }
+    .ice-chat-quotes-page { padding: 12px 0; }
     .ice-chat-status-item { flex-basis: 100%; }
 }

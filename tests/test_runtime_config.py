@@ -4,6 +4,8 @@ import db_fallback
 from runtime_config import clear_runtime_config_cache, config_bool, config_value
 from vol_calibration.feature_flags import (
     background_jobs_enabled,
+    gas_batch_jobs_enabled,
+    inline_calibration_enabled,
     publication_enabled,
     ttf_intraday_writes_enabled,
     ttf_publication_enabled,
@@ -132,12 +134,25 @@ def test_all_calibration_mutation_flags_default_to_disabled(
         "VOL_CALIBRATION_WRITES_ENABLED",
         "VOL_CALIBRATION_PUBLISH_ENABLED",
         "VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED",
+        "VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED",
     ):
         monkeypatch.delenv(name, raising=False)
 
     assert writes_enabled() is False
     assert publication_enabled() is False
     assert background_jobs_enabled() is False
+    assert gas_batch_jobs_enabled() is False
+
+
+def test_vol_trades_calibration_is_visible_by_default_and_can_be_disabled(
+    monkeypatch, tmp_path
+):
+    _use_empty_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("VOL_TRADES_INLINE_CALIBRATION_ENABLED", raising=False)
+    assert inline_calibration_enabled() is True
+
+    monkeypatch.setenv("VOL_TRADES_INLINE_CALIBRATION_ENABLED", "false")
+    assert inline_calibration_enabled() is False
 
 
 def test_calibration_mutation_flags_can_be_enabled_from_config(
@@ -194,3 +209,12 @@ def test_background_jobs_cannot_bypass_disabled_writes(monkeypatch):
     monkeypatch.setenv("VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED", "true")
 
     assert background_jobs_enabled() is False
+
+
+def test_gas_batch_jobs_have_an_independent_explicit_flag(monkeypatch, tmp_path):
+    _use_empty_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("VOL_CALIBRATION_WRITES_ENABLED", "false")
+    monkeypatch.setenv("VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED", "true")
+
+    assert background_jobs_enabled() is False
+    assert gas_batch_jobs_enabled() is True

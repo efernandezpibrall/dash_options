@@ -474,7 +474,7 @@ def test_snapshot_dropdown_uses_exact_ids_and_prioritizes_completed_intraday(mon
         "intraday-id",
         "settlement-id",
     ]
-    assert options[0]["label"] == "Intraday 12:30 GST"
+    assert options[0]["label"] == "10 Aug · Intraday 12:30 GST"
     assert selected == "intraday-id"
 
 

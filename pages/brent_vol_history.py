@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from html import escape
 from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any
@@ -32,22 +33,12 @@ from sqlalchemy import bindparam, text
 
 from options.calibration_engine.converters.delta import delta_to_strike, strike_to_delta
 from options.calibration_engine.io.brent_market import (
-    AMERICAN_TREE_STEPS,
     CALIBRATION_MONEYNESS_BAND,
     DISPLAY_MONEYNESS_BAND,
     MIN_OPEN_INTEREST,
-    _american_implied_vol,
     prepare_brent_calibration_observations,
 )
-from options.option_contract_conventions import FlatDiscountCurve
-from options.options_library import (
-    american_futures_equity_style_implied_volatility,
-    black_76_equity_style_implied_volatility,
-)
-from options.ttf_volatility import (
-    TTFVolatilityError,
-    implied_volatility_from_settlement as tfo_implied_volatility,
-)
+from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
 from runtime_config import get_database_engine
 from brent_option_chain_refresh import (
     INTRADAY_REQUEST_KIND,
@@ -74,6 +65,7 @@ from vol_calibration.inline_workspace import (
     create_inline_workspace,
     resolve_inline_context,
 )
+from pages import ice_chat_quotes
 
 
 PRODUCT = "BRENT"
@@ -216,22 +208,30 @@ def load_available_snapshots(
             WHERE date_rank = 1
             ORDER BY business_date DESC
             LIMIT :limit
-        ), today_intraday AS (
+        ), recent_intraday AS (
             SELECT *,
                    row_number() OVER (
+                       PARTITION BY business_date
                        ORDER BY observed_at DESC, created_at DESC, snapshot_id DESC
                    ) AS intraday_rank
             FROM available
             WHERE snapshot_kind = :intraday_kind
               AND has_chain
-              AND business_date =
-                  (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Dubai')::date
+              AND (
+                  :product = 'BRENT'
+                  OR business_date =
+                      (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Dubai')::date
+              )
+        ), intraday_dates AS (
+            SELECT * FROM recent_intraday
+            WHERE intraday_rank = 1
+            ORDER BY business_date DESC
+            LIMIT 5
         ), selected AS (
             SELECT snapshot_id, business_date, observed_at, input_fingerprint,
                    option_quote_count, forward_count, metadata, snapshot_kind,
                    0 AS sort_group
-            FROM today_intraday
-            WHERE intraday_rank = 1
+            FROM intraday_dates
             UNION ALL
             SELECT snapshot_id, business_date, observed_at, input_fingerprint,
                    option_quote_count, forward_count, metadata, snapshot_kind,
@@ -1062,7 +1062,7 @@ def load_icap_settlement_surface(
     refresh: bool = False,
     snapshot_loader=None,
 ) -> pd.DataFrame:
-    """Reuse Vol Calibration's governed TTF settlement snapshot contract."""
+    """Reuse the governed TTF settlement snapshot contract."""
     if snapshot_loader is None:
         from pages.vol_surface import get_operational_surface_snapshot
 
@@ -1190,9 +1190,8 @@ def load_latest_calibrated_surface(
 ) -> pd.DataFrame:
     """Load the latest active calibrated publication for the selected product.
 
-    This is a current-publication comparison, not a point-in-time reconstruction:
-    the latest active revision remains visible alongside an older selected market
-    snapshot, with both the publication COB and timestamp carried into the chart.
+    Brent uses the active revision for the selected exact COB. Other products
+    retain their current-publication comparison with a labelled publication COB.
     """
     product = _normalize_product(product)
     db_engine = engine or get_database_engine(required=False)
@@ -1211,6 +1210,7 @@ def load_latest_calibrated_surface(
     if pd.isna(selected_cob) or not normalized_contracts:
         return _empty_calibrated_surface("invalid_selection")
     commodity = _product_spec(product)["published_product"]
+    cob_filter = "AND p.cob_date = :selected_cob" if product == "BRENT" else ""
     catalog_query = text(
         f"""
         SELECT p.publication_id,
@@ -1223,6 +1223,7 @@ def load_latest_calibrated_surface(
         WHERE p.commodity = :commodity
           AND p.status = 'published'
           AND p.is_active
+          {cob_filter}
         ORDER BY p.cob_date DESC, p.published_at DESC, p.created_at DESC
         LIMIT 1
         """
@@ -1230,7 +1231,10 @@ def load_latest_calibrated_surface(
     catalog = pd.read_sql(
         catalog_query,
         db_engine,
-        params={"commodity": commodity},
+        params={
+            "commodity": commodity,
+            **({"selected_cob": selected_cob.date()} if product == "BRENT" else {}),
+        },
     )
     if catalog.empty:
         return _empty_calibrated_surface(
@@ -1548,61 +1552,6 @@ def _row_delta_x(
         volatility=row.get(volatility_column),
         dte=dte,
         put_call=row.get("put_call"),
-    )
-
-
-def _page_implied_volatility(
-    product: str,
-    put_call: str,
-    price: float,
-    forward: float,
-    strike: float,
-    time_to_expiry: float,
-    discount_rate: float | None = None,
-) -> float:
-    resolved_product = _normalize_product(product)
-    if resolved_product == "TFO":
-        try:
-            return float(
-                tfo_implied_volatility(
-                    put_call,
-                    forward,
-                    strike,
-                    time_to_expiry,
-                    price,
-                )
-            )
-        except (ArithmeticError, TTFVolatilityError, ValueError):
-            return float("nan")
-    if resolved_product in {"ON", "LNE"}:
-        if discount_rate is None or not math.isfinite(float(discount_rate)):
-            return float("nan")
-        curve = FlatDiscountCurve(
-            float(discount_rate), "BLOOMBERG_OPT_FINANCE_RT"
-        )
-        inverter = (
-            american_futures_equity_style_implied_volatility
-            if resolved_product == "ON"
-            else black_76_equity_style_implied_volatility
-        )
-        return float(
-            inverter(
-                put_call,
-                price,
-                forward,
-                strike,
-                time_to_expiry,
-                curve,
-                **({"steps": AMERICAN_TREE_STEPS} if resolved_product == "ON" else {}),
-            )
-        )
-    return _american_implied_vol(
-        put_call,
-        price,
-        forward,
-        strike,
-        time_to_expiry,
-        steps=AMERICAN_TREE_STEPS,
     )
 
 
@@ -3221,15 +3170,37 @@ def build_expiry_figure(
         )
         commodity = str(metadata.get("commodity") or spec["published_product"])
         publication_id = str(metadata.get("publication_id") or "unavailable")
+        brent_policy = (
+            calibrated["calibration_policy_version"].dropna().astype(str).unique().tolist()
+            if resolved_product == "BRENT" and "calibration_policy_version" in calibrated
+            else []
+        )
+        current_brent_policy = brent_policy == [BRENT_SINGLE_SURFACE_POLICY_VERSION]
+        brent_surface_label = (
+            "BRENT surface" if current_brent_policy else "Legacy BRENT surface"
+        )
+        hover_surface_label = (
+            brent_surface_label
+            if resolved_product == "BRENT"
+            else f"Calibrated {commodity} publication"
+        )
         figure.add_trace(
             go.Scatter(
                 x=calibrated["_axis_x"],
                 y=100.0 * calibrated["volatility"],
                 mode="lines",
-                name=f"Calibrated {commodity} · COB {cob_label}",
+                name=(
+                    f"{brent_surface_label} · COB {cob_label}"
+                    if resolved_product == "BRENT"
+                    else f"Calibrated {commodity} · COB {cob_label}"
+                ),
                 legendrank=35,
                 meta={"legend_layer": "calibrated"},
-                line={"color": "#7C3AED", "width": 2.4, "dash": "dash"},
+                line=(
+                    {"color": "#E69525", "width": 2.8}
+                    if resolved_product == "BRENT"
+                    else {"color": "#7C3AED", "width": 2.4, "dash": "dash"}
+                ),
                 customdata=np.column_stack(
                     [
                         calibrated["strike"],
@@ -3240,7 +3211,7 @@ def build_expiry_figure(
                     ]
                 ),
                 hovertemplate=(
-                    f"<b>Calibrated {commodity} publication</b>"
+                    f"<b>{hover_surface_label}</b>"
                     "<br>Strike %{customdata[0]:.3f}"
                     + axis_hover
                     + " · IV <b>%{y:.2f}%</b>"
@@ -3357,6 +3328,28 @@ def build_expiry_figure(
         else pd.DataFrame()
     )
     quality = _intraday_expiry_quality(raw, expiry_trade_tape, prior_reference)
+    option_expirations = (
+        pd.to_datetime(raw["option_expiration_date"], errors="coerce").dropna()
+        if "option_expiration_date" in raw
+        else pd.Series(dtype="datetime64[ns]")
+    )
+    if resolved_product == "BRENT":
+        for layer, label, color, symbol in (
+            ("ice-bid", "ICE bid quote", "#B42318", "triangle-down"),
+            ("ice-offer", "ICE offer quote", "#067647", "triangle-up"),
+            ("ice-single", "ICE single quote", "#6941C6", "circle"),
+        ):
+            figure.add_trace(
+                go.Scatter(
+                    x=[], y=[], mode="markers", name=label,
+                    meta={"legend_layer": layer, "role": "ice-chat-quote"},
+                    marker={"color": color, "symbol": symbol, "size": 10,
+                            "line": {"color": "#ffffff", "width": 1}},
+                    hovertemplate="%{text}<extra></extra>",
+                    showlegend=False,
+                ),
+                secondary_y=False,
+            )
     figure.update_layout(
         template="plotly_white",
         height=308,
@@ -3381,7 +3374,15 @@ def build_expiry_figure(
             f"vol-trades-{resolved_product.lower()}-"
             f"{expiry.date().isoformat()}-{x_axis}"
         ),
-        meta={"expiry": expiry.date().isoformat(), "quality": quality},
+        meta={
+            "expiry": expiry.date().isoformat(),
+            "option_expiration_date": (
+                option_expirations.iloc[0].date().isoformat()
+                if not option_expirations.empty
+                else None
+            ),
+            "quality": quality,
+        },
     )
     return figure
 
@@ -3967,7 +3968,7 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
             if not layer:
                 continue
             trace_entries.append({"index": index, "layer": layer})
-            if _trace_has_points(trace):
+            if _trace_has_points(trace) or layer.startswith("ice-"):
                 available.add(layer)
             if _trace_has_new_volume_edge(trace):
                 new_volume_layers.add(layer)
@@ -3978,7 +3979,15 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
                 continue
             shape_entries.append({"index": index, "layer": layer})
             available.add(layer)
-        graphs[expiry] = {"traces": trace_entries, "shapes": shape_entries}
+        iv_range = getattr(figure.layout.yaxis, "range", None)
+        graphs[expiry] = {
+            "traces": trace_entries,
+            "shapes": shape_entries,
+            "iv_range": list(iv_range) if iv_range is not None else None,
+            "option_expiration_date": dict(figure.layout.meta or {}).get(
+                "option_expiration_date"
+            ),
+        }
     available_layers = [
         layer for layer in EXPIRY_LEGEND_LAYER_ORDER if layer in available
     ]
@@ -4898,6 +4907,9 @@ EXPIRY_LEGEND_LAYER_ORDER = (
     "put-mid",
     "executable-band",
     "trades",
+    "ice-bid",
+    "ice-offer",
+    "ice-single",
     "prior-settlement",
     "bloomberg-settlement",
     "icap-settlement",
@@ -4937,6 +4949,21 @@ EXPIRY_LEGEND_LAYER_SPECS = {
             "Show or hide trade-time volatility; filled markers are exact "
             "midpoints and hollow markers are prevailing midpoints"
         ),
+    },
+    "ice-bid": {
+        "label": "ICE bid", "group": "iv",
+        "swatch": "brent-vol-history-legend-ice-bid",
+        "description": "Show ICE Chat bid implied volatility quotes",
+    },
+    "ice-offer": {
+        "label": "ICE offer", "group": "iv",
+        "swatch": "brent-vol-history-legend-ice-offer",
+        "description": "Show ICE Chat offer implied volatility quotes",
+    },
+    "ice-single": {
+        "label": "ICE single", "group": "iv",
+        "swatch": "brent-vol-history-legend-ice-single",
+        "description": "Show ICE Chat single-price implied volatility quotes",
     },
     "prior-settlement": {
         "label": "Prior settle",
@@ -5416,6 +5443,7 @@ layout = html.Main(
             id="brent-vol-history-calibration-context",
             storage_type="memory",
         ),
+        dcc.Store(id="brent-single-publication-revision", storage_type="memory"),
         html.Div(
             id="brent-vol-history-calibration-panel",
             className="brent-vol-history-calibration-panel",
@@ -5445,6 +5473,10 @@ layout = html.Main(
                             ),
                         ),
                         build_expiry_legend(),
+                        html.Div(
+                            id="ice-chat-overlay-status", role="status",
+                            className="brent-vol-history-ice-overlay-status",
+                        ),
                     ],
                     className=(
                         "inline-section-header supply-dest-section-header "
@@ -5549,6 +5581,7 @@ layout = html.Main(
                 "brent-vol-history-trade-table-section"
             ),
         ),
+        ice_chat_quotes.layout,
         html.Section(
             [
                 html.Div(
@@ -5668,7 +5701,11 @@ def update_inline_calibration_state(
 ):
     current = state or {"open": False}
     trigger = ctx.triggered_id
-    if trigger == "brent-vol-history-calibration-toggle":
+    clicks = int(_n_clicks or 0)
+    toggle_clicked = (
+        "brent-vol-history-calibration-toggle.n_clicks" in ctx.triggered_prop_ids
+    )
+    if toggle_clicked and clicks:
         is_open = not bool(current.get("open"))
     elif bool(current.get("open")) and trigger in {
         "brent-vol-history-product",
@@ -6551,10 +6588,11 @@ def update_history_dates(
         observed = pd.to_datetime(snapshot.observed_at, errors="coerce", utc=True)
         if str(snapshot.snapshot_kind).upper() == "INTRADAY":
             local = observed.tz_convert("Asia/Dubai") if not pd.isna(observed) else observed
+            date_label = pd.Timestamp(snapshot.business_date).strftime("%d %b")
             label = (
-                f"Intraday {local.strftime('%H:%M')} GST"
+                f"{date_label} · Intraday {local.strftime('%H:%M')} GST"
                 if not pd.isna(local)
-                else "Intraday"
+                else f"{date_label} · Intraday"
             )
         else:
             label = pd.Timestamp(snapshot.business_date).strftime("%d %b %Y")
@@ -6689,6 +6727,7 @@ def _render_jkm_history(
     Input("brent-vol-history-date", "value"),
     Input("brent-vol-history-x-axis", "value"),
     Input("brent-vol-history-product", "value"),
+    Input("brent-single-publication-revision", "data"),
     State("brent-vol-history-detail-expiry", "value"),
     State("brent-vol-history-trade-window-state", "data"),
     State("brent-vol-history-expiry-layers", "options"),
@@ -6698,6 +6737,7 @@ def render_history(
     selected_snapshot_id,
     x_axis=X_AXIS_STRIKE,
     product=PRODUCT,
+    _published_revision=None,
     current_detail_expiry=None,
     current_trade_window=None,
     current_legend_options=None,
@@ -6829,7 +6869,7 @@ def render_history(
                     )
                 except Exception:
                     prior_settlement_chain = pd.DataFrame()
-        if snapshot_kind == "INTRADAY":
+        if product == "BRENT" or snapshot_kind == "INTRADAY":
             published = pd.DataFrame()
         elif product == "TFO":
             published = load_icap_settlement_surface(selected_date)
@@ -6916,6 +6956,7 @@ def render_history(
                 "product": product,
                 "business_date": selected_date,
                 "snapshot_kind": snapshot_kind,
+                "observed_at": pd.Timestamp(snapshot["observed_at"]).isoformat(),
                 "display_expiries": display_expiries,
                 "intraday_universe_policy_version": universe.get("policy_version"),
             },
@@ -7012,6 +7053,182 @@ def update_expiry_layer_visibility(selected_layers, manifest, graph_ids):
             )
         updates.append(patch)
     return updates
+
+
+ICE_QUOTE_LAYERS = {
+    "ice-bid": ("bid", "bid_implied_volatility"),
+    "ice-offer": ("offer", "offer_implied_volatility"),
+    "ice-single": ("single_price", "single_implied_volatility"),
+}
+
+
+def ice_quote_overlay_points(
+    rows: list[dict],
+    snapshot: dict | None,
+    expiry: str,
+    x_axis: str,
+    option_expiration_date: str | None = None,
+) -> tuple[dict[str, dict], int]:
+    """Project same-day Brent quote events onto one saved expiry smile."""
+    empty = {layer: {"x": [], "y": [], "text": [], "opacity": []}
+             for layer in ICE_QUOTE_LAYERS}
+    if not snapshot or snapshot.get("product") != "BRENT":
+        return empty, 0
+    business_date = str(snapshot.get("business_date") or "")
+    cutoff = pd.to_datetime(snapshot.get("observed_at"), errors="coerce", utc=True)
+    if pd.isna(cutoff):
+        return empty, 0
+    omitted = 0
+    for row in rows:
+        if str(row.get("product_code") or "B").upper() not in {"B", "BRENT"}:
+            continue
+        if str(row.get("contract_month") or "")[:10] != expiry:
+            continue
+        if (
+            option_expiration_date
+            and str(row.get("option_expiration_date") or "")[:10]
+            != option_expiration_date
+        ):
+            continue
+        observed = pd.to_datetime(row.get("observed_at"), errors="coerce", utc=True)
+        if pd.isna(observed) or observed > cutoff:
+            continue
+        if observed.tz_convert("Asia/Dubai").date().isoformat() != business_date:
+            continue
+        strike = _numeric_or_none(row.get("strike"))
+        side = str(row.get("option_type") or "").upper()
+        if strike is None or side not in {"C", "P"}:
+            omitted += 1
+            continue
+        for layer, (price_field, iv_field) in ICE_QUOTE_LAYERS.items():
+            price = _numeric_or_none(row.get(price_field))
+            iv = _numeric_or_none(row.get(iv_field))
+            if price is None:
+                continue
+            if iv is None or iv <= 0:
+                omitted += 1
+                continue
+            x = strike
+            if _normalize_x_axis(x_axis) == X_AXIS_DELTA:
+                expiration = pd.to_datetime(
+                    row.get("option_expiration_date"), errors="coerce"
+                )
+                dte = (
+                    (expiration.date() - observed.tz_convert("Asia/Dubai").date()).days
+                    if pd.notna(expiration) else None
+                )
+                x = _delta_x_from_market_inputs(
+                    strike=strike, forward=row.get("forward"),
+                    volatility=iv, dte=dte, put_call=side,
+                )
+                if not np.isfinite(x):
+                    omitted += 1
+                    continue
+            age_hours = max(0.0, (cutoff - observed).total_seconds() / 3600.0)
+            time_label = observed.tz_convert("Asia/Dubai").strftime("%d %b %Y %H:%M:%S GST")
+            sender = escape(str(row.get("sender_handle") or "—"))
+            channel = escape(str(row.get("source_channel") or "—"))
+            surface = escape(str(row.get("surface_cob_date") or "—"))
+            label = ICE_QUOTE_LAYERS[layer][0].replace("_", " ").title()
+            hover = (
+                f"<b>ICE {label} · {'Call' if side == 'C' else 'Put'}</b>"
+                f"<br>{time_label}<br>Strike {strike:.2f}"
+                f" · Premium {price:.4f} {escape(str(row.get('price_unit_label') or 'USD/bbl'))}"
+                f"<br>IV {100.0 * iv:.2f}% · Sender {sender}"
+                f"<br>Channel {channel} · Surface COB {surface}"
+            )
+            empty[layer]["x"].append(float(x))
+            empty[layer]["y"].append(100.0 * iv)
+            empty[layer]["text"].append(hover)
+            empty[layer]["opacity"].append(max(0.35, 0.95 - age_hours / 24.0))
+    return empty, omitted
+
+
+@callback(
+    Output({"type": "brent-vol-history-expiry-graph", "expiry": ALL},
+           "figure", allow_duplicate=True),
+    Output("ice-chat-overlay-status", "children"),
+    Input("ice-chat-quote-snapshot", "data"),
+    Input("ice-chat-contract", "value"),
+    Input("ice-chat-option-type", "value"),
+    Input("ice-chat-strike", "value"),
+    Input("ice-chat-sender", "value"),
+    Input("ice-chat-source-channel", "value"),
+    Input("ice-chat-status-filter", "value"),
+    Input("ice-chat-positive-only", "value"),
+    Input("brent-vol-history-snapshot", "data"),
+    Input("brent-vol-history-expiry-layer-manifest", "data"),
+    State("brent-vol-history-x-axis", "value"),
+    State("brent-vol-history-expiry-layers", "value"),
+    State({"type": "brent-vol-history-expiry-graph", "expiry": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def update_ice_quote_overlays(
+    quote_snapshot, contract, option_type, strike, sender, source_channel,
+    status, positive_only, history_snapshot, manifest, x_axis,
+    selected_layers, graph_ids,
+):
+    if not graph_ids or not manifest:
+        return [], ""
+    quote_snapshot = quote_snapshot or {}
+    filtered = ice_chat_quotes.filter_quote_rows(
+        quote_snapshot.get("rows") or [], contract=contract,
+        option_type=option_type, strike=strike, sender=sender,
+        source_channel=source_channel, status=status,
+        positive_only="positive" in (positive_only or []),
+    )
+    rows = filtered.to_dict("records") if not filtered.empty else []
+    selected = set(selected_layers or [])
+    graph_contracts = (manifest or {}).get("graphs") or {}
+    updates = []
+    plotted = omitted = 0
+    for graph_id in graph_ids:
+        expiry = str((graph_id or {}).get("expiry") or "")
+        contract_for_graph = graph_contracts.get(expiry) or {}
+        points, excluded = ice_quote_overlay_points(
+            rows, history_snapshot, expiry, x_axis,
+            contract_for_graph.get("option_expiration_date"),
+        )
+        omitted += excluded
+        patch = Patch()
+        for entry in contract_for_graph.get("traces") or []:
+            layer = entry["layer"]
+            if layer not in ICE_QUOTE_LAYERS:
+                continue
+            index = int(entry["index"])
+            data = points[layer]
+            plotted += len(data["x"])
+            for key in ("x", "y", "text"):
+                patch["data"][index][key] = data[key]
+            patch["data"][index]["marker"]["opacity"] = data["opacity"]
+            patch["data"][index]["visible"] = layer in selected
+        base_range = contract_for_graph.get("iv_range")
+        if base_range:
+            values = [value for item in points.values() for value in item["y"]]
+            if values:
+                margin = max(0.5, (max(values) - min(values)) * 0.05)
+                patch["layout"]["yaxis"]["range"] = [
+                    max(0.0, min(base_range[0], min(values) - margin)),
+                    max(base_range[1], max(values) + margin),
+                ]
+            else:
+                patch["layout"]["yaxis"]["range"] = base_range
+        updates.append(patch)
+    if not history_snapshot or history_snapshot.get("product") != "BRENT":
+        selected_product = ice_chat_quotes._selected_product(
+            (history_snapshot or {}).get("product")
+        )
+        label = ice_chat_quotes.PRODUCT_LABELS[selected_product]
+        message = f"No ICE quote feed is configured for {label}."
+    elif quote_snapshot.get("error"):
+        message = quote_snapshot["error"]
+    else:
+        message = f"ICE quote markers · {plotted:,} plotted"
+        if omitted:
+            message += f" · {omitted:,} omitted (IV or delta unavailable)"
+        if not plotted:
+            message += " for the selected snapshot date and quote window"
+    return updates, message
 
 
 @callback(

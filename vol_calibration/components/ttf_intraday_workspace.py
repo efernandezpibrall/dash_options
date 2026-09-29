@@ -5,10 +5,7 @@ from __future__ import annotations
 import dash_bootstrap_components as dbc
 from dash import dash_table, dcc, html
 
-from vol_calibration.feature_flags import (
-    ttf_intraday_writes_enabled,
-    ttf_publication_enabled,
-)
+from vol_calibration.feature_flags import ttf_intraday_writes_enabled
 
 
 def create_ttf_context_status():
@@ -213,7 +210,6 @@ def create_ttf_adjustment_workspace(node_editor, expert_tail_table):
         )
         for label, control_id, help_text in control_specs
     ]
-    publication_is_enabled = ttf_publication_enabled()
     return dbc.Card(
         [
             dbc.CardHeader(
@@ -279,18 +275,6 @@ def create_ttf_adjustment_workspace(node_editor, expert_tail_table):
                                 id="ttf-reset-adjustment-btn",
                                 color="secondary",
                                 outline=True,
-                            ),
-                            dbc.Button(
-                                "Publish validated surface",
-                                id="ttf-publish-btn",
-                                color="success",
-                                disabled=not publication_is_enabled,
-                                title=(
-                                    "Publication requires migrated storage, server-side "
-                                    "authentication, and enabled write/publication flags."
-                                    if not publication_is_enabled
-                                    else "Publish a complete immutable TTF surface revision."
-                                ),
                             ),
                         ],
                         className="mb-3",

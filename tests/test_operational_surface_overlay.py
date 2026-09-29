@@ -15,7 +15,7 @@ from vol_calibration.operational_surface import (
     operational_surface_frame,
     operational_surface_status_text,
 )
-from vol_calibration.pages import hh, jkm
+from vol_calibration.pages import jkm
 
 
 def _surface_rows(product, cob_date, expiry, deltas=(0.90, 0.50, 0.10)):
@@ -111,13 +111,7 @@ def test_operational_snapshot_supports_nbp_without_a_calibration_route(
     assert snapshot['actual_cob'] == pd.Timestamp('2026-07-27')
     assert snapshot['date_fallback_used'] is True
     assert set(snapshot['data']['code']) == {'NBP'}
-    href, style = vol_surface.build_calibration_link(
-        'NBP',
-        '2026-07-30',
-        '2026-09-01',
-    )
-    assert href == '/vol_calibration?product=ttf'
-    assert style == {'display': 'none'}
+    assert vol_surface.vol_trades_link_style('NBP') == {'display': 'none'}
 
 
 def test_operational_snapshot_reports_no_prior_instead_of_using_future(
@@ -311,11 +305,8 @@ def test_vectorized_delta_curve_matches_scalar_bracketed_solver():
     assert vector_ivs == pytest.approx([value[1] for value in scalar])
 
 
-@pytest.mark.parametrize('module', (hh, jkm))
-def test_unavailable_hh_and_jkm_inputs_disable_actions_without_synthetic_rows(
-    monkeypatch,
-    module,
-):
+def test_unavailable_jkm_inputs_disable_actions_without_synthetic_rows(monkeypatch):
+    module = jkm
     calls = []
 
     def unavailable(*args, **kwargs):
