@@ -3,19 +3,29 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from io import BytesIO, StringIO
-import json
+from io import BytesIO
+import hashlib
 import os
-from uuid import uuid4
+from pathlib import Path
+import pickle
+import sys
 
 import dash_bootstrap_components as dbc
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
+import scipy
+from dash import Input, Output, State, callback, dash_table, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 from flask import has_request_context, request
 
+from snapshot_cache import publish_snapshot, resolve_snapshot
+from options import hh_lne_calibration as hh_calibration_module
+from options.build_brent_vol_surface import (
+    exclude_expired_option_targets,
+    horizon_from_as_of,
+)
+from options.surface_expiry_metadata import resolve_surface_expiry_metadata
 from options.hh_lne_calibration import (
     HH_LNE_CALIBRATION_ENGINE_VERSION,
     HH_LNE_CALIBRATION_METHOD,
@@ -25,7 +35,7 @@ from options.hh_lne_calibration import (
     resolve_hh_lne_snapshot_reference,
 )
 from runtime_config import get_database_engine
-from vol_calibration.auth import resolve_request_identity
+from vol_calibration.auth import Permission, authorize, resolve_request_identity
 from vol_calibration.feature_flags import hh_publication_enabled
 from vol_calibration.ttf_publication import (
     input_manifest_fingerprint,
@@ -33,11 +43,11 @@ from vol_calibration.ttf_publication import (
     publish_hybrid_surface,
     ttf_publication_frame,
 )
-from vol_calibration.ttf_hybrid_surface import densify_bounded_source_surface
 
 
 COMMODITY = "HH"
 PREFIX = "hh-governed"
+_CANDIDATE_CACHE_TTL_SECONDS = 2 * 60 * 60
 
 
 def get_default_date():
@@ -68,29 +78,147 @@ def _same_day_publication_id(publication, cob_date):
     )
 
 
-def _densify_hh_candidate(candidate):
-    source_results = {
-        pd.Timestamp(item["option_expiration_date"]).date(): item
-        for item in candidate["expiry_results"]
-    }
-    dense, dense_results = densify_bounded_source_surface(
-        candidate["surface"],
-        commodity="HH",
+def _candidate_namespace(identity):
+    owner = hashlib.sha256(str(identity.subject).encode("utf-8")).hexdigest()
+    return f"hh-governed-candidate:{owner}"
+
+
+def _candidate_code_fingerprint():
+    """Invalidate retained candidates after a relevant code/configuration change."""
+    options_root = Path(hh_calibration_module.__file__).resolve().parent
+    dash_root = Path(__file__).resolve().parents[2]
+    paths = (
+        options_root / "hh_lne_calibration.py",
+        options_root / "hh_single_surface.py",
+        options_root / "brent_single_surface.py",
+        options_root / "build_hh_vol_surface_from_settlements.py",
+        options_root / "build_brent_vol_surface.py",
+        options_root / "calibration_engine" / "models" / "wing_model.py",
+        options_root / "calibration_engine" / "converters" / "delta.py",
+        options_root / "surface_expiry_metadata.py",
+        dash_root / "vol_calibration" / "ttf_hybrid_surface.py",
+        Path(__file__),
     )
-    for result in dense_results:
-        source = source_results[result["option_expiration_date"]]
-        result["parameters"] = source.get("parameters") or result["parameters"]
-        result["diagnostics"] = {
-            **(source.get("diagnostics") or {}),
-            **result["diagnostics"],
-        }
-        result["weighted_rmse"] = source.get("weighted_rmse")
-        result["unweighted_rmse"] = source.get("unweighted_rmse")
-        result["max_error"] = source.get("max_error")
-    candidate["surface"] = dense
-    candidate["expiry_results"] = dense_results
-    candidate["point_count"] = len(dense)
-    return candidate
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(str(path).encode("utf-8"))
+        digest.update(path.read_bytes())
+    digest.update(os.getenv("APP_CODE_REVISION", "unknown").encode("utf-8"))
+    for version in (sys.version, np.__version__, pd.__version__, scipy.__version__):
+        digest.update(version.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _candidate_output_fingerprint(candidate):
+    payload = (candidate["surface"], candidate["expiry_results"])
+    return hashlib.sha256(pickle.dumps(payload, protocol=5)).hexdigest()
+
+
+def _resolve_candidate(browser_candidate, identity):
+    if not isinstance(browser_candidate, dict):
+        raise ValueError("HH candidate is missing; recalibrate.")
+    stored = resolve_snapshot(
+        browser_candidate.get("candidate_ref"),
+        expected_namespace=_candidate_namespace(identity),
+    )
+    if (
+        not isinstance(stored, dict)
+        or stored.get("input_fingerprint") != browser_candidate.get("input_fingerprint")
+        or stored.get("code_fingerprint") != _candidate_code_fingerprint()
+        or stored.get("cob_date") != browser_candidate.get("cob_date")
+        or stored.get("snapshot_id") != browser_candidate.get("snapshot_id")
+        or stored.get("idempotency_key") != browser_candidate.get("idempotency_key")
+        or stored.get("output_fingerprint") != browser_candidate.get("output_fingerprint")
+        or stored.get("output_fingerprint") != _candidate_output_fingerprint(stored)
+    ):
+        raise ValueError("HH candidate changed or its code version expired; recalibrate.")
+    return stored
+
+
+def _verify_candidate_source(engine, stored):
+    """Recheck the pinned LNE rows and expiries without rerunning the fit."""
+    source = resolve_hh_lne_snapshot_reference(
+        engine, stored["cob_date"], snapshot_id=stored["snapshot_id"]
+    )
+    manifest_source = stored["input_manifest"]["source_snapshots"][0]
+    expected = {
+        "snapshot_id": manifest_source["snapshot_id"],
+        "source_revision": manifest_source["revision"],
+        "observed_at": manifest_source["observed_at"],
+        "option_quote_count": manifest_source["option_quote_count"],
+        "forward_count": manifest_source["forward_count"],
+        "chain_row_count": manifest_source["raw_chain_count"],
+        "iv_resolved_count": manifest_source["resolved_iv_count"],
+    }
+    if any(source.get(key) != value for key, value in expected.items()):
+        raise ValueError("The pinned HH settlement source changed; recalibrate.")
+    surface = stored["surface"]
+    expiries = surface[["contract_date", "option_expiration_date"]].drop_duplicates()
+    requested = pd.DataFrame(
+        {"product": "HH", "maturity_date": expiries["contract_date"]}
+    )
+    current = resolve_surface_expiry_metadata(engine, requested)
+    saved_by_month = {
+        pd.Timestamp(row.contract_date).date(): pd.Timestamp(
+            row.option_expiration_date
+        ).date()
+        for row in expiries.itertuples(index=False)
+    }
+    current_by_month = {
+        pd.Timestamp(row.maturity_date).date(): pd.Timestamp(
+            row.option_expiration_date
+        ).date()
+        for row in current.itertuples(index=False)
+    }
+    if current_by_month != saved_by_month:
+        raise ValueError("The HH option expiry reference changed; recalibrate.")
+
+    # The snapshot identifier and counts alone cannot detect a changed quote
+    # value under the same identifier. Re-read the raw lineage saved in the
+    # candidate, while skipping the expensive SVI, ATM, and projection stages.
+    api = hh_calibration_module._builder_api()
+    snapshot = api.resolve_snapshot(
+        engine, stored["cob_date"], stored["snapshot_id"]
+    )
+    forwards = api.load_forwards(
+        engine, snapshot, horizon_from_as_of(snapshot.business_date)
+    )
+    options = api.load_options(engine, snapshot)
+    api.validate_rows(options, forwards, snapshot)
+    expiry_metadata = api.resolve_expiries(
+        engine,
+        pd.DataFrame({"product": "HH", "maturity_date": forwards["strip"]}),
+    )
+    api.validate_expiries(options, expiry_metadata)
+    forwards, _ = exclude_expired_option_targets(
+        forwards, expiry_metadata, snapshot.business_date
+    )
+    manifest = stored["input_manifest"]
+    saved_options = manifest.get("raw_observations") or []
+    saved_forwards = manifest.get("forwards") or []
+    if not saved_options or not saved_forwards:
+        raise ValueError("The locked HH input lineage is incomplete; recalibrate.")
+    option_columns = [
+        key for key in saved_options[0]
+        if key not in {"calibration_eligible", "exclusion_reason"}
+    ]
+    forward_columns = list(saved_forwards[0])
+    current_inputs = {
+        "options": hh_calibration_module._manifest_records(options, option_columns),
+        "forwards": hh_calibration_module._manifest_records(
+            forwards, forward_columns
+        ),
+    }
+    locked_inputs = {
+        "options": [
+            {key: row.get(key) for key in option_columns} for row in saved_options
+        ],
+        "forwards": saved_forwards,
+    }
+    if input_manifest_fingerprint(current_inputs) != input_manifest_fingerprint(
+        locked_inputs
+    ):
+        raise ValueError("The pinned HH settlement rows changed; recalibrate.")
 
 
 def _empty_figure(message: str):
@@ -317,6 +445,7 @@ def load_hh_governed_inputs(trade_date, _reload_clicks, requested_snapshot_id):
             trade_date,
             commodity="HH",
             as_of=pd.to_datetime(reference["observed_at"], utc=True),
+            require_exact_cob=True,
         )
         expiry_rows = []
         for expiry, group in market.groupby("expiry", sort=True):
@@ -359,9 +488,9 @@ def load_hh_governed_inputs(trade_date, _reload_clicks, requested_snapshot_id):
             "market_fingerprint": input_manifest_fingerprint(manifest),
         }
         publication_note = (
-            f"Active point-in-time HH publication {published.get('publication_id')}"
+            f"Active HH publication for {trade_date}: {published.get('publication_id')}"
             if published.get("publication_id")
-            else "No point-in-time HH publication exists for this market as-of."
+            else "No HH surface published for this settlement date."
         )
         return (
             market.to_json(date_format="iso", orient="split"),
@@ -401,12 +530,11 @@ def calibrate_hh_governed(_clicks, trade_date, requested_snapshot_id, published)
             code_revision=os.getenv("APP_CODE_REVISION", "unknown"),
             base_publication_id=(published or {}).get("publication_id"),
         )
-        candidate = _densify_hh_candidate(candidate)
-        surface = candidate.pop("surface")
-        candidate["surface"] = surface.to_json(date_format="iso", orient="split")
         candidate["input_fingerprint"] = input_manifest_fingerprint(
             candidate["input_manifest"]
         )
+        candidate["code_fingerprint"] = _candidate_code_fingerprint()
+        candidate["output_fingerprint"] = _candidate_output_fingerprint(candidate)
         candidate["idempotency_key"] = (
             f"hh:{candidate['cob_date']}:{candidate['input_fingerprint']}"
         )
@@ -419,16 +547,40 @@ def calibrate_hh_governed(_clicks, trade_date, requested_snapshot_id, published)
                     "expiry": pd.Timestamp(
                         result["option_expiration_date"]
                     ).strftime("%Y-%m"),
-                    "eligible": (result.get("diagnostics") or {}).get("point_count"),
-                    "rmse": "Projected" if rmse is None else f"{100 * float(rmse):.3f}%",
+                    "eligible": (result.get("diagnostics") or {}).get("quote_count"),
+                    "rmse": "No quotes" if rmse is None else f"{100 * float(rmse):.3f}%",
                     "arbitrage": "Pass" if validation.get("is_valid") else "Fail",
                     "source_class": (result.get("diagnostics") or {}).get(
-                        "calibration_mode", "unknown"
+                        "term_basis", "unknown"
                     ),
                 }
             )
-        return (
+        identity = _identity()
+        reference = publish_snapshot(
+            _candidate_namespace(identity),
+            f"{candidate['input_fingerprint']}:{candidate['code_fingerprint']}",
             candidate,
+            metadata={
+                "commodity": COMMODITY,
+                "cob_date": candidate["cob_date"],
+                "snapshot_id": candidate["snapshot_id"],
+            },
+            force=True,
+            ttl_seconds=_CANDIDATE_CACHE_TTL_SECONDS,
+        )
+        browser_candidate = {
+            "candidate_ref": reference,
+            "commodity": COMMODITY,
+            "cob_date": candidate["cob_date"],
+            "snapshot_id": candidate["snapshot_id"],
+            "input_fingerprint": candidate["input_fingerprint"],
+            "output_fingerprint": candidate["output_fingerprint"],
+            "idempotency_key": candidate["idempotency_key"],
+            "expiry_count": candidate["expiry_count"],
+            "point_count": candidate["point_count"],
+        }
+        return (
+            browser_candidate,
             rows,
             dbc.Alert(
                 f"Complete HH batch validated: {candidate['expiry_count']} expiries, "
@@ -450,7 +602,10 @@ def calibrate_hh_governed(_clicks, trade_date, requested_snapshot_id, published)
 def render_hh_candidate_comparison(candidate, published, selected_expiry):
     if not candidate or not selected_expiry:
         return _empty_figure("Run complete calibration to build a candidate.")
-    frame = pd.read_json(StringIO(candidate["surface"]), orient="split")
+    try:
+        frame = _resolve_candidate(candidate, _identity())["surface"]
+    except Exception:
+        return _empty_figure("HH candidate unavailable or expired; recalibrate.")
     month = pd.Period(selected_expiry, freq="M")
     candidate_months = pd.to_datetime(frame["contract_date"]).dt.to_period("M")
     selected = frame.loc[candidate_months.eq(month)].sort_values("delta")
@@ -506,6 +661,7 @@ def enable_hh_publish(candidate, confirmation):
 @callback(
     Output(f"{PREFIX}-published", "data", allow_duplicate=True),
     Output(f"{PREFIX}-publication-status", "children"),
+    Output("vol-trades-publication-revision", "data", allow_duplicate=True),
     Input(f"{PREFIX}-publish", "n_clicks"),
     State(f"{PREFIX}-candidate", "data"),
     State(f"{PREFIX}-published", "data"),
@@ -520,20 +676,19 @@ def publish_hh_governed(_clicks, candidate, current, confirmation):
             raise PermissionError("HH governed publication is disabled.")
         if "confirmed" not in (confirmation or []):
             raise PermissionError("Explicit publication confirmation is required.")
-        rebuilt = build_hh_lne_candidate_surface(
-            get_database_engine(),
-            candidate["cob_date"],
-            snapshot_id=candidate["snapshot_id"],
-            code_revision=os.getenv("APP_CODE_REVISION", "unknown"),
-            base_publication_id=(current or {}).get("publication_id"),
-        )
-        rebuilt = _densify_hh_candidate(rebuilt)
-        rebuilt_fingerprint = input_manifest_fingerprint(rebuilt["input_manifest"])
-        if rebuilt_fingerprint != candidate.get("input_fingerprint"):
-            raise ValueError("The locked HH input manifest changed; recalibrate.")
         identity = _identity()
+        authorize(identity, Permission.PUBLISH)
+        rebuilt = _resolve_candidate(candidate, identity)
+        if rebuilt["input_manifest"].get("base_publication_id") != (
+            current or {}
+        ).get("publication_id"):
+            raise ValueError("The HH publication base changed; reload and recalibrate.")
+        if input_manifest_fingerprint(rebuilt["input_manifest"]) != candidate.get("input_fingerprint"):
+            raise ValueError("The locked HH input manifest changed; recalibrate.")
+        engine = get_database_engine()
+        _verify_candidate_source(engine, rebuilt)
         payload = publish_hybrid_surface(
-            get_database_engine(),
+            engine,
             rebuilt["surface"],
             rebuilt["expiry_results"],
             commodity="HH",
@@ -554,9 +709,13 @@ def publish_hh_governed(_clicks, candidate, current, confirmation):
             f"Published HH revision {payload['publication_id']} with "
             f"{payload['row_count']} freshly read-back points.",
             color="success",
-        )
+        ), {
+            "commodity": "HH",
+            "cob_date": rebuilt["cob_date"],
+            "publication_id": payload["publication_id"],
+        }
     except Exception as exc:
-        return no_update, dbc.Alert(f"Publication blocked: {exc}", color="danger")
+        return no_update, dbc.Alert(f"Publication blocked: {exc}", color="danger"), no_update
 
 
 @callback(
@@ -571,7 +730,8 @@ def export_hh_governed(_clicks, candidate, published, trade_date):
     if not _clicks or not candidate:
         raise PreventUpdate
     output = BytesIO()
-    surface = pd.read_json(StringIO(candidate["surface"]), orient="split")
+    candidate = _resolve_candidate(candidate, _identity())
+    surface = candidate["surface"]
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         surface.to_excel(writer, sheet_name="Candidate Surface", index=False)
         pd.json_normalize(candidate["expiry_results"], sep=".").to_excel(

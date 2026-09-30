@@ -35,9 +35,7 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
         '/trades': 'Trades',
         '/prices': 'Underlying Prices',
         '/vol_surface': 'Volatility Surface',
-        '/vol_calibration': 'Vol Calibration',
         '/brent_vol_history': 'Vol Trades',
-        '/ice_chat_quotes': 'ICE Quotes',
         '/correlations': 'Correlations',
         '/scenarios': 'Scenarios',
         '/pnl_explain': 'P&L Explain',
@@ -51,7 +49,6 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
         *index_options.STATIC_PAGE_LAYOUTS,
         '/valuation',
         '/pnl_explain',
-        '/vol_calibration',
     }
 
     app._setup_server()
@@ -123,9 +120,7 @@ def test_top_navigation_order_and_pricer_separator():
         'Trades',
         'Underlying Prices',
         'Volatility Surface',
-        'Vol Calibration',
         'Vol Trades',
-        'ICE Quotes',
         'Correlations',
         'Scenarios',
         'Pricer',

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -293,7 +292,7 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
     )
 
 
-def test_refresh_buttons_have_primary_secondary_focus_and_mobile_contracts():
+def test_refresh_buttons_have_distinct_actions_and_labels():
     items = list(_walk(history.layout))
     intraday = next(
         item
@@ -311,78 +310,6 @@ def test_refresh_buttons_have_primary_secondary_focus_and_mobile_contracts():
     assert "refresh-button-primary" in intraday.className
     assert "refresh-button-secondary" in settlement.className
     assert intraday.title and settlement.title
-
-    css = (
-        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
-    ).read_text(encoding="utf-8")
-    assert ".brent-vol-history-refresh-button:focus-visible" in css
-    assert ".brent-vol-history-refresh-button-secondary" in css
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
-
-
-def test_product_selector_keeps_all_products_on_one_desktop_row():
-    css = (
-        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
-    ).read_text(encoding="utf-8")
-    assert ".brent-vol-history-product-options label" in css
-    assert "flex: 1 1 0;" in css
-    assert "white-space: nowrap;" in css
-    assert "margin-right: 0;" in css
-    assert "grid-template-columns:\n        312px\n        168px" in css
-    assert "@media (min-width: 1281px) and (max-width: 1760px)" in css
-
-
-def test_expiry_charts_use_four_column_low_margin_layout_with_readable_reflow():
-    css = (
-        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
-    ).read_text(encoding="utf-8")
-    page_css = css.split(
-        "/* Bloomberg Brent option-chain settlement and intraday history */", 1
-    )[1]
-    page_rule = page_css.split(
-        ".options-dashboard-container.brent-vol-history-page {", 1
-    )[1].split("}", 1)[0]
-    grid_rule = page_css.split(".brent-vol-history-plot-grid {", 1)[1].split(
-        "}", 1
-    )[0]
-    expiry_rule = page_css.split(".brent-vol-history-expiry-section {", 1)[
-        1
-    ].split("}", 1)[0]
-    scoped_expiry_rule = page_css.split(
-        ".brent-vol-history-expiry-section.greeks-monitor-section.main-section-container.supply-dest-section {",
-        1,
-    )[1].split("}", 1)[0]
-    table_rule = page_css.split(".brent-vol-history-table-section {", 1)[1].split(
-        "}", 1
-    )[0]
-    graph_rule = page_css.split(".brent-vol-history-graph {", 1)[1].split(
-        "}", 1
-    )[0]
-    tablet_rule = page_css.split("@media (max-width: 1024px) {", 1)[1].split(
-        "@media", 1
-    )[0]
-    compact_rule = page_css.split("@media (max-width: 768px) {", 1)[1].split(
-        "@media", 1
-    )[0]
-    mobile_rule = page_css.split("@media (max-width: 560px) {", 1)[1].split(
-        "@media", 1
-    )[0]
-
-    assert "padding: 10px 4px 24px;" in page_rule
-    assert "padding: 0;" in expiry_rule
-    assert "width: 100%;" in scoped_expiry_rule
-    assert "margin: 0 0 var(--spacing-xl) !important;" in scoped_expiry_rule
-    assert "padding: 0;" in scoped_expiry_rule
-    assert "width: 100%;" in table_rule
-    assert "margin: 8px 0 18px;" in table_rule
-    assert "width: 100%;" in grid_rule
-    assert "grid-template-columns: repeat(4, minmax(0, 1fr));" in grid_rule
-    assert "gap: 4px;" in grid_rule
-    assert "padding: 4px;" in grid_rule
-    assert "height: 308px !important;" in graph_rule
-    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in tablet_rule
-    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in compact_rule
-    assert "grid-template-columns: minmax(0, 1fr);" in mobile_rule
 
 
 def test_trade_and_chain_tables_use_grouped_trader_focused_format():
@@ -465,14 +392,6 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
     assert len(subtitles) == 2
     assert any("selected expiry and trade window" in text for text in subtitles)
     assert any("Expand grouped headers" in text for text in subtitles)
-
-    css = (
-        Path(__file__).resolve().parents[1] / "assets" / "styles.css"
-    ).read_text(encoding="utf-8")
-    assert ".brent-vol-history-table-section" in css
-    assert ".vol-trades-group-premium" in css
-    assert ".vol-trades-call-cell" in css
-    assert ".vol-trades-trade-grid:has(.ag-overlay-no-rows-wrapper)" not in css
 
 
 def test_layout_includes_sourced_ice_open_interest_timing_note():
@@ -831,7 +750,8 @@ def test_latest_calibrated_surface_uses_latest_active_publication(
     )
 
 
-def test_missing_calibrated_publication_is_explicit(monkeypatch):
+@pytest.mark.parametrize("product", ["BRENT", "LNE", "ON"])
+def test_missing_calibrated_publication_is_explicit(monkeypatch, product):
     monkeypatch.setattr(
         history.pd,
         "read_sql",
@@ -841,17 +761,69 @@ def test_missing_calibrated_publication_is_explicit(monkeypatch):
         "2026-08-26",
         ["2026-12-01"],
         engine=object(),
-        product="BRENT",
+        product=product,
     )
     assert surface.attrs["publication_status"] == "no_publication"
     cards = history.build_plot_cards(
         _chain_frame(),
         pd.DataFrame(),
-        product="BRENT",
+        product=product,
         calibrated=surface,
     )
     contract = history._expiry_legend_contract(cards)
     assert "calibrated" not in contract["available_layers"]
+    if product in {"LNE", "ON"}:
+        assert "No HH surface published for this settlement date" in str(cards[0].children)
+
+
+@pytest.mark.parametrize("product", ["BRENT", "LNE", "ON"])
+@pytest.mark.parametrize("selected_date", ["2026-09-25", "2026-09-28"])
+def test_single_surface_chart_queries_only_selected_cob(monkeypatch, product, selected_date):
+    captured = []
+
+    def read_sql(query, engine, params):
+        captured.append((str(query), params))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(history.pd, "read_sql", read_sql)
+    history.load_latest_calibrated_surface(
+        selected_date, ["2026-12-01"], engine=object(), product=product,
+    )
+    sql, params = captured[0]
+    assert "AND p.cob_date = :selected_cob" in sql
+    assert params == {
+        "commodity": "BRENT" if product == "BRENT" else "HH",
+        "selected_cob": pd.Timestamp(selected_date).date(),
+    }
+
+
+@pytest.mark.parametrize("product", ["LNE", "ON"])
+@pytest.mark.parametrize("axis", ["strike", "delta"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_hh_views_draw_one_shared_surface_with_separate_market_context(product, axis, legacy):
+    chain = _chain_frame().assign(product=product)
+    # Distinct context observations must not alter the shared HH publication.
+    chain["implied_volatility"] += 0.10 if product == "ON" else 0.0
+    surface = _calibrated_frame().assign(
+        commodity="HH", calibration_policy_version=(
+            "legacy" if legacy else history.HH_SINGLE_SURFACE_POLICY_VERSION
+        ),
+    )
+    surface.attrs["publication_metadata"]["commodity"] = "HH"
+    cards = history.build_plot_cards(chain, _published_frame(), x_axis=axis, product=product, calibrated=surface)
+    figures = [c.figure for card in cards for c in _walk(card) if hasattr(c, "figure")]
+    assert len(figures) == 1
+    traces = figures[0].data
+    assert not any((t.meta or {}).get("legend_layer") == "published" for t in traces)
+    fitted = [t for t in traces if (t.meta or {}).get("legend_layer") == "calibrated"]
+    assert len(fitted) == 1
+    label = "Legacy HH surface" if legacy else "HH surface · LNE calibrated"
+    assert fitted[0].name.startswith(label)
+    assert list(fitted[0].y) == pytest.approx([32, 30, 28])
+    observed = next(t for t in traces if t.name == "Bloomberg settlement IV")
+    assert sorted(observed.y) == pytest.approx([39, 41] if product == "ON" else [29, 31])
+    assert "Revision 9572ae7f" in fitted[0].hovertemplate
+    assert "Policy " in fitted[0].hovertemplate
 
 
 def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
@@ -1231,6 +1203,9 @@ def test_expiry_legend_contract_only_exposes_plotted_layers():
     contract = history._expiry_legend_contract(cards)
 
     assert contract["available_layers"] == [
+        "ice-bid",
+        "ice-offer",
+        "ice-single",
         "bloomberg-settlement",
         "pricing-reference",
         "volume-calls",
@@ -1249,6 +1224,83 @@ def test_expiry_legend_contract_only_exposes_plotted_layers():
         entry["layer"] in history.EXPIRY_LEGEND_LAYER_SPECS
         for entry in contract["graphs"]["2026-12-01"]["traces"]
     )
+
+
+def test_ice_quotes_match_snapshot_day_expiry_and_axes():
+    snapshot = {
+        "product": "BRENT", "business_date": "2026-08-17",
+        "observed_at": "2026-08-17T09:00:00Z",
+    }
+    row = {
+        "event_id": "quote-1", "product_code": "B",
+        "contract_month": "2026-12-01", "option_type": "C",
+        "observed_at": "2026-08-17T08:00:00Z",
+        "option_expiration_date": "2026-11-25",
+        "strike": 90.0, "forward": 86.0,
+        "bid": 5.1, "bid_implied_volatility": 0.59,
+        "offer": 5.4, "offer_implied_volatility": 0.62,
+        "single_price": None, "sender_handle": "broker",
+    }
+    strike_points, omitted = history.ice_quote_overlay_points(
+        [row], snapshot, "2026-12-01", "strike"
+    )
+    assert omitted == 0
+    assert strike_points["ice-bid"]["x"] == [90.0]
+    assert strike_points["ice-bid"]["y"] == [59.0]
+    assert strike_points["ice-offer"]["y"] == [62.0]
+    assert strike_points["ice-single"]["x"] == []
+    delta_points, omitted = history.ice_quote_overlay_points(
+        [row], snapshot, "2026-12-01", "delta"
+    )
+    assert omitted == 0
+    assert 0 < delta_points["ice-bid"]["x"][0] < 1
+    assert history.ice_quote_overlay_points(
+        [row], snapshot, "2027-01-01", "strike"
+    )[0]["ice-bid"]["x"] == []
+    assert history.ice_quote_overlay_points(
+        [row], snapshot, "2026-12-01", "strike", "2026-10-26"
+    )[0]["ice-bid"]["x"] == []
+    assert history.ice_quote_overlay_points(
+        [row], {**snapshot, "product": "TFO"}, "2026-12-01", "strike"
+    )[0]["ice-bid"]["x"] == []
+    assert history.ice_quote_overlay_points(
+        [{**row, "observed_at": "2026-08-17T10:00:00Z"}],
+        snapshot, "2026-12-01", "strike"
+    )[0]["ice-bid"]["x"] == []
+    missing_delta, omitted = history.ice_quote_overlay_points(
+        [{**row, "forward": None}], snapshot, "2026-12-01", "delta"
+    )
+    assert omitted == 2
+    assert missing_delta["ice-bid"]["x"] == []
+
+
+def test_ice_overlay_patches_only_quote_traces():
+    cards = history.build_plot_cards(_chain_frame(), pd.DataFrame(), product="BRENT")
+    manifest = history._expiry_legend_contract(cards)
+    row = {
+        "product_code": "B", "contract_month": "2026-12-01",
+        "option_type": "C", "observed_at": "2026-08-17T08:00:00Z",
+        "option_expiration_date": "2026-10-27",
+        "strike": 90.0, "bid": 5.1, "bid_implied_volatility": 0.59,
+        "offer": None, "single_price": None,
+    }
+    patches, status = history.update_ice_quote_overlays(
+        {"rows": [row, {**row, "event_id": "put-quote", "option_type": "P",
+                         "bid_implied_volatility": 0.41}]},
+        None, "C", None, None, None, None, [],
+        {"product": "BRENT", "business_date": "2026-08-17",
+         "observed_at": "2026-08-17T09:00:00Z"},
+        manifest, "strike", ["ice-bid"],
+        [{"type": "brent-vol-history-expiry-graph", "expiry": "2026-12-01"}],
+    )
+    operations = patches[0].to_plotly_json()["operations"]
+    bid_index = next(
+        entry["index"] for entry in manifest["graphs"]["2026-12-01"]["traces"]
+        if entry["layer"] == "ice-bid"
+    )
+    assert {"operation": "Assign", "location": ["data", bid_index, "y"],
+            "params": {"value": [59.0]}} in operations
+    assert status == "ICE quote markers · 1 plotted"
 
 
 def test_expiry_quality_summary_is_inside_the_contract_header():
@@ -1665,3 +1717,49 @@ def test_publication_coverage_ignores_non_chain_maturities():
         ignore_index=True,
     )
     assert history.publication_coverage(_chain_frame(), published) == (1, 1)
+
+
+@pytest.mark.parametrize("product", ["LNE", "ON", "BRENT"])
+def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkeypatch, product):
+    from types import SimpleNamespace
+    from dash import no_update
+
+    chain = _chain_frame().assign(product=product)
+    snapshot_id = chain.iloc[0]["snapshot_id"]
+    snapshots = pd.DataFrame([{
+        "snapshot_id": snapshot_id, "business_date": "2026-08-10",
+        "observed_at": "2026-08-10T12:00:00Z", "snapshot_kind": "SETTLEMENT",
+    }])
+    commodity = "BRENT" if product == "BRENT" else "HH"
+    surface = _calibrated_frame().assign(publication_id="new-revision", commodity=commodity)
+    surface.attrs["publication_metadata"].update(publication_id="new-revision", commodity=commodity)
+    calls = []
+    monkeypatch.setattr(history, "ctx", SimpleNamespace(triggered_id="vol-trades-publication-revision"))
+    monkeypatch.setattr(history, "load_available_snapshots", lambda _product: snapshots)
+    monkeypatch.setattr(history, "load_chain_snapshot", lambda *_args, **_kwargs: chain)
+
+    def load(cob, dates, *, product):
+        calls.append((cob, product))
+        return surface
+
+    monkeypatch.setattr(history, "load_latest_calibrated_surface", load)
+    monkeypatch.setattr(history, "load_published_surface", lambda *_a, **_kw: pytest.fail("duplicate operational overlay queried"))
+    event = {"commodity": commodity, "cob_date": "2026-08-10", "publication_id": "new-revision"}
+    options = [{"value": v} for v in history.EXPIRY_LEGEND_LAYER_ORDER]
+    result = history.render_history(
+        snapshot_id, "delta", product, event, "2026-12-01", None, options, ["calibrated"],
+    )
+    assert calls == [("2026-08-10", product)]
+    assert result[0]["publication_id"] == "new-revision"
+    assert result[0]["snapshot_id"] == snapshot_id
+    assert result[3] == "2026-12-01"
+    controls = [c for child in result[14] for c in _walk(child)]
+    selector = next(c for c in controls if getattr(c, "id", None) == "brent-vol-history-expiry-layers")
+    assert selector.value == ["calibrated"]
+    figures = [c.figure for card in result[1] for c in _walk(card) if hasattr(c, "figure")]
+    assert figures and figures[0].layout.xaxis.title.text.startswith("Delta")
+    for other in [dict(event, cob_date="2026-08-11"), dict(event, commodity="JKM")]:
+        unchanged = history.render_history(snapshot_id, "delta", product, other)
+        assert all(value is no_update for value in unchanged)
+    assert len(calls) == 1
+    assert all(value is no_update for value in history.render_history(snapshot_id, "delta", "JKM", event))

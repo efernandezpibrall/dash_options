@@ -8,7 +8,12 @@ the core outside the quoted range with C1 cubic-Hermite transitions.
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+import logging
+from multiprocessing import current_process
+import os
+from time import perf_counter
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -46,7 +51,7 @@ HH_HYBRID_METHOD = (
     "SVI-body/seasonal-relative LNE settlement + "
     "PCHIP-core/Wing-v2-tail hybrid (bounded to governed 1%-99% delta range)"
 )
-HH_HYBRID_POLICY_VERSION = "hh_lne_projected_pchip_core_hybrid_v2"
+HH_HYBRID_POLICY_VERSION = "hh_lne_projected_pchip_core_hybrid_v3"
 HYBRID_POLICIES = {
     "BRENT": (BRENT_HYBRID_METHOD, BRENT_HYBRID_POLICY_VERSION),
     "HH": (HH_HYBRID_METHOD, HH_HYBRID_POLICY_VERSION),
@@ -65,6 +70,35 @@ TTF_BUTTERFLY_MARGIN = 0.006
 TTF_VALIDATION_EXTENSION = 0.30
 TTF_VALIDATION_FLOOR = -0.50
 TTF_VALIDATION_CEILING = 0.50
+_TIMING_LOG = logging.getLogger(__name__)
+_SOLVER_WORKER_BLAS_LIMIT = None
+
+
+def _limit_solver_worker_threads():
+    global _SOLVER_WORKER_BLAS_LIMIT
+    from threadpoolctl import threadpool_limits
+
+    _SOLVER_WORKER_BLAS_LIMIT = threadpool_limits(limits=1)
+
+
+def _log_calibration_timing(enabled, product, stage, seconds, **details):
+    if enabled:
+        suffix = " ".join(f"{key}={value}" for key, value in details.items())
+        _TIMING_LOG.info(
+            "calibration_timing product=%s stage=%s seconds=%.6f %s",
+            product, stage, seconds, suffix,
+        )
+
+
+class HybridFitNoCandidate(ValueError):
+    """Keep failed deterministic starts available for an expanded retry."""
+
+    def __init__(self, message: str, attempts: list[dict]):
+        super().__init__(message)
+        self.attempts = attempts
+
+    def __reduce__(self):
+        return type(self), (str(self), self.attempts)
 
 
 def gas_hybrid_policy(commodity: str) -> tuple[str, str]:
@@ -581,18 +615,101 @@ def _hybrid_gate_values(
     return np.where(np.isfinite(g), g, -1e12)
 
 
+def _fit_one_hybrid_start(task):
+    """Solve one unchanged deterministic start in an isolated process."""
+    observations, initial_params, count, seed, product, start_index = task
+    try:
+        fitted = fit_ttf_hybrid_candidate(
+            observations,
+            initial_params,
+            n_starts=count,
+            seed=seed,
+            commodity=product,
+            _single_start_index=start_index,
+            _parallel_starts=False,
+        )
+    except HybridFitNoCandidate as exc:
+        return None, exc.attempts
+    return fitted, fitted["attempts"]
+
+
 def fit_ttf_hybrid_candidate(
     observations: pd.DataFrame,
     initial_params: Mapping[str, float],
     *,
     n_starts: int = 1,
     seed: int = 42,
+    resume_start_count: int = 0,
+    resume_attempts: Sequence[dict] = (),
     commodity: str = "TTF",
+    _single_start_index: int | None = None,
+    _parallel_starts: bool = True,
 ) -> dict[str, Any]:
     """Fit Wing-v2 to the PCHIP target in total-variance/log-K space."""
+    timing_enabled = os.getenv("CALIBRATION_TIMING", "").lower() in {
+        "1", "true", "yes", "on"
+    }
+    fit_started = perf_counter() if timing_enabled else 0.0
     product = str(commodity).strip().upper()
     method, policy_version = hybrid_policy(product)
+    count = int(n_starts)
+    if count < 1:
+        raise ValueError(f"{product} hybrid n_starts must be at least one.")
+    if not 0 <= resume_start_count < count:
+        raise ValueError("The hybrid retry start offset must precede a new start.")
+    if _single_start_index is not None and not 0 <= _single_start_index < count:
+        raise ValueError("The requested hybrid start is outside the configured starts.")
+    if (
+        _parallel_starts
+        and _single_start_index is None
+        and product in GAS_HYBRID_POLICY_VERSIONS
+        and count - resume_start_count >= 3
+        and current_process().name == "MainProcess"
+    ):
+        workers = int(os.getenv("GAS_START_WORKERS", "4"))
+        if not 1 <= workers <= 4:
+            raise ValueError("GAS_START_WORKERS must be between 1 and 4")
+        if workers > 1:
+            tasks = [
+                (observations, initial_params, count, seed, product, index)
+                for index in range(resume_start_count, count)
+            ]
+            try:
+                with ProcessPoolExecutor(
+                    max_workers=min(workers, len(tasks)),
+                    initializer=_limit_solver_worker_threads,
+                ) as executor:
+                    completed = list(executor.map(_fit_one_hybrid_start, tasks))
+            except Exception as exc:
+                _TIMING_LOG.warning(
+                    "Hybrid-start process pool unavailable; fitting serially: %s", exc
+                )
+            else:
+                attempts = [dict(item) for item in resume_attempts]
+                candidates = []
+                for candidate, start_attempts in completed:
+                    attempts.extend(start_attempts)
+                    if candidate is not None:
+                        candidates.append(candidate)
+                if not candidates:
+                    raise HybridFitNoCandidate(
+                        f"{product} tail fit produced no complete hybrid that passed validation.",
+                        attempts,
+                    )
+                best = min(candidates, key=lambda item: item["tail_fit_tv_rmse"])
+                best["attempts"] = attempts
+                best["starts"] = count
+                _log_calibration_timing(
+                    timing_enabled, product, "fit_total",
+                    perf_counter() - fit_started,
+                    accepted=True, selected_start=best["start"], starts=count,
+                    workers=min(workers, len(tasks)),
+                )
+                return best
     core = build_ttf_pchip_core(observations, commodity=product)
+    _log_calibration_timing(
+        timing_enabled, product, "core_preparation", perf_counter() - fit_started
+    )
     params0 = _full_initial_params(initial_params, commodity=product)
     if product in {"BRENT", "HH"}:
         # These source-specific builders have already performed the joint
@@ -608,6 +725,10 @@ def fit_ttf_hybrid_candidate(
             raise ValueError(
                 f"{product} jointly projected PCHIP core failed the complete arbitrage gate."
             )
+        _log_calibration_timing(
+            timing_enabled, product, "fit_total", perf_counter() - fit_started,
+            accepted=True, selected_start=0, starts=1,
+        )
         return {
             "success": True,
             "params": params0,
@@ -669,9 +790,6 @@ def fit_ttf_hybrid_candidate(
         value = np.mean(residuals**2)
         return float(value) if np.isfinite(value) else float("inf")
 
-    count = int(n_starts)
-    if count < 1:
-        raise ValueError(f"{product} hybrid n_starts must be at least one.")
     rng = np.random.default_rng(int(seed))
     starts = [x0]
     starts.extend(
@@ -689,10 +807,17 @@ def fit_ttf_hybrid_candidate(
         },
     )
 
-    attempts: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = [dict(item) for item in resume_attempts]
     candidates: list[dict[str, Any]] = []
     for start_index, start in enumerate(starts):
+        if (
+            start_index < resume_start_count
+            or (_single_start_index is not None and start_index != _single_start_index)
+        ):
+            continue
+        attempt_started = perf_counter() if timing_enabled else 0.0
         try:
+            solve_started = perf_counter() if timing_enabled else 0.0
             solver_result = minimize(
                 objective,
                 start,
@@ -700,6 +825,13 @@ def fit_ttf_hybrid_candidate(
                 bounds=bounds,
                 constraints=wing_constraints,
                 options=solver_options,
+            )
+            _log_calibration_timing(
+                timing_enabled, product, "wing_solve",
+                perf_counter() - solve_started, start=start_index,
+                iterations=getattr(solver_result, "nit", -1),
+                evaluations=getattr(solver_result, "nfev", -1),
+                success=bool(solver_result.success),
             )
             finite = bool(
                 np.isfinite(solver_result.fun)
@@ -730,6 +862,7 @@ def fit_ttf_hybrid_candidate(
                 TTF_VALIDATION_POINT_COUNT,
             )
             for blend_width in TTF_BLEND_WIDTHS:
+                width_started = perf_counter() if timing_enabled else 0.0
                 # Every width is retried from the same fitted Wing base so a
                 # failed narrow transition cannot contaminate the next start.
                 hybrid_start = np.asarray(solver_result.x, dtype=float)
@@ -741,6 +874,11 @@ def fit_ttf_hybrid_candidate(
                     right_blend_width=blend_width,
                 )
                 if base_validation["is_valid"]:
+                    _log_calibration_timing(
+                        timing_enabled, product, "blend_gate",
+                        perf_counter() - width_started, start=start_index,
+                        width=blend_width, repair=False, accepted=True,
+                    )
                     hybrid_result = solver_result
                     hybrid_validation = base_validation
                     selected_width = float(blend_width)
@@ -780,10 +918,22 @@ def fit_ttf_hybrid_candidate(
                         right_blend_width=blend_width,
                     )
                     if constrained_validation["is_valid"]:
+                        _log_calibration_timing(
+                            timing_enabled, product, "blend_gate",
+                            perf_counter() - width_started, start=start_index,
+                            width=blend_width, repair=True, accepted=True,
+                            evaluations=getattr(constrained_result, "nfev", -1),
+                        )
                         hybrid_result = constrained_result
                         hybrid_validation = constrained_validation
                         selected_width = float(blend_width)
                         break
+                _log_calibration_timing(
+                    timing_enabled, product, "blend_gate",
+                    perf_counter() - width_started, start=start_index,
+                    width=blend_width, repair=True, accepted=False,
+                    evaluations=getattr(constrained_result, "nfev", -1),
+                )
             if hybrid_result is None or hybrid_validation is None:
                 continue
             params = _params_from_vector(hybrid_result.x, params0)
@@ -810,6 +960,11 @@ def fit_ttf_hybrid_candidate(
                 }
             )
         except Exception as exc:
+            _log_calibration_timing(
+                timing_enabled, product, "start_exception",
+                perf_counter() - attempt_started, start=start_index,
+                error=type(exc).__name__,
+            )
             attempts.append(
                 {
                     "start": start_index,
@@ -822,8 +977,13 @@ def fit_ttf_hybrid_candidate(
             )
 
     if not candidates:
-        raise ValueError(
-            f"{product} tail fit produced no complete hybrid that passed validation."
+        _log_calibration_timing(
+            timing_enabled, product, "fit_total", perf_counter() - fit_started,
+            accepted=False, starts=count,
+        )
+        raise HybridFitNoCandidate(
+            f"{product} tail fit produced no complete hybrid that passed validation.",
+            attempts,
         )
     best = min(candidates, key=lambda item: item["tail_fit_tv_rmse"])
     best.update(
@@ -840,6 +1000,10 @@ def fit_ttf_hybrid_candidate(
             "calibration_method": method,
             "calibration_policy_version": policy_version,
         }
+    )
+    _log_calibration_timing(
+        timing_enabled, product, "fit_total", perf_counter() - fit_started,
+        accepted=True, selected_start=best["start"], starts=count,
     )
     return best
 
@@ -912,6 +1076,8 @@ def fit_gas_hybrid_candidate(
     commodity: str,
     n_starts: int = 1,
     seed: int = 42,
+    resume_start_count: int = 0,
+    resume_attempts: Sequence[dict] = (),
 ) -> dict[str, Any]:
     """Product-aware facade for the shared TTF/JKM/NBP hybrid fit."""
     gas_hybrid_policy(commodity)
@@ -921,6 +1087,8 @@ def fit_gas_hybrid_candidate(
         commodity=commodity,
         n_starts=n_starts,
         seed=seed,
+        resume_start_count=resume_start_count,
+        resume_attempts=resume_attempts,
     )
 
 
@@ -950,6 +1118,8 @@ def fit_hybrid_candidate(
     commodity: str,
     n_starts: int = 1,
     seed: int = 42,
+    resume_start_count: int = 0,
+    resume_attempts: Sequence[dict] = (),
 ) -> dict[str, Any]:
     """Fit the common finalizer while retaining product-specific provenance."""
     return fit_ttf_hybrid_candidate(
@@ -958,6 +1128,8 @@ def fit_hybrid_candidate(
         n_starts=n_starts,
         seed=seed,
         commodity=commodity,
+        resume_start_count=resume_start_count,
+        resume_attempts=resume_attempts,
     )
 
 

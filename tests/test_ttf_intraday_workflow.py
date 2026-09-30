@@ -20,6 +20,7 @@ from vol_calibration.ttf_publication import (
     publish_ttf_surface,
 )
 from vol_calibration import ttf_publication
+from vol_calibration import inline_workspace
 from vol_calibration.pages.ttf import (
     _changed_ttf_tail_overrides,
     populate_ttf_expiry_controls,
@@ -402,8 +403,9 @@ def test_post_commit_readback_can_select_historical_publication_by_id(monkeypatc
     assert calls[0][1] == {"publication_id": publication_id}
 
 
+@pytest.mark.parametrize("strict", [False, True])
 def test_calibration_review_prefers_active_exact_cob_before_pit_fallback(
-    monkeypatch,
+    monkeypatch, strict,
 ):
     publication_id = "139aa83d-775c-4de4-abad-3967dc393730"
     run_id = "84f08398-fbe7-436c-bdf8-84f2ebfc8163"
@@ -469,14 +471,15 @@ def test_calibration_review_prefers_active_exact_cob_before_pit_fallback(
         Engine(),
         "2026-08-21",
         as_of=datetime(2026, 8, 21, 23, 59, tzinfo=timezone.utc),
-        prefer_exact_cob=True,
+        prefer_exact_cob=not strict,
+        require_exact_cob=strict,
     )
 
     sql, params = calls[0]
     assert payload["publication_id"] == publication_id
     assert "p.cob_date = :trading_date" in sql
-    assert "p.cob_date < :trading_date AND p.published_at <= :as_of" in sql
-    assert "CASE WHEN p.cob_date = :trading_date THEN 0 ELSE 1 END" in sql
+    assert ("p.cob_date < :trading_date AND p.published_at <= :as_of" in sql) is (not strict)
+    assert ("CASE WHEN p.cob_date = :trading_date THEN 0 ELSE 1 END" in sql) is (not strict)
     assert params["trading_date"] == pd.Timestamp("2026-08-21").date()
 
 
@@ -505,7 +508,7 @@ def test_ttf_page_requests_exact_cob_publication_for_review(monkeypatch):
     }
 
 
-def test_toolbar_save_publishes_a_complete_successful_batch(monkeypatch):
+def test_inline_publish_publishes_a_complete_successful_batch(monkeypatch):
     market = pd.DataFrame({"expiry": [pd.Timestamp("2026-10-01")]})
     rows = [
         {
@@ -535,14 +538,9 @@ def test_toolbar_save_publishes_a_complete_successful_batch(monkeypatch):
     )
     captured = {}
 
-    monkeypatch.setattr(
-        ttf_page,
-        "ctx",
-        SimpleNamespace(triggered_id="ttf-save-all-btn"),
-    )
-    monkeypatch.setattr(ttf_page, "ttf_publication_enabled", lambda: True)
-    monkeypatch.setattr(ttf_page, "_current_identity", lambda: identity)
-    monkeypatch.setattr(ttf_page, "get_database_engine", lambda: "engine")
+    monkeypatch.setattr(inline_workspace, "ttf_publication_enabled", lambda: True)
+    monkeypatch.setattr(inline_workspace, "_identity", lambda: identity)
+    monkeypatch.setattr(inline_workspace, "get_database_engine", lambda: "engine")
     monkeypatch.setattr(
         ttf_page,
         "_publication_candidate_for_expiry",
@@ -567,11 +565,11 @@ def test_toolbar_save_publishes_a_complete_successful_batch(monkeypatch):
             "row_count": 1,
         }
 
-    monkeypatch.setattr(ttf_page, "publish_ttf_surface", fake_publish)
+    monkeypatch.setattr(inline_workspace, "publish_ttf_surface", fake_publish)
 
-    result = ttf_page.publish_ttf_intraday_surface(
+    result = inline_workspace.publish_inline_ttf(
         1,
-        None,
+        ["confirmed"],
         "2026-07-30",
         {"settlement_cob": "2026-07-30"},
         {},
@@ -589,10 +587,10 @@ def test_toolbar_save_publishes_a_complete_successful_batch(monkeypatch):
         pd.Period("2026-10", freq="M")
     ]
     assert result[0]["publication_id"] == "publication-1"
-    assert result[-1] == []
+    assert "freshly read-back points" in str(result[1].children)
 
 
-def test_toolbar_save_rejects_stale_batch_before_building_or_writing(monkeypatch):
+def test_inline_publish_rejects_stale_batch_before_building_or_writing(monkeypatch):
     market = pd.DataFrame({"expiry": [pd.Timestamp("2026-10-01")]})
     market_json = market.to_json(date_format="iso", orient="split")
     rows = [
@@ -624,27 +622,22 @@ def test_toolbar_save_rejects_stale_batch_before_building_or_writing(monkeypatch
         authenticated=True,
         auth_source="test",
     )
-    monkeypatch.setattr(
-        ttf_page,
-        "ctx",
-        SimpleNamespace(triggered_id="ttf-save-all-btn"),
-    )
-    monkeypatch.setattr(ttf_page, "ttf_publication_enabled", lambda: True)
-    monkeypatch.setattr(ttf_page, "_current_identity", lambda: identity)
+    monkeypatch.setattr(inline_workspace, "ttf_publication_enabled", lambda: True)
+    monkeypatch.setattr(inline_workspace, "_identity", lambda: identity)
     monkeypatch.setattr(
         ttf_page,
         "_publication_candidate_for_expiry",
         lambda *args, **kwargs: pytest.fail("stale batch built publication points"),
     )
     monkeypatch.setattr(
-        ttf_page,
+        inline_workspace,
         "publish_ttf_surface",
         lambda *args, **kwargs: pytest.fail("stale batch reached the database"),
     )
 
-    output = ttf_page.publish_ttf_intraday_surface(
+    output = inline_workspace.publish_inline_ttf(
         1,
-        None,
+        ["confirmed"],
         "2026-07-30",
         {"settlement_cob": "2026-07-30"},
         {},
@@ -656,8 +649,7 @@ def test_toolbar_save_rejects_stale_batch_before_building_or_writing(monkeypatch
         stale,
     )
 
-    assert output[0] is ttf_page.no_update
-    assert output[1] is output[2]
+    assert output[0] is inline_workspace.no_update
     assert "different trading date" in str(output[1].children)
 
 
@@ -723,19 +715,21 @@ def test_unchanged_expert_tail_values_do_not_replace_new_fit():
     }
 
 
-def test_requested_expiry_initializes_both_ttf_workspaces():
+def test_ttf_expiry_controls_default_and_preserve_current_selection():
     rows = [
         {"expiry": "Sep-26", "calibration_basis": "Observed"},
         {"expiry": "Oct-26", "calibration_basis": "Observed"},
     ]
     options, workspace, trade_options, trade = populate_ttf_expiry_controls(
-        rows,
-        "2026-10-01",
-        None,
-        None,
+        rows, None, None
     )
 
     assert options == trade_options
+    assert workspace == "Sep-26"
+    assert trade == "Sep-26"
+    _, workspace, _, trade = populate_ttf_expiry_controls(
+        rows, "Oct-26", "Oct-26"
+    )
     assert workspace == "Oct-26"
     assert trade == "Oct-26"
 

@@ -10,6 +10,9 @@ from vol_calibration.jobs import (
     COMPLETE_JOB_ITEM_SQL,
     COMPLETE_JOB_SQL,
     FAIL_JOB_SQL,
+    GET_JOB_SQL,
+    INVALIDATE_FROM_SQL,
+    LIST_JOB_ITEMS_SQL,
     REQUEST_CANCEL_SQL,
     SUBMIT_JOB_SQL,
     PostgresJobRepository,
@@ -21,7 +24,10 @@ class _Mappings:
         self.row = row
 
     def first(self):
-        return self.row
+        return self.row[0] if isinstance(self.row, list) else self.row
+
+    def all(self):
+        return self.row if isinstance(self.row, list) else [self.row]
 
 
 class _Result:
@@ -60,6 +66,9 @@ class _Engine:
     def begin(self):
         return _Transaction(self.connection)
 
+    def connect(self):
+        return _Transaction(self.connection)
+
 
 def _job_row(**overrides):
     row = {
@@ -95,11 +104,23 @@ def test_submit_is_idempotent_and_serializes_payload_deterministically():
     statement, parameters = engine.connection.calls[0]
     assert statement is SUBMIT_JOB_SQL
     assert "ON CONFLICT (idempotency_key)" in str(statement)
+    assert "vol_calibration_jobs.payload = EXCLUDED.payload" in str(statement)
     assert json.loads(parameters["payload"]) == {
         "expiries": ["Sep-26"],
         "product": "ttf",
     }
     assert submitted.job_id == row["job_id"]
+
+
+def test_submit_rejects_reused_key_with_changed_inputs():
+    repository = PostgresJobRepository(_Engine([None]))
+    with pytest.raises(ValueError, match="different immutable inputs"):
+        repository.submit(
+            run_id=None, job_type="batch_calibration",
+            payload={"product": "TTF", "source_fingerprint": "changed"},
+            idempotency_key="request-123", created_by="operator",
+            max_attempts=3, total_items=1,
+        )
 
 
 def test_claim_is_atomic_and_recovers_expired_work():
@@ -118,7 +139,7 @@ def test_claim_is_atomic_and_recovers_expired_work():
     assert "lease_expires_at < CURRENT_TIMESTAMP" in sql
     assert "reset_orphaned_items" in sql
     assert "attempts < max_attempts" in sql
-    assert parameters == {"worker_id": "worker-2", "lease_seconds": 90}
+    assert parameters == {"worker_id": "worker-2", "lease_seconds": 90, "job_id": None}
     assert claimed.attempts == 2
 
 
@@ -156,6 +177,9 @@ def test_complete_item_is_idempotent_and_bound_to_the_current_worker():
         worker_id="worker-1",
         status="succeeded",
         result_id=uuid4(),
+        result_payload={"selected_start": 2, "params": {"dc": 0.1}},
+        input_fingerprint="a" * 64,
+        dependency_fingerprint="b" * 64,
     )
 
     statement, parameters = engine.connection.calls[0]
@@ -165,6 +189,11 @@ def test_complete_item_is_idempotent_and_bound_to_the_current_worker():
     assert "item.status = 'running'" in sql
     assert "completed_items = completed_items + 1" in sql
     assert parameters["status"] == "succeeded"
+    assert json.loads(parameters["result_payload"]) == {
+        "params": {"dc": 0.1}, "selected_start": 2,
+    }
+    assert parameters["input_fingerprint"] == "a" * 64
+    assert parameters["dependency_fingerprint"] == "b" * 64
     assert completed.job_id == job["job_id"]
 
     with pytest.raises(ValueError, match="completion status"):
@@ -188,6 +217,35 @@ def test_cancel_complete_and_retry_sql_fail_closed():
     assert "cancellation_requested = FALSE" in complete_sql
     assert "attempts < max_attempts THEN 'queued'" in fail_sql
     assert "attempts >= max_attempts" in fail_sql
+    assert "completed_items = total_items" in complete_sql
+    assert "status NOT IN ('succeeded', 'skipped')" in complete_sql
+    assert "item.status IN ('running', 'failed')" in str(CLAIM_JOB_SQL)
+    assert "completed_items - (SELECT count FROM failed_items)" in str(CLAIM_JOB_SQL)
+
+
+def test_read_progress_and_invalidate_downstream_items():
+    job = _job_row(
+        status="running", worker_id="worker-1",
+        completed_items=2, total_items=3,
+    )
+    item = {"item_id": uuid4(), "option_expiration_date": date(2026, 9, 23)}
+    engine = _Engine([job, [item], job])
+    repository = PostgresJobRepository(engine)
+
+    assert repository.get(job_id=job["job_id"]).completed_items == 2
+    assert repository.list_items(job_id=job["job_id"]) == [item]
+    invalidated = repository.invalidate_from(
+        job_id=job["job_id"], worker_id="worker-1",
+        option_expiration_date=date(2026, 9, 23),
+    )
+    assert invalidated.job_id == job["job_id"]
+    assert [call[0] for call in engine.connection.calls] == [
+        GET_JOB_SQL, LIST_JOB_ITEMS_SQL, INVALIDATE_FROM_SQL,
+    ]
+    assert "option_expiration_date >= :option_expiration_date" in str(
+        INVALIDATE_FROM_SQL
+    )
+    assert "result_payload = NULL" in str(INVALIDATE_FROM_SQL)
 
 
 @pytest.mark.parametrize(

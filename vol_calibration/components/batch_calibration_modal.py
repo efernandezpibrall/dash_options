@@ -160,6 +160,14 @@ def create_batch_calibration_progress_modal(commodity: str) -> dbc.Modal:
             ]),
             dbc.ModalFooter([
                 dbc.Button(
+                    "Cancel job",
+                    id=f"{prefix}-batch-progress-cancel-btn",
+                    color="danger",
+                    outline=True,
+                    disabled=True,
+                    className="me-2",
+                ),
+                dbc.Button(
                     "Close",
                     id=f"{prefix}-batch-progress-close-btn",
                     color="secondary",

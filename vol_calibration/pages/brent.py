@@ -58,7 +58,6 @@ from vol_calibration.operational_surface import (
     register_operational_surface_callback,
 )
 
-from options.calibration_engine.io.loaders import load_market_data_with_metadata
 COMMODITY = 'BRENT'
 COMMODITY_LOWER = COMMODITY.lower()
 BRENT_ADJUSTMENT_MODEL_VERSION = 'brent_svi_intraday_residual_v1'
@@ -234,12 +233,14 @@ def load_data(trade_date, reload_clicks, inline_context=None):
             'provenance_complete': not pd.isna(observed_at),
         }
     else:
-        # Standalone Vol Calibration retains its existing date-based behavior.
-        load_result = load_market_data_with_metadata(
-            COMMODITY,
-            trade_date,
-            allow_synthetic_fallback=False,
-        )
+        load_result = {
+            'data': pd.DataFrame(),
+            'source': 'unavailable',
+            'is_synthetic': False,
+            'last_update': None,
+            'message': 'Select a Vol Trades Brent snapshot before calibrating.',
+            'error': 'A pinned Brent market snapshot is required.',
+        }
     market_data = load_result['data']
     data_source = load_result['source']
     is_synthetic = load_result['is_synthetic']

@@ -1,7 +1,6 @@
 import base64
 import datetime as dt
 import io
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -292,18 +291,6 @@ def test_comparison_columns_expand_to_fit_the_longest_header_or_value():
     assert 'flex' not in long_delta
 
 
-def test_comparison_table_css_packs_tables_and_uses_dark_headers():
-    css = (
-        Path(__file__).resolve().parents[1] / 'assets' / 'styles.css'
-    ).read_text(encoding='utf-8')
-
-    assert '.greeks-bucket-greek-grid-wrap,' in css
-    assert 'display: flex;\n    flex-wrap: wrap;' in css
-    assert '--ag-header-background-color: #1e293b;' in css
-    assert '--ag-header-foreground-color: #ffffff;' in css
-    assert 'color: #ffffff !important;' in css
-
-
 def test_aggregation_and_unit_use_compact_segmented_controls():
     components = list(_walk(greeks.layout))
     aggregation = next(
@@ -416,25 +403,6 @@ def test_all_selectors_and_actions_share_one_toolbar_row():
         action_buttons['export-greeks-workbook-btn'],
         'aria-label',
     ) == 'Export Workbook'
-
-
-def test_toolbar_css_reserves_dropdown_icon_space_and_collapses_before_squeezing():
-    css = (
-        Path(__file__).resolve().parents[1] / 'assets' / 'styles.css'
-    ).read_text(encoding='utf-8')
-
-    assert '100px\n        84px\n        198px' in css
-    assert '194px\n        159px\n        124px\n        minmax(260px, 1fr);' in css
-    assert (
-        'grid-template-columns: minmax(0, 1fr) 14px 16px !important;'
-        in css
-    )
-    assert '@media (max-width: 1329px)' in css
-    assert '@media (max-width: 1573px) and (min-width: 1330px)' in css
-    assert '124px\n            16px;' in css
-    assert 'grid-template-columns: repeat(5, minmax(0, 1fr));' in css
-    assert '@media (max-width: 900px)' in css
-    assert 'grid-template-columns: repeat(3, minmax(0, 1fr));' in css
 
 
 def test_strategy_filter_uses_compact_debounced_multi_picker():

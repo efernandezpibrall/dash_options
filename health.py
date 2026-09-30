@@ -16,6 +16,7 @@ from brent_option_chain_refresh import (
 from vol_calibration.auth import AuthenticationError, validate_auth_configuration
 from vol_calibration.feature_flags import (
     background_jobs_enabled,
+    gas_batch_jobs_enabled,
     brent_publication_enabled,
     brent_writes_enabled,
     hh_publication_enabled,
@@ -32,6 +33,7 @@ from vol_calibration.feature_flags import (
 
 
 INLINE_PUBLICATION_MIGRATION_HEAD = "20260902_02"
+GAS_BATCH_MIGRATION_HEAD = "20260928_01"
 
 
 def _migration_lineage_contains(current_revision: str | None, required_revision: str) -> bool:
@@ -73,6 +75,7 @@ def readiness_status() -> tuple[bool, dict]:
         "hh_publication_enabled": hh_publication_enabled(),
         "vol_trades_inline_calibration_enabled": inline_calibration_enabled(),
         "background_jobs_enabled": background_jobs_enabled(),
+        "gas_batch_jobs_enabled": gas_batch_jobs_enabled(),
         "bbg_option_chain_intraday_refresh_enabled": intraday_refresh_enabled(),
         "bbg_option_chain_settlement_refresh_enabled": settlement_refresh_enabled(),
         "bbg_option_chain_enabled_products": sorted(enabled_products()),
@@ -91,6 +94,7 @@ def readiness_status() -> tuple[bool, dict]:
             "brent_publication_enabled",
             "hh_writes_enabled",
             "hh_publication_enabled",
+            "gas_batch_jobs_enabled",
         )
     )
     if not (
@@ -147,6 +151,11 @@ def readiness_status() -> tuple[bool, dict]:
         )
     if details["background_jobs_enabled"]:
         required_relations.append("at_lng.vol_calibration_jobs")
+    if details["gas_batch_jobs_enabled"]:
+        required_relations.extend((
+            "at_lng.vol_calibration_jobs",
+            "at_lng.vol_calibration_job_items",
+        ))
     if (
         details["bbg_option_chain_intraday_refresh_enabled"]
         or details["bbg_option_chain_settlement_refresh_enabled"]
@@ -179,7 +188,7 @@ def readiness_status() -> tuple[bool, dict]:
         details["missing_relations"] = missing
         return False, details
 
-    if publication_enabled:
+    if publication_enabled or details["gas_batch_jobs_enabled"]:
         try:
             with engine.connect() as connection:
                 migration_head = connection.execute(
@@ -189,12 +198,13 @@ def readiness_status() -> tuple[bool, dict]:
         except Exception:
             details["error"] = "migration head readiness check failed"
             return False, details
-        if not _migration_lineage_contains(
-            migration_head,
-            INLINE_PUBLICATION_MIGRATION_HEAD,
-        ):
+        required_head = (
+            GAS_BATCH_MIGRATION_HEAD if details["gas_batch_jobs_enabled"]
+            else INLINE_PUBLICATION_MIGRATION_HEAD
+        )
+        if not _migration_lineage_contains(migration_head, required_head):
             details["error"] = "required calibration migration head is unavailable"
-            details["required_migration_head"] = INLINE_PUBLICATION_MIGRATION_HEAD
+            details["required_migration_head"] = required_head
             return False, details
 
     if details["hh_publication_enabled"]:

@@ -7,22 +7,30 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.2.0`, built from reviewed `options` commit
-`6854666f03bfc181c6eeae155e873e0843db7c54`, and this repository's
+`at-options-analytics==1.2.4`, built from reviewed `options` commit
+`63baa7a29f9876d36153d115c462b80de13b6043`, and this repository's
 requirements. The release wheel SHA-256 is
-`58ef4a25b711220479a1793752914e201aefc814c9a8807b4fa52ae5911b21e0`.
+`709ee0e145726aa83bba221c13e4645de2d431b7c7066a72c507e6df6778e676`.
 Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
+Use a dedicated virtual environment for this application; other tools in the
+shared repository environment have incompatible `requests` requirements.
+The pinned NumPy, pandas, SciPy, and SQLAlchemy versions reproduce the reviewed
+Brent settlement calibration and its 25 September publication to persisted precision.
+Analytics 1.2.4 adds the HH actual-strike single-SVI seasonal policy and preserves the fitted forward when
+producing an accepted Brent intraday smile. Gas fit workers require the pinned
+`threadpoolctl` dependency; their code fingerprints resolve the installed
+analytics package and require no sibling options checkout.
 
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout 6854666f03bfc181c6eeae155e873e0843db7c54
-python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-echo "58ef4a25b711220479a1793752914e201aefc814c9a8807b4fa52ae5911b21e0  dist/at_options_analytics-1.2.0-py3-none-any.whl" | shasum -a 256 -c -
-python -m pip install dist/at_options_analytics-1.2.0-py3-none-any.whl
+git -C /path/to/options checkout 63baa7a29f9876d36153d115c462b80de13b6043
+SOURCE_DATE_EPOCH=$(git -C /path/to/options show -s --format=%ct HEAD) python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
+echo "709ee0e145726aa83bba221c13e4645de2d431b7c7066a72c507e6df6778e676  dist/at_options_analytics-1.2.4-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.4-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.0'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.4'"
 ```
 
 Run before producing the deployment artifact:
@@ -31,7 +39,16 @@ Run before producing the deployment artifact:
 python -m pip check
 python -m pytest
 ruff check .
-python -c "import index_options; index_options.app._setup_server()"
+python -c "import wsgi"
+```
+
+Serve this Dash build with one process and multiple threads so every request
+uses the same registered callback map while long chart loads remain responsive.
+The WSGI entrypoint completes callback registration before requests can arrive,
+including polling requests from browser tabs left open during a restart:
+
+```bash
+gunicorn -w 1 -k gthread --threads 8 -b 127.0.0.1:8071 --timeout 180 wsgi:server
 ```
 
 ## Configuration
@@ -40,6 +57,37 @@ Set database and Trino values through environment variables or point
 `OPTIONS_CONFIG_PATH` at a mounted configuration file. Do not put credentials
 in the image.
 
+Calibration controls are mounted in Vol Trades at `/brent_vol_history`;
+`VOL_CALIBRATION_ENABLED` remains the shared feature gate. The retired
+`/vol_calibration` URL redirects to Vol Trades. The Vol Trades calibration
+button is visible by default; set `VOL_TRADES_INLINE_CALIBRATION_ENABLED=false`
+to hide it explicitly. Publication still uses separate write flags.
+
+Brent calibration fits observed strikes from a pinned settlement or intraday
+snapshot with one SVI model. The 11 saved deltas are output samples for sharing,
+not calibration targets. The Brent residual/PCHIP callback is removed from the
+app path. Apply Alembic revision `20260929_01` to permit the exact single-SVI
+policy in the governed dense-surface table. After verifying the source, expiry
+calendar, and publisher identity,
+enable `VOL_CALIBRATION_BRENT_WRITES_ENABLED` and
+`VOL_CALIBRATION_BRENT_PUBLICATION_ENABLED`; other product gates remain separate.
+
+HH LNE now uses one actual-strike SVI smile per delivery month. Sparse months
+are constrained by available LNE quotes and same-season predecessors. The
+401-point governed surface and operational 11-delta grid sample the same model.
+HH is calibrated exclusively from LNE. The LNE and ON selections are market
+context views of the same exact-COB HH publication; ON observations never enter
+calibration. Vol Trades displays the dense HH curve only, labels legacy policy
+revisions, and reports a missing publication instead of substituting another
+date. The operational 11-delta grid remains available to existing consumers.
+Successful Brent and HH publications refresh the matching charts through the
+page-level publication revision signal after persisted readback succeeds.
+Apply Alembic revisions `20260929_02` and `20260929_03` before enabling
+`VOL_CALIBRATION_HH_WRITES_ENABLED` and
+`VOL_CALIBRATION_HH_PUBLICATION_ENABLED`. Pin the exact LNE settlement snapshot,
+verify the quote-fit and density diagnostics, then read back the immutable HH
+publication by ID and inspect the selected HH surface in Vol Trades.
+
 The read-only release uses:
 
 ```text
@@ -47,6 +95,7 @@ VOL_CALIBRATION_ENABLED=true
 VOL_CALIBRATION_WRITES_ENABLED=false
 VOL_CALIBRATION_PUBLISH_ENABLED=false
 VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED=false
+VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED=false
 OPTIONS_TRUSTED_PROXY_AUTH_ENABLED=false
 BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED=false
 BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED=false
@@ -61,6 +110,7 @@ repository:
 WRITES_ENABLED = false
 PUBLISH_ENABLED = false
 BACKGROUND_JOBS_ENABLED = false
+GAS_BATCH_JOBS_ENABLED = false
 TTF_INTRADAY_WRITES_ENABLED = true
 TTF_PUBLICATION_ENABLED = true
 
@@ -97,6 +147,18 @@ identity mode is verified, and role mappings are tested. Background jobs remain
 independently disabled until their worker is deployed.
 Publication remains disabled until verified option-expiry calendars and source
 eligibility rules are complete for every enabled product.
+
+The TTF and JKM settlement batch worker is controlled separately by
+`VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED=true` (or
+`[VOL_CALIBRATION] GAS_BATCH_JOBS_ENABLED = true`). Apply Alembic revision
+`20260928_01` before enabling it. The Dash process launches a detached Python
+worker for each queued batch; the worker needs the same environment, database
+access and current `options`/`dash_options` code as the web process. The job
+stores one verified checkpoint per expiry, resumes after an interrupted lease,
+and rereads the official source before and after fitting. A finished job remains
+a candidate in the page; publication still requires its existing explicit
+action and product write flags. `/health/ready` checks the migration and queue
+tables when this flag is enabled.
 
 The Brent market-data refreshes have separate fail-closed intake flags. Apply
 BBG migrations `002` through `009` in numeric order; the worker-registry

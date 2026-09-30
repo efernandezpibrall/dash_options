@@ -5,9 +5,10 @@ import pandas as pd
 
 from vol_calibration.data_cache import clear_workspace_load_cache
 from vol_calibration.pages import brent
+from pages import brent_vol_history
 
 
-def test_brent_page_requests_observed_data_and_enables_calibration(monkeypatch):
+def test_brent_workspace_uses_pinned_vol_trades_snapshot(monkeypatch):
     clear_workspace_load_cache()
     calls = []
     expiry = pd.Timestamp("2026-09-01")
@@ -36,20 +37,16 @@ def test_brent_page_requests_observed_data_and_enables_calibration(monkeypatch):
         "delta_pct": np.linspace(1, 99, 11),
     })
 
-    def fake_loader(*args, **kwargs):
-        calls.append((args, kwargs))
-        return {
-            "data": market_data,
-            "source": "postgres",
-            "is_synthetic": False,
-            "last_update": None,
-            "message": "Loaded observed Brent option settlements",
-            "error": None,
-            "calibration_mode": "intraday_snapshot",
-            "provenance_complete": True,
-        }
+    def fake_snapshot(snapshot_id, **kwargs):
+        calls.append((snapshot_id, kwargs))
+        return pd.DataFrame()
 
-    monkeypatch.setattr(brent, "load_market_data_with_metadata", fake_loader)
+    monkeypatch.setattr(brent_vol_history, "load_chain_snapshot", fake_snapshot)
+    monkeypatch.setattr(
+        brent_vol_history,
+        "prepare_market_observations",
+        lambda chain, *, product: market_data,
+    )
     monkeypatch.setattr(
         brent,
         "load_operational_surface_payload",
@@ -61,32 +58,28 @@ def test_brent_page_requests_observed_data_and_enables_calibration(monkeypatch):
         },
     )
 
-    result = brent.load_data("2026-07-27", 0)
-
-    loaded_market = pd.read_json(StringIO(result[0]), orient="split")
-    assert calls[0][1]["allow_synthetic_fallback"] is False
-    assert len(loaded_market) == 8
-    assert result[4] is False
-    assert result[6] is False
-    assert "PostgreSQL" in str(result[2])
-    assert "exact-COB official SVI" in result[3]
-
-
-def test_brent_page_blocks_calibration_when_observed_data_is_unavailable(monkeypatch):
-    clear_workspace_load_cache()
-    monkeypatch.setattr(
-        brent,
-        "load_market_data_with_metadata",
-        lambda *args, **kwargs: {
-            "data": pd.DataFrame(),
-            "source": "unavailable",
-            "is_synthetic": False,
-            "last_update": None,
-            "message": "No eligible BRENT market data for 2026-07-27",
-            "error": "physical source schema mismatch",
+    result = brent.load_data(
+        "2026-07-27",
+        0,
+        {
+            "market_product": "BRENT",
+            "market_snapshot_id": "snapshot-123",
+            "market_snapshot_kind": "SETTLEMENT",
+            "market_as_of": "2026-07-27T18:00:00Z",
         },
     )
 
+    loaded_market = pd.read_json(StringIO(result[0]), orient="split")
+    assert calls == [("snapshot-123", {"product": "BRENT", "snapshot_kind": "SETTLEMENT"})]
+    assert len(loaded_market) == 8
+    assert result[4] is False
+    assert result[6] is False
+    assert "Bloomberg Immutable Snapshot" in result[3]
+    assert "exact-COB official SVI" in result[3]
+
+
+def test_brent_workspace_blocks_calibration_without_pinned_snapshot():
+    clear_workspace_load_cache()
     result = brent.load_data("2026-07-27", 0)
 
     loaded_market = pd.read_json(StringIO(result[0]), orient="split")
@@ -95,6 +88,6 @@ def test_brent_page_blocks_calibration_when_observed_data_is_unavailable(monkeyp
     assert loaded_params.empty
     assert result[4] is True
     assert result[6] is True
-    assert "No eligible BRENT market data for 2026-07-27" in result[5]
+    assert "Select a Vol Trades Brent snapshot" in result[5]
     assert "Unavailable" in str(result[2])
-    assert "physical source schema mismatch" in result[3]
+    assert "pinned Brent market snapshot" in result[3]

@@ -8,6 +8,9 @@ from decimal import Decimal
 import hashlib
 from io import StringIO
 import json
+import logging
+import os
+from time import perf_counter
 from typing import Iterable, Mapping
 from uuid import uuid4
 
@@ -18,14 +21,12 @@ from sqlalchemy import inspect, text
 from vol_calibration.auth import Identity, Permission, authorize
 from vol_calibration.calibration_inputs import TTF_CALL_DELTA_NODES
 from vol_calibration.ttf_hybrid_surface import (
-    BRENT_HYBRID_METHOD,
-    BRENT_HYBRID_POLICY_VERSION,
     GAS_HYBRID_POLICY_VERSIONS,
-    HH_HYBRID_METHOD,
-    HH_HYBRID_POLICY_VERSION,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
 )
+from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
+from options.hh_single_surface import HH_SINGLE_SURFACE_POLICY_VERSION
 
 
 PUBLICATION_TABLE = "at_lng.vol_surface_publications"
@@ -38,9 +39,9 @@ PUBLICATION_ENGINE_VERSION = "ttf-intraday-pchip-wing-v1"
 JKM_HYBRID_POLICY_VERSION = "jkm_pchip_core_wing_tail_hybrid_v1"
 _HYBRID_PUBLICATION_POLICIES = {
     "BRENT": {
-        "method": BRENT_HYBRID_METHOD,
-        "policy_version": BRENT_HYBRID_POLICY_VERSION,
-        "engine_version": "brent-svi-projected-pchip-core-v2",
+        "method": "single_svi_actual_strikes",
+        "policy_version": BRENT_SINGLE_SURFACE_POLICY_VERSION,
+        "engine_version": BRENT_SINGLE_SURFACE_POLICY_VERSION,
     },
     "TTF": {
         "method": TTF_HYBRID_METHOD,
@@ -58,11 +59,21 @@ _HYBRID_PUBLICATION_POLICIES = {
         "engine_version": "nbp-pchip-wing-v1",
     },
     "HH": {
-        "method": HH_HYBRID_METHOD,
-        "policy_version": HH_HYBRID_POLICY_VERSION,
-        "engine_version": "hh-lne-projected-pchip-core-v2",
+        "method": "single_svi_seasonal_quotes",
+        "policy_version": HH_SINGLE_SURFACE_POLICY_VERSION,
+        "engine_version": HH_SINGLE_SURFACE_POLICY_VERSION,
     },
 }
+_TIMING_LOG = logging.getLogger(__name__)
+
+
+def _log_publication_timing(enabled, product, stage, seconds, **details):
+    if enabled:
+        suffix = " ".join(f"{key}={value}" for key, value in details.items())
+        _TIMING_LOG.info(
+            "calibration_timing product=%s stage=%s seconds=%.6f %s",
+            product, stage, seconds, suffix,
+        )
 
 _SURFACE_INSERT_COLUMNS = (
     "publication_id",
@@ -160,7 +171,89 @@ def ttf_publication_storage_available(engine) -> bool:
         "vol_surface_publications",
         "implied_volatility_surface_calibrated",
     )
-    return engine is not None and all(_table_available(engine, name) for name in required)
+    if engine is None:
+        return False
+    try:
+        available = set(inspect(engine).get_table_names(schema="at_lng"))
+    except Exception:
+        return False
+    return all(name in available for name in required)
+
+
+def _insert_expiry_results(connection, run_id: str, results: list[dict]) -> None:
+    """Insert all governed expiry diagnostics in one PostgreSQL round trip."""
+    statement = text(
+        f"""
+        INSERT INTO {RESULT_TABLE}
+            (run_id, option_expiration_date, parameters, diagnostics,
+             validation, weighted_rmse, unweighted_rmse, max_error,
+             optimizer_success)
+        VALUES
+            (:run_id, :option_expiration_date,
+             CAST(:parameters AS jsonb), CAST(:diagnostics AS jsonb),
+             CAST(:validation AS jsonb), :weighted_rmse,
+             :unweighted_rmse, :max_error, :optimizer_success)
+        """
+    )
+    rows = [
+        {
+            "run_id": run_id,
+            "option_expiration_date": pd.Timestamp(
+                item["option_expiration_date"]
+            ).date(),
+            "parameters": json.dumps(
+                _json_ready(item.get("parameters") or {}), sort_keys=True
+            ),
+            "diagnostics": json.dumps(
+                _json_ready(item.get("diagnostics") or {}), sort_keys=True
+            ),
+            "validation": json.dumps(
+                _json_ready(item.get("validation") or {}), sort_keys=True
+            ),
+            "weighted_rmse": item.get("weighted_rmse"),
+            "unweighted_rmse": item.get("unweighted_rmse"),
+            "max_error": item.get("max_error"),
+            "optimizer_success": bool(item.get("optimizer_success", True)),
+        }
+        for item in results
+    ]
+    if not rows:
+        return
+    driver_connection = getattr(
+        getattr(connection, "connection", None), "driver_connection", None
+    )
+    cursor_factory = getattr(driver_connection, "cursor", None)
+    if callable(cursor_factory):
+        cursor = cursor_factory()
+        try:
+            if callable(getattr(cursor, "mogrify", None)):
+                from psycopg2.extras import execute_values
+
+                values = [
+                    tuple(row[column] for column in (
+                        "run_id", "option_expiration_date", "parameters",
+                        "diagnostics", "validation", "weighted_rmse",
+                        "unweighted_rmse", "max_error", "optimizer_success",
+                    ))
+                    for row in rows
+                ]
+                execute_values(
+                    cursor,
+                    f"INSERT INTO {RESULT_TABLE} "
+                    "(run_id, option_expiration_date, parameters, diagnostics, "
+                    "validation, weighted_rmse, unweighted_rmse, max_error, "
+                    "optimizer_success) VALUES %s",
+                    values,
+                    template=(
+                        "(%s::uuid, %s, %s::jsonb, %s::jsonb, %s::jsonb, "
+                        "%s, %s, %s, %s)"
+                    ),
+                    page_size=len(values),
+                )
+                return
+        finally:
+            cursor.close()
+    connection.execute(statement, rows)
 
 
 def _as_of_cutoff(trading_date, now: datetime | None = None) -> datetime:
@@ -209,13 +302,15 @@ def load_latest_ttf_publication(
     as_of: datetime | None = None,
     publication_id: str | None = None,
     prefer_exact_cob: bool = False,
+    require_exact_cob: bool = False,
     commodity: str = "TTF",
 ) -> dict:
     """Load one complete hybrid publication, normally without look-ahead.
 
     Calibration review may opt into the active revision for the exact selected
     COB even when that revision was approved later.  Older fallback revisions
-    remain subject to the normal point-in-time cutoff.
+    remain subject to the normal point-in-time cutoff. require_exact_cob selects
+    only that date's active publication, with no older-date fallback.
     """
     product, policy = _publication_policy(commodity)
     if not ttf_publication_storage_available(engine):
@@ -226,7 +321,10 @@ def load_latest_ttf_publication(
         )
     cutoff = _as_of_cutoff(trading_date, as_of)
     if publication_id is None:
-        if prefer_exact_cob:
+        if require_exact_cob:
+            publication_filter = "p.cob_date = :trading_date"
+            publication_order = "p.published_at DESC, p.created_at DESC"
+        elif prefer_exact_cob:
             publication_filter = (
                 "(p.cob_date = :trading_date OR "
                 "(p.cob_date < :trading_date AND p.published_at <= :as_of))"
@@ -333,10 +431,102 @@ def load_latest_ttf_publication(
         "expiry_count": int(points["contract_date"].nunique()) if not points.empty else 0,
         "source": SURFACE_TABLE,
         "commodity": product,
-        "method": policy["method"],
-        "policy_version": policy["policy_version"],
+        "method": configuration.get("method") or policy["method"],
+        "policy_version": configuration.get("policy_version") or policy["policy_version"],
         "expiry_results": [_json_ready(dict(item)) for item in expiry_results],
         "data": points.to_json(date_format="iso", orient="split"),
+        "error": None,
+    }
+
+
+def _load_persisted_publication_receipt(
+    engine, publication_id: str, *, commodity: str
+) -> dict:
+    """Verify a committed revision without transferring its entire dense grid."""
+    product, policy = _publication_policy(commodity)
+    query = text(
+        f"""
+        SELECT p.publication_id, p.run_id, p.cob_date, p.published_at,
+               p.published_by,
+               r.configuration->>'input_manifest_fingerprint' AS input_manifest_fingerprint,
+               r.configuration->>'method' AS calibration_method,
+               r.configuration->>'policy_version' AS calibration_policy_version,
+               points.row_count, points.expiry_count, points.bad_point_count,
+               points.min_fingerprint, points.max_fingerprint,
+               month_sizes.min_points_per_month, month_sizes.max_points_per_month,
+               results.result_count, results.all_valid
+        FROM {PUBLICATION_TABLE} p
+        JOIN {RUN_TABLE} r ON r.run_id = p.run_id
+        CROSS JOIN LATERAL (
+            SELECT COUNT(*) AS row_count,
+                   COUNT(DISTINCT contract_date) AS expiry_count,
+                   COUNT(*) FILTER (WHERE strike <= 0 OR volatility <= 0
+                       OR total_variance <= 0 OR working_forward <= 0
+                       OR delta <= 0 OR delta >= 1
+                       OR strike IS NULL OR volatility IS NULL
+                       OR total_variance IS NULL OR working_forward IS NULL
+                       OR delta IS NULL OR input_fingerprint IS NULL)
+                       AS bad_point_count,
+                   MIN(input_fingerprint) AS min_fingerprint,
+                   MAX(input_fingerprint) AS max_fingerprint
+            FROM {SURFACE_TABLE} s
+            WHERE s.publication_id = p.publication_id
+        ) points
+        CROSS JOIN LATERAL (
+            SELECT MIN(month_count) AS min_points_per_month,
+                   MAX(month_count) AS max_points_per_month
+            FROM (
+                SELECT COUNT(*) AS month_count
+                FROM {SURFACE_TABLE} s
+                WHERE s.publication_id = p.publication_id
+                GROUP BY contract_date
+            ) monthly
+        ) month_sizes
+        CROSS JOIN LATERAL (
+            SELECT COUNT(*) AS result_count,
+                   BOOL_AND(COALESCE((validation->>'is_valid')::boolean, FALSE))
+                       AS all_valid
+            FROM {RESULT_TABLE} x
+            WHERE x.run_id = p.run_id
+        ) results
+        WHERE p.publication_id = CAST(:publication_id AS uuid)
+          AND p.commodity = :commodity AND p.status = 'published' AND p.is_active
+        """
+    )
+    with engine.connect() as connection:
+        row = connection.execute(
+            query, {"publication_id": publication_id, "commodity": product}
+        ).mappings().one_or_none()
+    if row is None:
+        raise TTFPublicationError(f"Published {product} revision is unavailable.")
+    if (
+        int(row["bad_point_count"]) != 0
+        or int(row["min_points_per_month"] or 0) != 401
+        or int(row["max_points_per_month"] or 0) != 401
+        or not row["all_valid"]
+    ):
+        raise TTFPublicationError(
+            f"Published {product} revision failed persisted quality checks."
+        )
+    return {
+        "publication_id": str(row["publication_id"]),
+        "run_id": str(row["run_id"]),
+        "publication_date": pd.Timestamp(row["cob_date"]).date().isoformat(),
+        "published_at": pd.Timestamp(row["published_at"]).isoformat(),
+        "published_by": row["published_by"],
+        "row_count": int(row["row_count"]),
+        "expiry_count": int(row["expiry_count"]),
+        "result_count": int(row["result_count"]),
+        "input_manifest_fingerprint": row["input_manifest_fingerprint"],
+        "point_fingerprint": row["min_fingerprint"]
+        if row["min_fingerprint"] == row["max_fingerprint"]
+        else None,
+        "source": SURFACE_TABLE,
+        "commodity": product,
+        "method": row["calibration_method"] or policy["method"],
+        "policy_version": row["calibration_policy_version"] or policy["policy_version"],
+        "surface_loaded": False,
+        "data": None,
         "error": None,
     }
 
@@ -543,8 +733,13 @@ def publish_ttf_surface(
     notes: str | None = None,
     commodity: str = "TTF",
     input_manifest: Mapping | None = None,
+    return_surface: bool = True,
 ) -> dict:
     """Atomically supersede and publish one complete hybrid surface revision."""
+    timing_enabled = os.getenv("CALIBRATION_TIMING", "").lower() in {
+        "1", "true", "yes", "on"
+    }
+    publication_started = perf_counter() if timing_enabled else 0.0
     product, policy = _publication_policy(commodity)
     # This workflow is explicitly controlled self-publication: the server still
     # requires a publish-capable authenticated identity, but the candidate
@@ -642,6 +837,12 @@ def publish_ttf_surface(
         ),
         "input_manifest_fingerprint": fingerprint,
     }
+    _log_publication_timing(
+        timing_enabled, product, "publication_preparation",
+        perf_counter() - publication_started,
+        points=len(prepared), expiries=len(surface_expiries),
+    )
+    transaction_started = perf_counter() if timing_enabled else 0.0
     with engine.begin() as connection:
         connection.execute(
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -655,11 +856,12 @@ def publish_ttf_surface(
             {"idempotency_key": idempotency_key},
         ).scalar_one_or_none()
         if existing is not None:
-            return load_latest_ttf_publication(
-                engine,
-                trading,
-                publication_id=str(existing),
-                commodity=product,
+            if return_surface:
+                return load_latest_ttf_publication(
+                    engine, trading, publication_id=str(existing), commodity=product
+                )
+            return _load_persisted_publication_receipt(
+                engine, str(existing), commodity=product
             )
 
         current = connection.execute(
@@ -744,41 +946,12 @@ def publish_ttf_surface(
             "approved",
         )
 
-        for item in results:
-            connection.execute(
-                text(
-                    f"""
-                    INSERT INTO {RESULT_TABLE}
-                        (run_id, option_expiration_date, parameters, diagnostics,
-                         validation, weighted_rmse, unweighted_rmse, max_error,
-                         optimizer_success)
-                    VALUES
-                        (:run_id, :option_expiration_date,
-                         CAST(:parameters AS jsonb), CAST(:diagnostics AS jsonb),
-                         CAST(:validation AS jsonb), :weighted_rmse,
-                         :unweighted_rmse, :max_error, :optimizer_success)
-                    """
-                ),
-                {
-                    "run_id": run_id,
-                    "option_expiration_date": pd.Timestamp(
-                        item["option_expiration_date"]
-                    ).date(),
-                    "parameters": json.dumps(
-                        _json_ready(item.get("parameters") or {}), sort_keys=True
-                    ),
-                    "diagnostics": json.dumps(
-                        _json_ready(item.get("diagnostics") or {}), sort_keys=True
-                    ),
-                    "validation": json.dumps(
-                        _json_ready(item.get("validation") or {}), sort_keys=True
-                    ),
-                    "weighted_rmse": item.get("weighted_rmse"),
-                    "unweighted_rmse": item.get("unweighted_rmse"),
-                    "max_error": item.get("max_error"),
-                    "optimizer_success": bool(item.get("optimizer_success", True)),
-                },
-            )
+        expiry_write_started = perf_counter() if timing_enabled else 0.0
+        _insert_expiry_results(connection, run_id, results)
+        _log_publication_timing(
+            timing_enabled, product, "expiry_result_write",
+            perf_counter() - expiry_write_started, results=len(results),
+        )
 
         connection.execute(
             text(
@@ -802,6 +975,7 @@ def publish_ttf_surface(
                 "idempotency_key": idempotency_key,
             },
         )
+        point_write_started = perf_counter() if timing_enabled else 0.0
         point_rows = []
         for row in prepared.to_dict("records"):
             point_rows.append(
@@ -861,6 +1035,11 @@ def publish_ttf_surface(
             raise TTFPublicationError(
                 f"{product} publication point readback did not reconcile."
             )
+        _log_publication_timing(
+            timing_enabled, product, "dense_point_write",
+            perf_counter() - point_write_started, points=len(point_rows),
+            copy=bool(copied),
+        )
         if current is not None:
             connection.execute(
                 text(
@@ -899,27 +1078,53 @@ def publish_ttf_surface(
             "approved",
             "published",
         )
+        commit_started = perf_counter() if timing_enabled else 0.0
 
-    readback = load_latest_ttf_publication(
-        engine,
-        trading,
-        publication_id=publication_id,
-        commodity=product,
+    _log_publication_timing(
+        timing_enabled, product, "transaction_commit",
+        perf_counter() - commit_started, points=len(prepared),
     )
+    _log_publication_timing(
+        timing_enabled, product, "transaction_total",
+        perf_counter() - transaction_started, points=len(prepared),
+    )
+    readback_started = perf_counter() if timing_enabled else 0.0
+    if return_surface:
+        readback = load_latest_ttf_publication(
+            engine, trading, publication_id=publication_id, commodity=product
+        )
+        result_count = len(readback.get("expiry_results") or [])
+        all_valid = all(
+            (item.get("validation") or {}).get("is_valid", False)
+            for item in (readback.get("expiry_results") or [])
+        )
+    else:
+        readback = _load_persisted_publication_receipt(
+            engine, publication_id, commodity=product
+        )
+        result_count = readback["result_count"]
+        all_valid = True  # The receipt checked the persisted aggregate.
     if (
         readback.get("publication_id") != publication_id
         or int(readback.get("row_count") or 0) != len(prepared)
         or int(readback.get("expiry_count") or 0) != len(surface_expiries)
-        or len(readback.get("expiry_results") or []) != len(results)
-        or any(
-            not (item.get("validation") or {}).get("is_valid", False)
-            for item in (readback.get("expiry_results") or [])
-        )
+        or result_count != len(results)
+        or not all_valid
         or readback.get("input_manifest_fingerprint") != fingerprint
+        or (not return_surface and readback.get("point_fingerprint") != fingerprint)
     ):
         raise TTFPublicationError(
             f"Published {product} surface failed post-commit readback."
         )
+    _log_publication_timing(
+        timing_enabled, product, "publication_readback",
+        perf_counter() - readback_started, full_surface=bool(return_surface),
+        rows=readback.get("row_count"), results=result_count,
+    )
+    _log_publication_timing(
+        timing_enabled, product, "publication_total",
+        perf_counter() - publication_started,
+    )
     return readback
 
 
@@ -931,6 +1136,7 @@ def load_latest_hybrid_publication(
     as_of: datetime | None = None,
     publication_id: str | None = None,
     prefer_exact_cob: bool = False,
+    require_exact_cob: bool = False,
 ) -> dict:
     return load_latest_ttf_publication(
         engine,
@@ -938,6 +1144,7 @@ def load_latest_hybrid_publication(
         as_of=as_of,
         publication_id=publication_id,
         prefer_exact_cob=prefer_exact_cob,
+        require_exact_cob=require_exact_cob,
         commodity=commodity,
     )
 
