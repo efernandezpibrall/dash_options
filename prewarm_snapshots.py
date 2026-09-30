@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from pages.vol_surface import prepare_vol_surface_snapshot
+from surface_data import prepare_vol_surface_snapshot
 from source_status import load_dashboard_source_statuses
 
 

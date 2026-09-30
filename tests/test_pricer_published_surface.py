@@ -4,17 +4,24 @@ from datetime import date, timedelta
 
 import pandas as pd
 import pytest
-
 from options.options_library import asian_76, black_76_futures_style
 from options.ttf_volatility import black76_call_delta, delta_node_to_strike
-from pages import pricer
+
 import pricer_surface_reference as surface_reference
+from pricer_exchange_registry import exchange_option_mapping
 from pricer_structure import (
     build_delivery_month_component,
     calculate_structure,
     parallel_volatility_series,
 )
+from pricer_workspace import (
+    constants as pricer_constants,
+)
 
+from pricer_workspace import calculation_callbacks as pricer_calculation_callbacks
+from pricer_workspace import grids as pricer_grids
+from pricer_workspace import pricing as pricer_pricing
+from pricer_workspace import state as pricer_state
 
 AS_OF = date(2026, 7, 30)
 
@@ -113,14 +120,6 @@ def _snapshot(asset, model, context, rows):
     )
 
 
-def _comparison_item(snapshot, structure_id="structure-1", label="S1"):
-    return {
-        "structure_id": structure_id,
-        "structure_label": label,
-        "snapshot": snapshot,
-    }
-
-
 def _governed_loader(volatility, *, cob_date="2026-07-30", saved_forward=100.0):
     def load(asset, _valuation_date, months, *, force_refresh=False, engine=None):
         del force_refresh, engine
@@ -184,7 +183,7 @@ def _assert_compact_surface_tooltip(value, model):
 
 def test_only_black_and_asian_add_two_read_only_surface_columns():
     for model in ("black76", "asian76"):
-        definitions = pricer._leg_column_defs(model)
+        definitions = pricer_grids._leg_column_defs(model)
         groups = [group["headerName"] for group in definitions]
         assert groups[2:4] == ["Volatility", "Published surface"]
         assert "pricer-result-column-group-published" in definitions[3][
@@ -200,7 +199,7 @@ def test_only_black_and_asian_add_two_read_only_surface_columns():
         assert all("surfaceRows" in column["valueGetter"]["function"] for column in surface_columns)
         assert all("surfaceRows" in column["tooltipValueGetter"]["function"] for column in surface_columns)
 
-    kirk_definitions = pricer._leg_column_defs("kirk")
+    kirk_definitions = pricer_grids._leg_column_defs("kirk")
     assert "Published surface" not in [
         group["headerName"] for group in kirk_definitions
     ]
@@ -211,7 +210,7 @@ def test_only_black_and_asian_add_two_read_only_surface_columns():
 
 
 def test_new_pricer_consolidates_surface_vols_and_places_premium_then_value():
-    definitions = pricer._leg_column_defs(
+    definitions = pricer_grids._leg_column_defs(
         "black76",
         signed_lots=True,
         use_published_surface=True,
@@ -314,7 +313,7 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
     }
 
     for model in ("black76", "asian76"):
-        definitions = pricer._leg_column_defs(
+        definitions = pricer_grids._leg_column_defs(
             model,
             signed_lots=True,
             use_published_surface=True,
@@ -338,15 +337,15 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
         assert all(
             column.get("tooltipValueGetter")
             for column in columns
-            if column.get("field") not in pricer.VOLATILITY_ADJUSTMENT_FIELDS
+            if column.get("field") not in pricer_constants.VOLATILITY_ADJUSTMENT_FIELDS
         )
         assert all(
             "tooltipValueGetter" not in column
             for column in columns
-            if column.get("field") in pricer.VOLATILITY_ADJUSTMENT_FIELDS
+            if column.get("field") in pricer_constants.VOLATILITY_ADJUSTMENT_FIELDS
         )
 
-    definitions = pricer._leg_column_defs(
+    definitions = pricer_grids._leg_column_defs(
         "black76",
         signed_lots=True,
         use_published_surface=True,
@@ -366,11 +365,11 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
         if group.get("children")
     )
 
-    current_grid = pricer._build_legs_grid(
+    current_grid = pricer_grids._build_legs_grid(
         signed_lots=True,
         use_published_surface=True,
     )
-    legacy_grid = pricer._build_legs_grid()
+    legacy_grid = pricer_grids._build_legs_grid()
     assert current_grid.dashGridOptions["rowHeight"] == 28
     assert current_grid.dashGridOptions["headerHeight"] == 30
     assert current_grid.dashGridOptions["groupHeaderHeight"] == 24
@@ -400,7 +399,7 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
     kirk_columns = {
         column.get("field") or column.get("colId"): column
         for column in _leaf_columns(
-            pricer._leg_column_defs(
+            pricer_grids._leg_column_defs(
                 "kirk",
                 signed_lots=True,
                 use_published_surface=True,
@@ -413,7 +412,7 @@ def test_current_pricer_leg_grid_uses_route_specific_compact_geometry():
 
 
 def test_grid_merge_preserves_pricing_totals_and_keeps_references_out_of_rows():
-    pricing = pricer._leg_grid_options()
+    pricing = pricer_grids._leg_grid_options()
     pricing["pinnedBottomRowData"] = [{"leg_id": "__total__", "trade_value": 4.0}]
     pricing["context"]["pricingRows"] = {"leg-1": {"trade_value": 4.0}}
     payload = {
@@ -427,7 +426,7 @@ def test_grid_merge_preserves_pricing_totals_and_keeps_references_out_of_rows():
     }
 
     leg_row = _leg()
-    rendered = pricer.render_leg_grid_options(pricing, payload)
+    rendered = pricer_calculation_callbacks.render_leg_grid_options(pricing, payload)
 
     assert rendered["pinnedBottomRowData"] == pricing["pinnedBottomRowData"]
     assert rendered["context"]["pricingRows"] == pricing["context"]["pricingRows"]
@@ -528,7 +527,7 @@ def test_hh_pricer_uses_governed_cme_lne_publication_as_the_unit_vol_source():
     assert result["surface_atm_input_vol"] == pytest.approx(0.55)
     assert result["surface_skew_input_vol"] == pytest.approx(0.0)
     assert result["surface_input_tooltip"].startswith("Surface COB: 2026-07-30")
-    expected_signature = pricer._surface_reference_input_signature(
+    expected_signature = pricer_state._surface_reference_input_signature(
         "HH",
         "black76",
         rows,
@@ -536,7 +535,7 @@ def test_hh_pricer_uses_governed_cme_lne_publication_as_the_unit_vol_source():
         AS_OF.isoformat(),
     )
     payload["_ui_reference_signature"] = expected_signature
-    resolved_rows, source_signature = pricer._published_surface_calculation_rows(
+    resolved_rows, source_signature = pricer_pricing._published_surface_calculation_rows(
         "HH",
         "black76",
         rows,
@@ -654,7 +653,7 @@ def test_cme_bzo_uses_user_forward_and_ice_brent_surface_with_target_expiry():
 @pytest.mark.parametrize("mapping_id", ["CME-BRENT-BE", "CME-BRENT-BZO"])
 def test_cme_brent_allows_only_the_governed_one_day_surface_extension(mapping_id):
     month = "2027-02-01"
-    mapping = pricer.exchange_option_mapping(mapping_id)
+    mapping = exchange_option_mapping(mapping_id)
     component = build_delivery_month_component(
         "Brent",
         "black76",
@@ -762,12 +761,12 @@ def test_committed_atm_edit_reaches_surface_when_row_data_lags():
         "newValue": 20.0,
         "data": {**row, "atm_vol_adjustment": 20.0},
     }]
-    edited = pricer._rows_with_committed_leg_edit([row], event)
+    edited = pricer_state._rows_with_committed_leg_edit([row], event)
     assert edited[0]["atm_vol_adjustment"] == 20.0
     assert row["atm_vol_adjustment"] == 0.0
-    assert pricer._surface_reference_input_signature(
+    assert pricer_state._surface_reference_input_signature(
         "TTF", "black76", edited, context, AS_OF.isoformat()
-    ) != pricer._surface_reference_input_signature(
+    ) != pricer_state._surface_reference_input_signature(
         "TTF", "black76", [row], context, AS_OF.isoformat()
     )
 
@@ -860,7 +859,7 @@ def test_remaining_mappings_apply_and_disclose_governed_expiry_factors(
     month,
     direction,
 ):
-    mapping = pricer.exchange_option_mapping(mapping_id)
+    mapping = exchange_option_mapping(mapping_id)
     forward = 12.0 if asset != "HH" else 3.0
     component = build_delivery_month_component(
         asset,
@@ -950,7 +949,7 @@ def test_tfp_strip_uses_distinct_monthly_expiry_factors_before_flattening():
 def test_ttf_usd_surface_selection_is_unit_independent_at_equal_moneyness(
     mapping_id,
 ):
-    mapping = pricer.exchange_option_mapping(mapping_id)
+    mapping = exchange_option_mapping(mapping_id)
     month = "2026-10-01"
 
     def skew_loader(
@@ -1378,7 +1377,7 @@ def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility(
         AS_OF,
         surface_loader=_loader(vols),
     )
-    signature = pricer._surface_reference_input_signature(
+    signature = pricer_state._surface_reference_input_signature(
         "TTF",
         "black76",
         [row],
@@ -1387,7 +1386,7 @@ def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility(
     )
     payload["_ui_reference_signature"] = signature
     calculation_rows, source_signature = (
-        pricer._published_surface_calculation_rows(
+        pricer_pricing._published_surface_calculation_rows(
             "TTF",
             "black76",
             [row],
@@ -1435,7 +1434,7 @@ def test_strip_calculation_prices_each_month_at_its_adjusted_surface_volatility(
         for item in component_vols
     ]
     snapshot["_ui_input_signature"] = {"published_surface": source_signature}
-    strip_grid = pricer._build_strip_component_grid(snapshot)
+    strip_grid = pricer_grids._build_strip_component_grid(snapshot)
     assert [row["input_vol_pct"] for row in strip_grid.rowData] == pytest.approx(
         [35.0, 42.0, 48.0]
     )
@@ -1489,7 +1488,7 @@ def test_monthly_manual_vol_adjustment_precedes_the_mandatory_expiry_factor(
     month,
     expected_direction,
 ):
-    mapping = pricer.exchange_option_mapping(mapping_id)
+    mapping = exchange_option_mapping(mapping_id)
     component = build_delivery_month_component(
         "TTF",
         "black76",
@@ -1522,7 +1521,7 @@ def test_monthly_manual_vol_adjustment_precedes_the_mandatory_expiry_factor(
         AS_OF,
         surface_loader=_loader({tuple(map(int, month[:7].split("-"))): 0.4}),
     )
-    signature = pricer._surface_reference_input_signature(
+    signature = pricer_state._surface_reference_input_signature(
         "TTF",
         "black76",
         [row],
@@ -1531,7 +1530,7 @@ def test_monthly_manual_vol_adjustment_precedes_the_mandatory_expiry_factor(
     )
     payload["_ui_reference_signature"] = signature
     calculation_rows, source_signature = (
-        pricer._published_surface_calculation_rows(
+        pricer_pricing._published_surface_calculation_rows(
             "TTF",
             "black76",
             [row],
@@ -1779,321 +1778,20 @@ def test_publication_queries_are_select_only_and_month_bounded(monkeypatch):
     assert not any(word in rendered.upper() for word in ("INSERT ", "UPDATE ", "DELETE "))
 
 
-@pytest.mark.parametrize("model", ["black76", "asian76"])
-def test_comparison_marker_uses_raw_contract_vol_and_model_consistent_delta(model):
-    month = "2027-04-01"
-    forward = 17.0
-    context, _component = _monthly_context(
-        "JKM",
-        model,
-        month,
-        forward=forward,
-    )
-    snapshot = _snapshot(
-        "JKM",
-        model,
-        context,
-        [_leg(strike=18.0, basis="VOL")],
-    )
-    views = surface_reference.build_surface_comparison_views(
-        [_comparison_item(snapshot)],
-        surface_loader=_loader({(2027, 4): 0.56}),
-    )
-
-    assert len(views) == 1
-    view = views[0]
-    assert view["status"] == "ready"
-    assert view["source_kind"] == "governed"
-    assert len(view["quote_points"]) == 1
-    assert all(0.0 < point["delta"] < 1.0 for point in view["curve_points"])
-    quote = view["quote_points"][0]
-    assert quote["contract_volatility"] == pytest.approx(
-        snapshot["legs"][0]["raw_volatility"]
-    )
-    normalized_component = surface_reference._delivery_components(
-        snapshot["context"]
-    )[0]
-    expected_call_delta = surface_reference._pricing_model_call_delta(
-        model,
-        snapshot["context"],
-        normalized_component,
-        quote["strike"],
-        quote["pricing_volatility"],
-    )
-    assert quote["delta"] == pytest.approx(1.0 - expected_call_delta)
-
-
-def test_asian_comparison_delta_differs_from_black_for_averaging_contract():
-    month = "2027-04-01"
-    items = []
-    for index, model in enumerate(("black76", "asian76"), start=1):
-        context, _component = _monthly_context(
-            "JKM", model, month, forward=17.0
-        )
-        snapshot = _snapshot(
-            "JKM", model, context, [_leg(strike=17.0, basis="VOL")]
-        )
-        items.append(_comparison_item(snapshot, f"structure-{index}", f"S{index}"))
-
-    views = surface_reference.build_surface_comparison_views(
-        items,
-        surface_loader=_loader({(2027, 4): 0.56}),
-    )
-    deltas = {view["model"]: view["quote_points"][0]["delta"] for view in views}
-
-    assert deltas["asian76"] != pytest.approx(deltas["black76"])
-
-
 def test_short_dated_far_wing_delta_saturation_is_a_valid_axis_endpoint():
-    context = {"forward": 100.0, "rate": 0.0}
     component = {"forward": 100.0, "time_to_expiry": 1.0 / 365.25}
 
-    call_delta = surface_reference._pricing_model_call_delta(
+    call_delta = surface_reference._surface_model_call_delta(
         "black76",
-        context,
         component,
-        1_000.0,
-        0.20,
+        current_forward=100.0,
+        strike=1_000.0,
+        reference_time=component["time_to_expiry"],
+        reference_volatility=0.20,
+        pricing_volatility=0.20,
     )
 
     assert call_delta == 0.0
-
-
-def test_premium_implied_quote_marker_reconciles_with_published_surface_column():
-    month = "2027-04-01"
-    context, _component = _monthly_context(
-        "JKM", "asian76", month, forward=17.0
-    )
-    direct_snapshot = _snapshot(
-        "JKM",
-        "asian76",
-        context,
-        [_leg(strike=17.0, basis="VOL")],
-    )
-    premium = direct_snapshot["legs"][0]["unit"]["value"]
-    premium_leg = _leg(strike=17.0, basis="PREMIUM")
-    premium_leg["quote_value"] = premium
-    snapshot = _snapshot("JKM", "asian76", context, [premium_leg])
-    loader = _loader({(2027, 4): 0.560741154658339})
-
-    view = surface_reference.build_surface_comparison_views(
-        [_comparison_item(snapshot)],
-        surface_loader=loader,
-    )[0]
-    published = surface_reference.build_published_surface_reference(
-        "JKM",
-        "asian76",
-        snapshot["context"],
-        snapshot["legs"],
-        AS_OF,
-        surface_loader=loader,
-    )
-    quote = view["quote_points"][0]
-
-    assert snapshot["legs"][0]["quote_basis"] == "PREMIUM"
-    assert quote["quote_basis_label"] == "Premium-implied"
-    assert quote["contract_volatility"] == pytest.approx(
-        snapshot["legs"][0]["raw_volatility"]
-    )
-    assert quote["reference_volatility"] == pytest.approx(
-        published["rows"]["leg-1"]["surface_input_vol"]
-    )
-
-
-@pytest.mark.parametrize(
-    ("asset", "model", "shape", "year", "vols"),
-    [
-        (
-            "TTF",
-            "black76",
-            "Q4",
-            2026,
-            {(2026, 10): 0.35, (2026, 11): 0.42, (2026, 12): 0.48},
-        ),
-        (
-            "JKM",
-            "asian76",
-            "Q1",
-            2027,
-            {(2027, 1): 0.50, (2027, 2): 0.58, (2027, 3): 0.66},
-        ),
-    ],
-)
-def test_comparison_strip_curve_reproduces_weighted_monthly_premium(
-    asset,
-    model,
-    shape,
-    year,
-    vols,
-):
-    context = {
-        "asset": asset,
-        "premium_convention": "futures_style",
-        "delivery_shape": shape,
-        "delivery_year": year,
-        "forward": 30.0,
-        "rate": 0.0,
-    }
-    snapshot = _snapshot(
-        asset,
-        model,
-        context,
-        [_leg(strike=30.0, call_put="P", basis="VOL")],
-    )
-    view = surface_reference.build_surface_comparison_views(
-        [_comparison_item(snapshot)],
-        surface_loader=_loader(vols),
-    )[0]
-    point = view["curve_points"][len(view["curve_points"]) // 2]
-    strike = point["strike"]
-    flat = point["pricing_volatility"]
-    monthly_target = 0.0
-    flat_target = 0.0
-    for component in snapshot["context"]["delivery_components"]:
-        month = date.fromisoformat(component["contract_month"])
-        monthly_target += component["weight"] * surface_reference._component_price(
-            model,
-            snapshot["context"],
-            component,
-            "C",
-            strike,
-            vols[(month.year, month.month)],
-        )
-        flat_target += component["weight"] * surface_reference._component_price(
-            model,
-            snapshot["context"],
-            component,
-            "C",
-            strike,
-            flat,
-        )
-
-    assert flat_target == pytest.approx(monthly_target, abs=1e-10)
-    arithmetic_vol = sum(
-        component["weight"]
-        * vols[
-            (
-                date.fromisoformat(component["contract_month"]).year,
-                date.fromisoformat(component["contract_month"]).month,
-            )
-        ]
-        for component in snapshot["context"]["delivery_components"]
-    )
-    assert flat != pytest.approx(arithmetic_vol, abs=1e-5)
-
-
-def test_duplicate_contexts_share_one_card_and_source_batch_unions_months():
-    december_context, _ = _monthly_context(
-        "TTF", "black76", "2026-12-01", forward=100.0
-    )
-    january_context, _ = _monthly_context(
-        "TTF", "black76", "2027-01-01", forward=100.0
-    )
-    december = _snapshot(
-        "TTF", "black76", december_context, [_leg(strike=100.0)]
-    )
-    january = _snapshot(
-        "TTF", "black76", january_context, [_leg(strike=101.0)]
-    )
-    calls = []
-    base_loader = _loader({(2026, 12): 0.4, (2027, 1): 0.42})
-
-    def loader(asset, valuation_date, months, **kwargs):
-        calls.append((asset, valuation_date, tuple(months)))
-        return base_loader(asset, valuation_date, months, **kwargs)
-
-    views = surface_reference.build_surface_comparison_views(
-        [
-            _comparison_item(december, "structure-1", "S1"),
-            _comparison_item(december, "structure-2", "S2"),
-            _comparison_item(january, "structure-3", "S3"),
-        ],
-        surface_loader=loader,
-    )
-
-    assert len(calls) == 1
-    assert {month.isoformat() for month in calls[0][2]} == {
-        "2026-12-01",
-        "2027-01-01",
-    }
-    assert len(views) == 2
-    december_view = next(view for view in views if view["delivery_label"] == "Dec-26")
-    assert december_view["structure_label"] == "S1, S2"
-    assert len(december_view["quote_points"]) == 2
-
-
-def test_governed_nbp_route_is_exact_and_prior_cob_is_visible():
-    context, _component = _monthly_context(
-        "NBP", "black76", "2026-11-01", forward=100.0
-    )
-    snapshot = _snapshot(
-        "NBP", "black76", context, [_leg(strike=100.0, basis="VOL")]
-    )
-
-    view = surface_reference.build_surface_comparison_views(
-        [_comparison_item(snapshot)],
-        surface_loader=_governed_loader(0.45, cob_date="2026-07-29"),
-    )[0]
-
-    assert view["status"] == "ready"
-    assert view["source_kind"] == "governed"
-    assert view["surface_cob"] == "2026-07-29"
-    assert any("Prior COB" in warning for warning in view["warnings"])
-    assert view["quote_points"][0]["reference_volatility"] == pytest.approx(0.45)
-
-
-def test_governed_failure_never_falls_back_to_operational_and_kirk_is_explicit():
-    context, _component = _monthly_context(
-        "TTF", "black76", "2026-12-01", forward=100.0
-    )
-    snapshot = _snapshot("TTF", "black76", context, [_leg(strike=100.0)])
-    operational_calls = []
-
-    def governed_loader(*_args, **_kwargs):
-        raise surface_reference.SurfaceReferenceError("Governed publication missing")
-
-    def operational_loader(*args, **_kwargs):
-        operational_calls.append(args)
-        raise AssertionError("Governed failure must not use operational data")
-
-    failed = surface_reference.build_surface_comparison_views(
-        [_comparison_item(snapshot)],
-        surface_loader=governed_loader,
-        operational_loader=operational_loader,
-    )[0]
-    kirk_snapshot = {
-        "model": "kirk",
-        "model_label": "Kirk",
-        "calculation_date": AS_OF.isoformat(),
-        "context": {"asset": "TTF"},
-        "legs": [{"leg_id": "leg-1"}],
-    }
-    kirk = surface_reference.build_surface_comparison_views(
-        [_comparison_item(kirk_snapshot)]
-    )[0]
-
-    assert failed["status"] == "error"
-    assert failed["message"] == "Governed publication missing"
-    assert operational_calls == []
-    assert kirk["status"] == "unsupported"
-    assert "two volatility inputs" in kirk["message"]
-
-
-def test_out_of_range_quote_failure_is_isolated_inside_ready_card():
-    context, _component = _monthly_context(
-        "TTF", "black76", "2026-12-01", forward=100.0
-    )
-    snapshot = _snapshot(
-        "TTF", "black76", context, [_leg(strike=1_000_000.0, basis="VOL")]
-    )
-    view = surface_reference.build_surface_comparison_views(
-        [_comparison_item(snapshot)],
-        surface_loader=_loader({(2026, 12): 0.4}),
-    )[0]
-
-    assert view["status"] == "ready"
-    assert view["quote_points"] == []
-    assert any("outside the rebased published range" in warning for warning in view["warnings"])
 
 
 def test_surface_rebases_the_stored_strike_moneyness_not_the_delta_coordinate():
@@ -2204,11 +1902,11 @@ def test_kirk_resolves_both_governed_50_call_delta_anchors_independently():
         AS_OF,
         expiry_surface_loader=expiry_loader,
     )
-    signature = pricer._surface_reference_input_signature(
+    signature = pricer_state._surface_reference_input_signature(
         "JKM", "kirk", [row], context, AS_OF.isoformat()
     )
     payload["_ui_reference_signature"] = signature
-    resolved_rows, source_signature = pricer._published_surface_calculation_rows(
+    resolved_rows, source_signature = pricer_pricing._published_surface_calculation_rows(
         "JKM", "kirk", [row], payload, signature
     )
     snapshot = calculate_structure(
@@ -2233,7 +1931,7 @@ def test_current_pricer_kirk_volatility_columns_are_governed_and_read_only():
     columns = {
         column.get("field") or column.get("colId"): column
         for column in _leaf_columns(
-            pricer._leg_column_defs(
+            pricer_grids._leg_column_defs(
                 "kirk",
                 signed_lots=True,
                 use_published_surface=True,

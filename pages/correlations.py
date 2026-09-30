@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from analytics_components import empty_figure as _empty_figure
 from dash_utils import triggered_id
 from market_data import FORWARD_CURVE_PRODUCTS, clear_forward_curve_cache, load_forward_curves
 from source_status import make_source_status
@@ -172,18 +173,6 @@ def calculate_correlation_analysis(grouped, period, selected_products, pair_a, p
         'rolling': rolling,
         'regression': regression,
     }
-
-
-def _empty_figure(message):
-    figure = go.Figure()
-    figure.update_layout(
-        template='plotly_white',
-        xaxis={'visible': False},
-        yaxis={'visible': False},
-        margin=dict(l=20, r=20, t=20, b=20),
-    )
-    figure.add_annotation(text=message, x=0.5, y=0.5, showarrow=False, xref='paper', yref='paper')
-    return figure
 
 
 def _matrix_figure(analysis):

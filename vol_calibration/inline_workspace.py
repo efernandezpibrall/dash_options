@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from vol_calibration import auth as calibration_auth
+
+from vol_calibration import ttf_publication as publication_data
+
 import copy
 from datetime import datetime, timezone
 from io import StringIO
@@ -13,7 +17,6 @@ import dash_bootstrap_components as dbc
 import pandas as pd
 from dash import Input, Output, State, callback, dcc, html, no_update
 from dash.exceptions import PreventUpdate
-from flask import has_request_context, request
 
 from options.hh_lne_calibration import (
     HH_LNE_CALIBRATION_ENGINE_VERSION,
@@ -22,8 +25,7 @@ from options.hh_lne_calibration import (
     resolve_hh_lne_snapshot_reference,
 )
 from runtime_config import get_database_engine
-from vol_calibration.auth import resolve_request_identity
-from vol_calibration.brent_single_candidate import active_brent_publication
+from vol_trades_data import active_brent_publication
 from vol_calibration.feature_flags import (
     jkm_publication_enabled,
     ttf_publication_enabled,
@@ -319,12 +321,6 @@ def enable_inline_jkm_publication(confirmation):
     )
 
 
-def _identity():
-    headers = request.headers if has_request_context() else {}
-    remote_addr = request.remote_addr if has_request_context() else None
-    return resolve_request_identity(headers, remote_addr=remote_addr)
-
-
 def _confirmed(values):
     if "confirmed" not in (values or []):
         raise PermissionError("Explicit publication confirmation is required.")
@@ -334,21 +330,6 @@ def _manifest_key(commodity: str, cob_date, manifest: dict[str, Any]) -> str:
     return (
         f"inline:{commodity.lower()}:{pd.Timestamp(cob_date).date().isoformat()}:"
         f"{input_manifest_fingerprint(manifest)}"
-    )
-
-
-def _same_day_publication_id(publication, cob_date):
-    if not publication or not publication.get("publication_id"):
-        return None
-    publication_date = pd.to_datetime(
-        publication.get("publication_date"), errors="coerce"
-    )
-    if pd.isna(publication_date):
-        return None
-    return (
-        publication.get("publication_id")
-        if publication_date.date() == pd.Timestamp(cob_date).date()
-        else None
     )
 
 
@@ -443,7 +424,7 @@ def publish_inline_ttf(
             "policy_version": TTF_HYBRID_POLICY_VERSION,
             "code_revision": os.getenv("APP_CODE_REVISION", "unknown"),
         }
-        identity = _identity()
+        identity = calibration_auth.current_request_identity()
         payload = publish_ttf_surface(
             get_database_engine(),
             complete,
@@ -458,7 +439,7 @@ def publish_inline_ttf(
                 rows_by_expiry.keys(),
             ),
             base_publication_id=(current_publication or {}).get("publication_id"),
-            expected_current_publication_id=ttf._same_day_publication_id(
+            expected_current_publication_id=publication_data.same_day_publication_id(
                 current_publication, trading_date
             ),
             idempotency_key=_manifest_key("TTF", trading_date, manifest),
@@ -545,7 +526,7 @@ def publish_inline_jkm(
             "policy_version": JKM_HYBRID_POLICY_VERSION,
             "code_revision": os.getenv("APP_CODE_REVISION", "unknown"),
         }
-        identity = _identity()
+        identity = calibration_auth.current_request_identity()
         payload = publish_hybrid_surface(
             get_database_engine(),
             complete,
@@ -556,7 +537,7 @@ def publish_inline_jkm(
             identity=identity,
             created_by=str(identity.subject),
             base_publication_id=(current_publication or {}).get("publication_id"),
-            expected_current_publication_id=jkm._same_day_publication_id(
+            expected_current_publication_id=publication_data.same_day_publication_id(
                 current_publication, trading_date
             ),
             idempotency_key=_manifest_key("JKM", trading_date, manifest),

@@ -2,200 +2,12 @@ import dash
 import dash_ag_grid as dag
 from dash import html, dcc, Input, Output, State
 import json
-import threading
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import datetime
-from sqlalchemy import text
 
-from db_fallback import DB_SCHEMA, fq_table, read_with_fallback, sql_literal
+import market_data
 
 
-ENVERUS_UNDERLYING_SOURCES = {
-    'HH': {'code': 'ICE_HH', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
-    'NBP': {'code': 'ICE_UKD', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
-    'TFM': {'code': 'ICE_TTF', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
-    'TFU': {'code': 'ICE_TFU_MO', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
-    'Brent': {'code': 'ICE_BRENT_FUTURES', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
-    'JKM': {'code': 'ICE_JKM_MO', 'category': 'FINANCIAL', 'version_name': 'FINAL'},
-}
-ENVERUS_CODE_TO_PRODUCT = {
-    source['code']: product
-    for product, source in ENVERUS_UNDERLYING_SOURCES.items()
-}
-
-
-def _sql_in_literal(values):
-    return ', '.join(sql_literal(value) for value in values)
-
-
-def _normalize_enverus_prices(df):
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                'trade_date',
-                'hub',
-                'product',
-                'maturity_date',
-                'expiration_date',
-                'contract',
-                'contract_type',
-                'settlement_price',
-                'code',
-            ]
-        )
-
-    normalized = df.copy()
-    normalized['trade_date'] = pd.to_datetime(normalized['COB'], errors='coerce')
-    normalized['maturity_date'] = np.where(
-        normalized['contract'].eq('SPOT'),
-        normalized['trade_date'],
-        pd.to_datetime(normalized['contract'], format='%YM%m', errors='coerce'),
-    )
-    normalized['expiration_date'] = pd.to_datetime(normalized['expiry'], errors='coerce')
-    normalized['settlement_price'] = pd.to_numeric(normalized['value'], errors='coerce')
-    normalized['product'] = normalized['code'].map(ENVERUS_CODE_TO_PRODUCT).fillna(normalized['code'])
-    normalized['contract_type'] = None
-    normalized['hub'] = None
-    normalized['contract'] = normalized['product']
-
-    normalized = normalized.dropna(subset=['trade_date', 'maturity_date', 'settlement_price'])
-    return normalized[
-        [
-            'trade_date',
-            'hub',
-            'product',
-            'maturity_date',
-            'expiration_date',
-            'contract',
-            'contract_type',
-            'settlement_price',
-            'code',
-        ]
-    ].reset_index(drop=True)
-
-
-def get_enverus_underlying_prices(from_COB, to_COB):
-    """Load only the five most recent curve COBs in the requested window."""
-    postgres_from_cob = datetime.datetime.strptime(str(from_COB), "%Y%m%d").date()
-    postgres_to_cob = datetime.datetime.strptime(str(to_COB), "%Y%m%d").date()
-    codes = [source['code'] for source in ENVERUS_UNDERLYING_SOURCES.values()]
-    categories = sorted({source['category'] for source in ENVERUS_UNDERLYING_SOURCES.values()})
-    versions = sorted({source['version_name'] for source in ENVERUS_UNDERLYING_SOURCES.values()})
-
-    trino_query = '''WITH selected_dates AS (
-                        SELECT DISTINCT ondate_index
-                        FROM enverus.curve
-                        WHERE code IN ({})
-                            AND category IN ({})
-                            AND version_name IN ({})
-                            AND ondate_index >= {}
-                            AND ondate_index <= {}
-                        ORDER BY ondate_index DESC
-                        LIMIT 5
-                    )
-                    SELECT   code,
-                        ondate AS COB,
-                        currency,
-                        units,
-                        forward_curve_tenors_expiry AS expiry,
-                        forward_curve_tenors_absolute AS contract,
-                        forward_curve_tenors_value AS value
-                        FROM enverus.curve
-                        WHERE code IN ({})
-                            AND category IN ({})
-                            AND version_name IN ({})
-                            AND ondate_index >= {}
-                            AND ondate_index <= {}
-                            AND ondate_index IN (SELECT ondate_index FROM selected_dates)
-                            AND forward_curve_tenors_absolute NOT IN ('M-1','M-2','M-3')
-                            AND forward_curve_tenors_value is not null
-                        ORDER BY ondate, forward_curve_tenors_tenor
-                            '''.format(
-                                _sql_in_literal(codes),
-                                _sql_in_literal(categories),
-                                _sql_in_literal(versions),
-                                int(from_COB),
-                                int(to_COB),
-                                _sql_in_literal(codes),
-                                _sql_in_literal(categories),
-                                _sql_in_literal(versions),
-                                int(from_COB),
-                                int(to_COB),
-                            )
-    postgres_query = text(
-        f'''
-        WITH selected_dates AS (
-            SELECT DISTINCT cob
-            FROM {fq_table(DB_SCHEMA, 'curve')}
-            WHERE code = ANY(:codes)
-              AND cob >= :from_cob
-              AND cob <= :to_cob
-            ORDER BY cob DESC
-            LIMIT 5
-        )
-        SELECT  code,
-                cob AS "COB",
-                currency,
-                units,
-                expiry,
-                contract,
-                value::double precision AS value
-        FROM {fq_table(DB_SCHEMA, 'curve')}
-        WHERE code = ANY(:codes)
-          AND cob >= :from_cob
-          AND cob <= :to_cob
-          AND cob IN (SELECT cob FROM selected_dates)
-          AND contract NOT IN ('M-1','M-2','M-3')
-          AND value IS NOT NULL
-        ORDER BY cob, expiry
-        '''
-    )
-    df_enverus = read_with_fallback(
-        trino_query,
-        postgres_query,
-        catalog='transformed',
-        schema='enverus',
-        postgres_params={
-            'codes': codes,
-            'from_cob': postgres_from_cob,
-            'to_cob': postgres_to_cob,
-        },
-        context_label='Underlying prices Enverus load',
-    )
-
-    return _normalize_enverus_prices(df_enverus)
-
-
-df_options = _normalize_enverus_prices(pd.DataFrame())
-_prices_data_loaded = False
-_prices_data_refresh_key = None
-_prices_data_lock = threading.Lock()
-
-
-def _ensure_prices_data(force=False, refresh_key=None):
-    global df_options, _prices_data_loaded, _prices_data_refresh_key
-    with _prices_data_lock:
-        should_reload = not _prices_data_loaded
-        if force:
-            should_reload = refresh_key is None or refresh_key != _prices_data_refresh_key
-
-        if should_reload:
-            try:
-                # Get recent dates for current underlying price monitoring.
-                end_date = datetime.datetime.now()
-                start_date = end_date - datetime.timedelta(days=30)
-                df_options = get_enverus_underlying_prices(
-                    from_COB=start_date.strftime("%Y%m%d"),
-                    to_COB=end_date.strftime("%Y%m%d"),
-                )
-            except Exception:
-                df_options = _normalize_enverus_prices(pd.DataFrame())
-            _prices_data_loaded = True
-            if force:
-                _prices_data_refresh_key = refresh_key
-    return df_options
 
 
 PRICE_GROUPING_OPTIONS = [
@@ -617,7 +429,7 @@ def init_date_pickers(n_clicks):
         # Create a new default date (today)
         default_date = pd.Timestamp.now().strftime('%Y-%m-%d')
         default_prev_date = (pd.Timestamp.now() - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-        price_data = _ensure_prices_data(force=bool(n_clicks), refresh_key=n_clicks)
+        price_data = market_data.ensure_underlying_prices(force=bool(n_clicks), refresh_key=n_clicks)
 
         # Check if df_options exists and is accessible
         if price_data is None or not isinstance(price_data, pd.DataFrame):
@@ -698,7 +510,7 @@ def find_closest_date(df, date_column, target_date):
 )
 def init_unified_products(n_clicks):
     try:
-        price_data = _ensure_prices_data(force=bool(n_clicks), refresh_key=n_clicks)
+        price_data = market_data.ensure_underlying_prices(force=bool(n_clicks), refresh_key=n_clicks)
 
         # Check if df_options exists and is accessible
         if price_data is None or not isinstance(price_data, pd.DataFrame):
@@ -736,7 +548,7 @@ def set_prev_date(n_clicks, current_date):
     try:
         if n_clicks is None or current_date is None:
             raise dash.exceptions.PreventUpdate
-        price_data = _ensure_prices_data(force=bool(n_clicks), refresh_key=n_clicks)
+        price_data = market_data.ensure_underlying_prices(force=bool(n_clicks), refresh_key=n_clicks)
 
         # Check if df_options exists and is accessible
         if price_data is None or not isinstance(price_data, pd.DataFrame):
@@ -993,7 +805,7 @@ def group_data_by_period(data, grouping_mode):
 
 
 def _prepare_price_dataset(selected_products):
-    price_data = _ensure_prices_data()
+    price_data = market_data.ensure_underlying_prices()
 
     if price_data is None or not isinstance(price_data, pd.DataFrame):
         return None, 'DataFrame not available.'

@@ -8,7 +8,9 @@ import pandas as pd
 import pytest
 
 import brent_option_chain_refresh as gateway
+from vol_trades_workspace import history_charts, trade_tape as tape_views
 from pages import brent_vol_history as history
+import vol_trades_data as market_data
 from vol_calibration.auth import (
     AuthorizationError,
     Identity,
@@ -462,7 +464,7 @@ def test_snapshot_dropdown_uses_exact_ids_and_prioritizes_completed_intraday(mon
         ]
     )
     monkeypatch.setattr(
-        history, "load_available_snapshots", lambda _product: snapshots
+        market_data, "load_available_snapshots", lambda _product: snapshots
     )
     options, selected = history.update_history_dates(
         0,
@@ -496,7 +498,7 @@ def test_settlement_completion_reloads_and_selects_its_result_snapshot(monkeypat
         ]
     )
     monkeypatch.setattr(
-        history, "load_available_snapshots", lambda _product: snapshots
+        market_data, "load_available_snapshots", lambda _product: snapshots
     )
 
     options, selected = history.update_history_dates(
@@ -1319,15 +1321,15 @@ def _calibrated_points(volatility=0.30):
 
 
 def test_calibrated_points_cache_is_bounded_copied_and_publication_keyed(monkeypatch):
-    history._cached_calibrated_surface_points.cache_clear()
+    market_data._cached_calibrated_surface_points.cache_clear()
     publication_ids = iter(["publication-1", "publication-1", "publication-2"])
     calls = {"catalog": 0, "points": 0}
     engine = object()
-    monkeypatch.setattr(history, "get_database_engine", lambda **_kwargs: engine)
+    monkeypatch.setattr(market_data, "get_database_engine", lambda **_kwargs: engine)
 
     def _read_sql(query, _engine, params):
         sql = str(query)
-        if history.CALIBRATED_PUBLICATION_TABLE in sql:
+        if market_data.CALIBRATED_PUBLICATION_TABLE in sql:
             calls["catalog"] += 1
             return _calibrated_catalog(next(publication_ids))
         calls["points"] += 1
@@ -1336,36 +1338,36 @@ def test_calibrated_points_cache_is_bounded_copied_and_publication_keyed(monkeyp
 
     monkeypatch.setattr(history.pd, "read_sql", _read_sql)
 
-    first = history.load_latest_calibrated_surface(
+    first = market_data.load_latest_calibrated_surface(
         "2026-08-14",
         ["2026-12-01", "2026-12-01"],
     )
     first.loc[first.index[0], "volatility"] = 9.0
-    second = history.load_latest_calibrated_surface(
+    second = market_data.load_latest_calibrated_surface(
         "2026-08-14",
         ["2026-12-01"],
     )
-    third = history.load_latest_calibrated_surface(
+    third = market_data.load_latest_calibrated_surface(
         "2026-08-14",
         ["2026-12-01"],
     )
 
     assert calls == {"catalog": 3, "points": 2}
     assert second.iloc[0]["volatility"] == pytest.approx(0.30)
-    assert history.calibrated_publication_metadata(second)["publication_id"] == (
+    assert market_data.calibrated_publication_metadata(second)["publication_id"] == (
         "publication-1"
     )
-    assert history.calibrated_publication_metadata(third)["publication_id"] == (
+    assert market_data.calibrated_publication_metadata(third)["publication_id"] == (
         "publication-2"
     )
-    assert history._cached_calibrated_surface_points.cache_info().maxsize == 8
+    assert market_data._cached_calibrated_surface_points.cache_info().maxsize == 8
 
 
 def test_calibrated_cache_preserves_invalid_points_status(monkeypatch):
     reads = iter([_calibrated_catalog("publication-1"), _calibrated_points(-1.0)])
     monkeypatch.setattr(history.pd, "read_sql", lambda *_args, **_kwargs: next(reads))
 
-    surface = history.load_latest_calibrated_surface(
+    surface = market_data.load_latest_calibrated_surface(
         "2026-08-14",
         ["2026-12-01"],
         engine=object(),
@@ -1505,7 +1507,7 @@ def test_intraday_chart_keeps_oi_behind_volume_and_highlights_new_volume():
             "exclusion_reason": [""],
         }
     )
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         prepared,
         pd.DataFrame(),
@@ -1545,7 +1547,7 @@ def test_intraday_delta_axis_uses_trade_time_future_for_trade_marker():
     trade_row = chain["last_trade_iv_status"].eq("resolved")
     chain.loc[trade_row, "last_trade_underlying_price"] = 90.0
     prepared = pd.DataFrame()
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         prepared,
         pd.DataFrame(),
@@ -1563,7 +1565,7 @@ def test_intraday_delta_axis_uses_trade_time_future_for_trade_marker():
 def test_trade_window_filters_only_exact_trade_overlays_and_rows():
     chain = _intraday_chain()
     tape = _trade_tape()
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         pd.DataFrame(),
         pd.DataFrame(),
@@ -1581,9 +1583,9 @@ def test_trade_window_filters_only_exact_trade_overlays_and_rows():
     assert traces["Trade-time IV · Puts"].customdata[0][5] == "Prevailing mid"
     assert figure.layout.yaxis.range is not None
 
-    recent = history.filter_trade_window(tape, 12 * 3600 + 20 * 60)
+    recent = tape_views.filter_trade_window(tape, 12 * 3600 + 20 * 60)
     assert recent["option_security"].tolist() == ["COZ6P 75 Comdty"]
-    rows = history._trade_tape_rows(recent, "2026-12-01", 0)
+    rows = tape_views._trade_tape_rows(recent, "2026-12-01", 0)
     assert len(rows) == 1
     assert rows[0]["trade_size"] == 20.0
     assert rows[0]["future_match_source"] == "Prevailing mid"
@@ -1593,7 +1595,7 @@ def test_delta_axis_does_not_use_untimed_last_price_as_an_iv_reference():
     chain = _intraday_chain()
     chain["executable_iv_status"] = "unavailable"
     chain[["executable_iv_bid", "executable_iv_mid", "executable_iv_ask"]] = np.nan
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         pd.DataFrame(),
         pd.DataFrame(),
@@ -1629,7 +1631,7 @@ def test_layout_orders_primary_and_trade_controls_in_sticky_toolbar():
     assert toolbar.children[3].children[1].id == "brent-vol-history-date"
     assert toolbar.children[4].children[1].children.id == "brent-vol-history-trade-start"
     assert toolbar.children[5].children[1].children[0].id == "brent-vol-history-trade-all"
-    assert toolbar.children[5].children[1].children[-2].id == "brent-vol-history-trade-latest"
+    assert toolbar.children[5].children[1].children[-2].id == "brent-vol-history-trade-15m"
     assert (
         toolbar.children[5].children[1].children[-1].id
         == "brent-vol-history-market-data-status"

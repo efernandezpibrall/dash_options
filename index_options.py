@@ -1,7 +1,9 @@
-# index.py
+"""Options dashboard shell, page registry and shared navigation callbacks."""
 import json
 import os
+from dataclasses import dataclass
 from datetime import date, datetime
+from typing import Optional
 from urllib.parse import parse_qs
 
 from dash import html, dcc, clientside_callback
@@ -18,7 +20,6 @@ import pages.brent_vol_history
 import pages.ice_chat_quotes
 import pages.prices
 import pages.pricer
-import pages.pricer_new
 import pages.correlations
 import pages.scenarios
 import pages.pnl_explain
@@ -42,48 +43,57 @@ def redirect_retired_ice_quotes():
     return redirect('/brent_vol_history#ice-quotes', code=302)
 
 
-PAGE_TITLES = {
-    '/': 'Greeks',
-    '/greeks': 'Greeks',
-    '/valuation': 'Valuation',
-    '/trades': 'Trades',
-    '/prices': 'Underlying Prices',
-    '/vol_surface': 'Volatility Surface',
-    '/brent_vol_history': 'Vol Trades',
-    '/correlations': 'Correlations',
-    '/scenarios': 'Scenarios',
-    '/pnl_explain': 'P&L Explain',
-    '/pricer': 'Pricer',
-    '/pricer_old': 'Pricer Old',
+@dataclass(frozen=True)
+class PageDefinition:
+    """One owner for a page's routing, navigation and validation metadata."""
+
+    path: str
+    title: str
+    layout: object
+    nav_id: str
+    aliases: tuple = ()
+    nav_group: Optional[str] = 'secondary'
+    workspace_view: Optional[str] = None
+    validation_order: int = 0
+    validation_after: tuple = ()
+
+
+PAGE_REGISTRY = (
+    PageDefinition('/greeks', 'Greeks', pages.greeks.layout, 'nav-greeks',
+                   aliases=('/',), nav_group='primary', validation_order=0),
+    PageDefinition('/valuation', 'Valuation', pages.valuation.layout, 'nav-valuation',
+                   workspace_view='valuation', validation_order=1),
+    PageDefinition('/trades', 'Trades', pages.trades.layout, 'nav-trades', validation_order=2),
+    PageDefinition('/prices', 'Underlying Prices', pages.prices.layout, 'nav-prices', validation_order=5),
+    PageDefinition('/vol_surface', 'Volatility Surface', pages.vol_surface.layout, 'nav-vol-surface',
+                   validation_order=3, validation_after=(
+                       brent_single_layout, hh_governed.layout, jkm.layout, ttf.layout,
+                       dcc.Store(id='vol-calibration-session-state', storage_type='session'),
+                   )),
+    PageDefinition('/brent_vol_history', 'Vol Trades', pages.brent_vol_history.layout,
+                   'nav-brent-vol-history', validation_order=4),
+    PageDefinition('/correlations', 'Correlations', pages.correlations.layout, 'nav-correlations',
+                   validation_order=7),
+    PageDefinition('/scenarios', 'Scenarios', pages.scenarios.layout, 'nav-scenarios', validation_order=8),
+    PageDefinition('/pricer', 'Pricer', pages.pricer.layout, 'nav-pricer',
+                   nav_group='pricer', validation_order=6),
+    PageDefinition('/pnl_explain', 'P&L Explain', pages.pnl_explain.layout, 'nav-valuation',
+                   nav_group=None, workspace_view='pnl-explain', validation_order=9),
+)
+PAGES_BY_PATH = {
+    path: page
+    for page in PAGE_REGISTRY
+    for path in (page.path, *page.aliases)
 }
+PAGE_TITLES = {path: page.title for path, page in PAGES_BY_PATH.items()}
 PAGE_NOT_FOUND_TITLE = 'Page Not Found'
 PNL_EXPLAIN_VIEWS = ('pnl-explain', 'pnl_explain')
 STATIC_PAGE_LAYOUTS = {
-    '/': pages.greeks.layout,
-    '/greeks': pages.greeks.layout,
-    '/trades': pages.trades.layout,
-    '/prices': pages.prices.layout,
-    '/vol_surface': pages.vol_surface.layout,
-    '/brent_vol_history': pages.brent_vol_history.layout,
-    '/correlations': pages.correlations.layout,
-    '/scenarios': pages.scenarios.layout,
-    '/pricer': pages.pricer_new.layout,
-    '/pricer_old': pages.pricer.layout,
+    path: page.layout
+    for path, page in PAGES_BY_PATH.items()
+    if page.workspace_view is None
 }
-NAV_LINK_IDS = {
-    '/': 'nav-greeks',
-    '/greeks': 'nav-greeks',
-    '/valuation': 'nav-valuation',
-    '/pnl_explain': 'nav-valuation',
-    '/trades': 'nav-trades',
-    '/prices': 'nav-prices',
-    '/vol_surface': 'nav-vol-surface',
-    '/brent_vol_history': 'nav-brent-vol-history',
-    '/correlations': 'nav-correlations',
-    '/scenarios': 'nav-scenarios',
-    '/pricer': 'nav-pricer',
-    '/pricer_old': 'nav-pricer-old',
-}
+NAV_LINK_IDS = {path: page.nav_id for path, page in PAGES_BY_PATH.items()}
 
 
 def _valuation_workspace(search=None, *, default_view='valuation'):
@@ -131,88 +141,43 @@ def _valuation_workspace(search=None, *, default_view='valuation'):
     )
 
 
-# Professional Navigation Bar - Options Dashboard
-nav_links = html.Header([
-    html.Div([
-        # Main Navigation Section
-        html.Nav([
-            # Primary navigation - Greeks as focal point
-            dcc.Link('Greeks', href='/greeks', 
-                    id='nav-greeks', className='nav-link-primary'),
-            
-            # Secondary navigation group
-            html.Div([
-                dcc.Link(
-                    'Valuation',
-                    href='/valuation',
-                    id='nav-valuation',
-                    className='nav-link-secondary',
-                ),
-                dcc.Link(
-                    'Trades',
-                    href='/trades',
-                    id='nav-trades',
-                    className='nav-link-secondary',
-                ),
-                dcc.Link(
-                    'Underlying Prices',
-                    href='/prices',
-                    id='nav-prices',
-                    className='nav-link-secondary',
-                ),
-                dcc.Link(
-                    'Volatility Surface',
-                    href='/vol_surface',
-                    id='nav-vol-surface',
-                    className='nav-link-secondary',
-                ),
-                dcc.Link(
-                    'Vol Trades',
-                    href='/brent_vol_history',
-                    id='nav-brent-vol-history',
-                    className='nav-link-secondary',
-                ),
-                dcc.Link(
-                    'Correlations',
-                    href='/correlations',
-                    id='nav-correlations',
-                    className='nav-link-secondary',
-                ),
-                dcc.Link(
-                    'Scenarios',
-                    href='/scenarios',
-                    id='nav-scenarios',
-                    className='nav-link-secondary',
-                ),
-            ], className='nav-group-secondary'),
-
-            # Terminal workflow - visually separated and always last
-            html.Div(
-                [
-                    dcc.Link(
-                        'Pricer',
-                        href='/pricer',
-                        id='nav-pricer',
-                        className='nav-link-secondary',
-                    ),
-                    dcc.Link(
-                        'Pricer Old',
-                        href='/pricer_old',
-                        id='nav-pricer-old',
-                        className='nav-link-secondary',
-                    ),
-                ],
-                className='nav-group-pricer',
+def _navigation_links(group):
+    return [
+        dcc.Link(
+            page.title,
+            href=page.path,
+            id=page.nav_id,
+            className=(
+                'nav-link-primary' if group == 'primary' else 'nav-link-secondary'
             ),
-        ], className='main-navigation'),
-        
-        # Professional Controls Section - Options Dashboard specific
-        html.Div([
-            html.Button('Refresh Options Data', id='refresh-options-data', className='btn-refresh')
-        ], className='top-bar-controls')
-    ], className='top-bar-content')
-], className='top-bar-header')
+        )
+        for page in PAGE_REGISTRY
+        if page.nav_group == group
+    ]
 
+
+nav_links = html.Header(
+    [
+        html.Div(
+            [
+                html.Nav(
+                    [
+                        *_navigation_links('primary'),
+                        html.Div(_navigation_links('secondary'), className='nav-group-secondary'),
+                        html.Div(_navigation_links('pricer'), className='nav-group-pricer'),
+                    ],
+                    className='main-navigation',
+                ),
+                html.Div(
+                    [html.Button('Refresh Options Data', id='refresh-options-data', className='btn-refresh')],
+                    className='top-bar-controls',
+                ),
+            ],
+            className='top-bar-content',
+        ),
+    ],
+    className='top-bar-header',
+)
 
 pricer_global_valuation_control = html.Div(
     [
@@ -569,10 +534,9 @@ def render_brent_vol_history_source_status(statuses, _mounted):
     Input('url', 'search'),
 )
 def display_page(pathname, search):
-    if pathname == '/valuation':
-        return _valuation_workspace(search)
-    if pathname == '/pnl_explain':
-        return _valuation_workspace(search, default_view='pnl-explain')
+    page = PAGES_BY_PATH.get(pathname)
+    if page is not None and page.workspace_view is not None:
+        return _valuation_workspace(search, default_view=page.workspace_view)
     if pathname == '/vol_calibration':
         return dcc.Location(
             id='retired-vol-calibration-redirect',
@@ -626,21 +590,11 @@ clientside_callback(
 
 app.validation_layout = html.Div([
     app.layout,
-    pages.greeks.layout,
-    pages.valuation.layout,
-    pages.trades.layout,
-    pages.vol_surface.layout,
-    brent_single_layout,
-    hh_governed.layout,
-    jkm.layout,
-    ttf.layout,
-    dcc.Store(id='vol-calibration-session-state', storage_type='session'),
-    pages.brent_vol_history.layout,
-    pages.prices.layout,
-    pages.pricer.layout,
-    pages.correlations.layout,
-    pages.scenarios.layout,
-    pages.pnl_explain.layout,
+    *[
+        component
+        for page in sorted(PAGE_REGISTRY, key=lambda page: page.validation_order)
+        for component in (page.layout, *page.validation_after)
+    ],
 ])
 
 if __name__ == '__main__':

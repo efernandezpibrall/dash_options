@@ -34,7 +34,7 @@ from vol_calibration.batch_checkpoints import (
     verified_checkpoint,
 )
 from vol_calibration.jobs import JobStatus, PostgresJobRepository
-from vol_calibration.data_cache import source_config_fingerprint
+from source_identity import source_config_fingerprint
 from vol_calibration.feature_flags import gas_batch_jobs_enabled
 from vol_calibration.ttf_market_context import load_ttf_trading_context
 
@@ -46,10 +46,20 @@ _OPTIONS_ROOT = Path(ttf_volatility.__file__).resolve().parent
 _CODE_FILES = (
     _DASH_ROOT / "vol_calibration/batch_checkpoints.py",
     _DASH_ROOT / "vol_calibration/batch_job_runner.py",
-    _DASH_ROOT / "vol_calibration/pages/jkm.py",
-    _DASH_ROOT / "vol_calibration/pages/ttf.py",
+    _DASH_ROOT / "source_identity.py",
+    _DASH_ROOT / "surface_data.py",
+    _DASH_ROOT / "snapshot_cache.py",
+    _DASH_ROOT / "dataframe_utils.py",
+    _DASH_ROOT / "runtime_config.py",
+    _DASH_ROOT / "db_fallback.py",
+    _DASH_ROOT / "vol_calibration/jobs.py",
+    _DASH_ROOT / "vol_calibration/feature_flags.py",
+    _DASH_ROOT / "vol_calibration/batch_results.py",
+    _DASH_ROOT / "vol_calibration/jkm_batch.py",
+    _DASH_ROOT / "vol_calibration/ttf_batch.py",
     _DASH_ROOT / "vol_calibration/jkm_hybrid_surface.py",
     _DASH_ROOT / "vol_calibration/ttf_hybrid_surface.py",
+    _DASH_ROOT / "vol_calibration/convex_call_core.py",
     _DASH_ROOT / "vol_calibration/observed_fit_pool.py",
     _DASH_ROOT / "vol_calibration/calibration_inputs.py",
     _DASH_ROOT / "vol_calibration/ttf_market_context.py",
@@ -60,6 +70,8 @@ _CODE_FILES = (
     _OPTIONS_ROOT / "calibration_engine/config/defaults.py",
     _OPTIONS_ROOT / "calibration_engine/config/calibration_policies.py",
     _OPTIONS_ROOT / "calibration_engine/io/loaders.py",
+    _OPTIONS_ROOT / "calibration_engine/io/storage.py",
+    _OPTIONS_ROOT / "calibration_engine/converters/delta.py",
 )
 
 
@@ -332,7 +344,7 @@ def _run_claimed(repo, job, *, source_loader=_fresh_source):
 
             try:
                 if payload["product"] == "TTF":
-                    from vol_calibration.pages.ttf import calibrate_ttf_batch
+                    from vol_calibration.ttf_batch import calibrate_ttf_batch
                     outcome = calibrate_ttf_batch(
                         market, [dict(row) for row in payload["table_data"]],
                         skip_good=payload["skip_good"],
@@ -342,7 +354,7 @@ def _run_claimed(repo, job, *, source_loader=_fresh_source):
                         cancellation_check=check_cancel,
                     )
                 else:
-                    from vol_calibration.pages.jkm import calibrate_jkm_batch
+                    from vol_calibration.jkm_batch import calibrate_jkm_batch
                     outcome = calibrate_jkm_batch(
                         market, [dict(row) for row in payload["table_data"]],
                         skip_good=payload["skip_good"],

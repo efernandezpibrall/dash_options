@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataframe_utils import date_string, display_date
+
 from io import StringIO
 from typing import Callable
 
@@ -71,20 +73,6 @@ def create_ttf_traded_options_status():
             className='py-2 px-3 mb-3 small',
         ),
     )
-
-
-def _date_string(value):
-    parsed = pd.to_datetime(value, errors='coerce')
-    if pd.isna(parsed):
-        return None
-    return parsed.date().isoformat()
-
-
-def _display_date(value):
-    parsed = pd.to_datetime(value, errors='coerce')
-    if pd.isna(parsed):
-        return 'unknown'
-    return parsed.strftime('%d-%b-%Y')
 
 
 def _normalize_vendor_volatility(values: pd.Series) -> pd.Series:
@@ -202,7 +190,7 @@ def _normalize_ttf_traded_options(
 
 def load_ttf_traded_options_payload(requested_cob, *, engine=None) -> dict:
     """Load exact-COB raw TTF TFO rows whose reported volume is positive."""
-    requested = _date_string(requested_cob)
+    requested = date_string(requested_cob)
     base_payload = {
         'data': empty_ttf_traded_options().to_json(
             date_format='iso',
@@ -373,7 +361,7 @@ def ttf_traded_options_frame(
 
 def ttf_traded_options_status_text(payload: dict | None) -> tuple[str, str]:
     payload = payload or {}
-    requested = _display_date(payload.get('requested_cob'))
+    requested = display_date(payload.get('requested_cob'))
     error = payload.get('error')
     row_count = int(payload.get('row_count') or 0)
 

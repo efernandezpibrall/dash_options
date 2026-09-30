@@ -7,6 +7,16 @@ from dash.exceptions import PreventUpdate
 import index_options
 from app import app
 from pricer_exchange_registry import EXCHANGE_OPTION_MAPPINGS
+from pricer_workspace import workspace_callbacks as pricer_workspace_callbacks
+from pricer_workspace import (
+    input_callbacks as pricer_input_callbacks,
+)
+from pricer_workspace import (
+    constants as pricer_constants,
+)
+from pricer_workspace import (
+    state as pricer_state,
+)
 
 
 def _walk(component):
@@ -40,7 +50,6 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
         '/scenarios': 'Scenarios',
         '/pnl_explain': 'P&L Explain',
         '/pricer': 'Pricer',
-        '/pricer_old': 'Pricer Old',
     }
     assert index_options.PNL_EXPLAIN_VIEWS == ('pnl-explain', 'pnl_explain')
     assert index_options.PAGE_NOT_FOUND_TITLE == 'Page Not Found'
@@ -59,7 +68,7 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
     ]
 
 
-def test_exchange_pricer_inputs_are_optional_on_pricer_old_route():
+def test_exchange_pricer_inputs_are_optional_outside_pricer():
     app._setup_server()
     exchange_callback = next(
         callback
@@ -82,8 +91,8 @@ def test_exchange_pricer_inputs_are_optional_on_pricer_old_route():
     ]
 
 
-def test_exchange_pricer_callback_ignores_pricer_old_without_current_controls():
-    callback = index_options.pages.pricer_new.manage_exchange_workspace
+def test_exchange_pricer_callback_ignores_missing_current_controls():
+    callback = pricer_workspace_callbacks.manage_exchange_workspace
     kwargs = {name: None for name in signature(callback).parameters}
 
     with pytest.raises(PreventUpdate):
@@ -105,7 +114,7 @@ def test_pricer_rate_field_style_has_one_premium_aware_owner():
         expected = {
             'display': 'flex' if mapping.premium_convention == 'upfront' else 'none'
         }
-        assert index_options.pages.pricer.sync_exchange_rate_visibility(
+        assert pricer_input_callbacks.sync_exchange_rate_visibility(
             mapping.premium_convention,
             'exchange',
         ) == expected
@@ -124,13 +133,10 @@ def test_top_navigation_order_and_pricer_separator():
         'Correlations',
         'Scenarios',
         'Pricer',
-        'Pricer Old',
     ]
     assert all(link.children != 'P&L Explain' for link in links)
-    assert links[-2].id == 'nav-pricer'
-    assert getattr(links[-2], 'href') == '/pricer'
-    assert links[-1].id == 'nav-pricer-old'
-    assert getattr(links[-1], 'href') == '/pricer_old'
+    assert links[-1].id == 'nav-pricer'
+    assert getattr(links[-1], 'href') == '/pricer'
 
     pricer_group = next(
         item
@@ -139,58 +145,42 @@ def test_top_navigation_order_and_pricer_separator():
     )
     assert [link.id for link in pricer_group.children] == [
         'nav-pricer',
-        'nav-pricer-old',
     ]
 
 
-def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
+def test_pricer_route_uses_current_workspace_and_signed_lots():
     pricer_layout = index_options.display_page('/pricer', None)
-    pricer_old_layout = index_options.display_page('/pricer_old', None)
 
-    assert pricer_layout is index_options.pages.pricer_new.layout
-    assert pricer_old_layout is index_options.pages.pricer.layout
-    assert pricer_layout is not pricer_old_layout
-    exchange_stub = next(
-        item
-        for item in _walk(pricer_old_layout)
-        if getattr(item, 'id', None) == 'pricer-exchange-structures-container'
-    )
-    assert exchange_stub.hidden is True
+    assert pricer_layout is index_options.pages.pricer.layout
+    assert '/pricer_old' not in index_options.PAGE_TITLES
+    assert '/pricer_old' not in index_options.STATIC_PAGE_LAYOUTS
+    assert '/pricer_old' not in index_options.NAV_LINK_IDS
+    response = app.server.test_client().get('/pricer_old')
+    assert response.status_code not in {301, 302, 303, 307, 308}
+    assert 'Location' not in response.headers
+    assert '/pricer_old' not in {rule.rule for rule in app.server.url_map.iter_rules()}
+    assert index_options.display_page('/pricer_old', None) == '404 - Page not found'
 
     pricer_headings = [
         item.children
         for item in _walk(pricer_layout)
         if isinstance(item, html.H1)
     ]
-    old_headings = [
-        item.children
-        for item in _walk(pricer_old_layout)
-        if isinstance(item, html.H1)
-    ]
     assert pricer_headings == ['Pricer']
-    assert old_headings == ['Pricer Old']
     current_heading = next(
         item for item in _walk(pricer_layout) if isinstance(item, html.H1)
     )
     assert current_heading.className == 'pricer-visually-hidden-title'
     assert 'pricer-page-current' in pricer_layout.className.split()
-    assert 'pricer-page-current' not in pricer_old_layout.className.split()
 
     pricer_ids = [
         item.id
         for item in _walk(pricer_layout)
         if getattr(item, 'id', None) is not None
     ]
-    old_ids = [
-        item.id
-        for item in _walk(pricer_old_layout)
-        if getattr(item, 'id', None) is not None
-    ]
     assert len(list(map(repr, pricer_ids))) == len(set(map(repr, pricer_ids)))
-    assert set(map(repr, old_ids)).issubset(set(map(repr, pricer_ids)))
     assert 'pricer-current-page' in pricer_ids
     assert 'pricer-workflow-mode' not in pricer_ids
-    assert 'pricer-workflow-mode' not in old_ids
 
     current_toolbars = [
         item
@@ -198,14 +188,7 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         if 'pricer-workspace-toolbar'
         in str(getattr(item, 'className', '')).split()
     ]
-    old_toolbars = [
-        item
-        for item in _walk(pricer_old_layout)
-        if 'pricer-workspace-toolbar'
-        in str(getattr(item, 'className', '')).split()
-    ]
     assert current_toolbars == []
-    assert len(old_toolbars) == 1
 
     workflow_stores = [
         (item.id['structure_id'], item.data)
@@ -217,29 +200,16 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         ('exchange-structure-1', 'exchange'),
         ('structure-1', 'otc'),
     ]
-    old_workflow_stores = [
-        item.data
-        for item in _walk(pricer_old_layout)
-        if isinstance(getattr(item, 'id', None), dict)
-        and item.id.get('type') == 'pricer-structure-workflow'
-    ]
-    assert old_workflow_stores == ['legacy']
 
     pricer_h2s = [
         item.children
         for item in _walk(pricer_layout)
         if isinstance(item, html.H2)
     ]
-    old_h2s = [
-        item.children
-        for item in _walk(pricer_old_layout)
-        if isinstance(item, html.H2)
-    ]
     assert pricer_h2s == [
         'Exchange Traded Options',
         'OTC Structured Options',
     ]
-    assert 'Contract vols vs volatility surface' in old_h2s
     workflow_sections = [
         item
         for item in pricer_layout.children
@@ -329,12 +299,6 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         mapping.mapping_id.startswith('EX-')
         for mapping in EXCHANGE_OPTION_MAPPINGS
     )
-    hidden_surface_grid = next(
-        item
-        for item in _walk(pricer_layout)
-        if getattr(item, 'id', None) == 'pricer-surface-comparison-grid'
-    )
-    assert hidden_surface_grid.style == {'display': 'none'}
 
     pricer_valuation = next(
         item
@@ -342,15 +306,8 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         if isinstance(getattr(item, 'id', None), dict)
         and item.id.get('type') == 'pricer-valuation-date'
     )
-    old_valuation = next(
-        item
-        for item in _walk(pricer_old_layout)
-        if isinstance(getattr(item, 'id', None), dict)
-        and item.id.get('type') == 'pricer-valuation-date'
-    )
     assert pricer_valuation.date == index_options.date.today().isoformat()
     assert pricer_valuation.persistence is False
-    assert old_valuation.persistence == 'pricer-structure-1-valuation-date-v1'
 
     global_valuation = next(
         item
@@ -371,7 +328,7 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         '/pricer'
     )
     hidden_class, hidden_date = index_options.configure_pricer_global_valuation(
-        '/pricer_old'
+        '/greeks'
     )
     assert 'pricer-global-valuation-control-visible' in visible_class.split()
     assert 'pricer-global-valuation-control-hidden' in hidden_class.split()
@@ -384,34 +341,18 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         if isinstance(getattr(item, 'id', None), dict)
         and item.id.get('type') == 'pricer-legs-grid'
     )
-    old_grid = next(
-        item
-        for item in _walk(pricer_old_layout)
-        if isinstance(getattr(item, 'id', None), dict)
-        and item.id.get('type') == 'pricer-legs-grid'
-    )
     pricer_fields = {
         child.get('field')
         for group in pricer_grid.columnDefs
         for child in (group.get('children') or [group])
     }
-    old_fields = {
-        child.get('field')
-        for group in old_grid.columnDefs
-        for child in (group.get('children') or [group])
-    }
     pricer_groups = [group["headerName"] for group in pricer_grid.columnDefs]
-    old_groups = [group["headerName"] for group in old_grid.columnDefs]
     assert 'side' not in pricer_fields
-    assert 'side' in old_fields
     assert 'quote_basis' not in pricer_fields
     assert 'quote_value' not in pricer_fields
     assert 'volatility_asset_1' not in pricer_fields
     assert 'volatility_asset_2' not in pricer_fields
-    assert 'quote_basis' in old_fields
-    assert 'quote_value' in old_fields
     assert 'Published surface' not in pricer_groups
-    assert 'Published surface' in old_groups
     assert pricer_groups[2:] == [
         'Volatility',
         'Volatility adjustment',
@@ -421,7 +362,6 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         'Position Greeks',
     ]
     assert 'side' not in pricer_grid.rowData[0]
-    assert old_grid.rowData[0]['side'] == 'BUY'
     assert pricer_grid.dashGridOptions['rowHeight'] == 28
     assert pricer_grid.dashGridOptions['headerHeight'] == 30
     assert pricer_grid.dashGridOptions['groupHeaderHeight'] == 24
@@ -434,102 +374,95 @@ def test_pricer_route_keeps_pricer_old_separate_and_uses_signed_lots():
         if child.get('field') == 'name'
     )
     assert pricer_name['cellRenderer'] == 'PricerLegSelector'
-    assert old_grid.dashGridOptions['rowHeight'] == 30
-    assert old_grid.dashGridOptions['headerHeight'] == 34
-    assert old_grid.dashGridOptions['groupHeaderHeight'] == 27
-    assert old_grid.dashGridOptions['rowSelection']['checkboxes'] is True
-    assert old_grid.dashGridOptions['selectionColumnDef']['width'] == 34
 
 
 def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models():
-    pricer_new = index_options.pages.pricer_new
+    assert pricer_state._normalized_workflow('exchange') == 'exchange'
+    assert pricer_state._normalized_workflow('otc') == 'otc'
+    assert pricer_state._normalized_workflow('legacy') == 'otc'
+    assert pricer_state._normalized_workflow('invalid') == 'exchange'
 
-    assert pricer_new._normalized_workflow('exchange') == 'exchange'
-    assert pricer_new._normalized_workflow('otc') == 'otc'
-    assert pricer_new._normalized_workflow('legacy') == 'legacy'
-    assert pricer_new._normalized_workflow('invalid') == 'exchange'
-
-    assert pricer_new._workflow_model_options('exchange', 'TTF') == [
+    assert pricer_input_callbacks._workflow_model_options('exchange', 'TTF') == [
         {'label': 'ICE TTF option', 'value': 'black76'}
     ]
-    assert pricer_new._workflow_model_options('exchange', 'JKM') == [
+    assert pricer_input_callbacks._workflow_model_options('exchange', 'JKM') == [
         {'label': 'JKM average price option', 'value': 'asian76'},
         {'label': 'JKM vanilla option', 'value': 'black76'},
     ]
-    assert pricer_new._workflow_model_options('otc', 'TTF') == (
-        index_options.pages.pricer.option_types
+    assert pricer_input_callbacks._workflow_model_options('otc', 'TTF') == (
+        pricer_constants.option_types
     )
-    assert pricer_new._workflow_model_style('exchange', 'TTF') == {
+    assert pricer_input_callbacks._workflow_model_style('exchange', 'TTF') == {
         'display': 'none'
     }
-    assert pricer_new._workflow_model_style('exchange', 'JKM') == {
+    assert pricer_input_callbacks._workflow_model_style('exchange', 'JKM') == {
         'display': 'flex'
     }
-    assert pricer_new._workflow_model_style('otc', 'TTF') == {
+    assert pricer_input_callbacks._workflow_model_style('otc', 'TTF') == {
         'display': 'flex'
     }
-    assert pricer_new._workflow_model_style('legacy', 'TTF') == {
+    assert pricer_input_callbacks._workflow_model_style('legacy', 'TTF') == {
         'display': 'flex'
     }
-    assert pricer_new.configure_otc_asset_identity_controls('otc', 'kirk') == (
+    assert pricer_input_callbacks.configure_otc_asset_identity_controls('otc', 'kirk') == (
         {'display': 'none'},
         {'display': 'none'},
     )
-    assert pricer_new.configure_otc_asset_identity_controls(
+    assert pricer_input_callbacks.configure_otc_asset_identity_controls(
         'otc', 'black76'
     ) == ({'display': 'flex'}, {'display': 'flex'})
-    assert pricer_new.configure_otc_asset_identity_controls(
+    assert pricer_input_callbacks.configure_otc_asset_identity_controls(
         'exchange', 'black76'
     ) == ({'display': 'none'}, {'display': 'flex'})
-    assert pricer_new.select_exchange_mapping_asset(
+    assert pricer_input_callbacks.select_workflow_exchange_mapping_asset(
         'exchange', 'CME-HH-ON', 'TTF'
     ) == 'HH'
-    assert pricer_new.select_exchange_mapping_asset(
+    assert pricer_input_callbacks.select_workflow_exchange_mapping_asset(
         'otc', 'CME-HH-ON', 'TTF'
-    ) is pricer_new.no_update
-    assert pricer_new._workflow_model_options(
+    ) is pricer_input_callbacks.no_update
+    assert pricer_input_callbacks._workflow_model_options(
         'exchange', 'JKM', 'ICE-JKM-JKZ'
     ) == [{'label': 'JKM vanilla option', 'value': 'black76'}]
-    assert pricer_new._workflow_model_value(
+    assert pricer_input_callbacks._workflow_model_value(
         'exchange',
         'TTF',
         'kirk',
         {'type': 'pricer-asset'},
         'ICE-TTF-TFO',
     ) == 'black76'
-    assert pricer_new._workflow_model_value(
+    assert pricer_input_callbacks._workflow_model_value(
         'exchange',
         'JKM',
         'black76',
         {'type': 'pricer-mapping-id'},
         'ICE-JKM-JKZ',
     ) == 'black76'
-    assert pricer_new._workflow_model_value(
+    assert pricer_input_callbacks._workflow_model_value(
         'exchange',
         'JKM',
         'black76',
         {'type': 'pricer-structure-workflow'},
-    ) is pricer_new.no_update
-    assert pricer_new._workflow_model_value(
+    ) is pricer_input_callbacks.no_update
+    assert pricer_input_callbacks._workflow_model_value(
         'exchange',
         'JKM',
         'black76',
         {'type': 'pricer-asset'},
     ) == 'asian76'
-    assert pricer_new._workflow_model_value(
+    assert pricer_input_callbacks._workflow_model_value(
         'otc',
         'TTF',
         'kirk',
-    ) is pricer_new.no_update
-    assert pricer_new._workflow_model_value(
+    ) is pricer_input_callbacks.no_update
+    assert pricer_input_callbacks._workflow_model_value(
         'legacy',
         'TTF',
         'kirk',
-    ) is pricer_new.no_update
+    ) is pricer_input_callbacks.no_update
 
-    exchange_workspace = pricer_new._default_exchange_workspace()
+    exchange_workspace = pricer_state._default_exchange_workspace()
     assert exchange_workspace['schema_version'] == 2
-    added_workspace = pricer_new._reduce_exchange_workspace(
+    added_workspace = pricer_state._reduce_exchange_workspace(
         exchange_workspace,
         'add',
     )
@@ -541,7 +474,7 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
         structure['label'] for structure in added_workspace['structures']
     ] == ['E1', 'E2']
     duplicate_template = {'model': 'black76', 'legs': [{'leg_id': 'leg-1'}]}
-    duplicated_workspace = pricer_new._reduce_exchange_workspace(
+    duplicated_workspace = pricer_state._reduce_exchange_workspace(
         added_workspace,
         'duplicate',
         'exchange-structure-1',
@@ -551,7 +484,7 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
     assert duplicated_workspace['drafts']['exchange-structure-3'] == (
         duplicate_template
     )
-    removed_workspace = pricer_new._reduce_exchange_workspace(
+    removed_workspace = pricer_state._reduce_exchange_workspace(
         duplicated_workspace,
         'remove',
         'exchange-structure-2',
@@ -585,7 +518,7 @@ def test_current_pricer_workflows_limit_exchange_inputs_and_preserve_otc_models(
         ],
         'drafts': {'exchange-structure-1': legacy_template},
     }
-    migrated_workspace = pricer_new._normalize_exchange_workspace(
+    migrated_workspace = pricer_state._normalize_exchange_workspace(
         legacy_workspace
     )
     migrated_draft = migrated_workspace['drafts']['exchange-structure-1']

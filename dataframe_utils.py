@@ -41,3 +41,17 @@ def concat_dataframes(frames, *args, preserve_columns=True, **kwargs):
         result = result.loc[:, columns]
 
     return result
+
+
+def date_string(value):
+    parsed = pd.to_datetime(value, errors='coerce')
+    if pd.isna(parsed):
+        return None
+    return parsed.date().isoformat()
+
+
+def display_date(value):
+    parsed = pd.to_datetime(value, errors='coerce')
+    if pd.isna(parsed):
+        return 'unknown'
+    return parsed.strftime('%d-%b-%Y')

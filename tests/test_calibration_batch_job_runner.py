@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import json
 from io import StringIO
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from uuid import uuid4
 import pandas as pd
 import pytest
 
+from vol_calibration import jkm_batch, ttf_batch
 from vol_calibration.batch_checkpoints import digest, make_checkpoint
 from vol_calibration.batch_job_runner import (
     build_payload,
@@ -83,10 +85,15 @@ def test_explicit_resubmission_after_cancel_creates_a_new_job():
 
 def test_progress_poll_uses_compact_publication_reference():
     from dash._callback import GLOBAL_CALLBACK_LIST
+    from app import app
+
+    # Dash transfers pending global registrations into the application when
+    # startup runs; the same contract must hold on either side of startup.
+    callback_specs = [*GLOBAL_CALLBACK_LIST, *app._callback_list]
 
     for product in ("jkm", "ttf"):
         matches = [
-            spec for spec in GLOBAL_CALLBACK_LIST
+            spec for spec in callback_specs
             if f"{product}-batch-progress-cancel-btn.disabled" in spec["output"]
             and f"{product}-batch-results-container.children" in spec["output"]
         ]
@@ -177,7 +184,7 @@ def test_page_submits_detached_job_without_running_calibration(monkeypatch, page
     monkeypatch.setattr(page, "submit_batch", lambda *_args, **_kwargs: job)
     monkeypatch.setattr(page, "start_worker", lambda job_id: launched.append(job_id))
     monkeypatch.setattr(
-        page,
+        jkm_batch if product == 'JKM' else ttf_batch,
         "calibrate_jkm_batch" if product == "JKM" else "calibrate_ttf_batch",
         lambda *_args, **_kwargs: pytest.fail("The Dash callback ran calibration synchronously"),
     )

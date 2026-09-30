@@ -1,15 +1,15 @@
 """TTF PCHIP-core / Wing-v2-tail operational smile.
 
 The governed 11-node TTF smile is authoritative between its minimum and
-maximum strikes.  A shape-preserving PCHIP interpolates total variance in
-log-moneyness there.  Wing-v2 is calibrated only as a tail model and joined to
-the core outside the quoted range with C1 cubic-Hermite transitions.
+maximum strikes. PCHIP interpolates total variance for valid cores; a fixed-quote
+convex call-price interpolant repairs failing TTF cores. Wing-v2 is a tail model
+joined outside the quoted range with C1 cubic-Hermite transitions.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from multiprocessing import current_process
 import os
@@ -33,12 +33,17 @@ from options.calibration_engine.models.wing_model import WING_V2, wing_model_iv
 from options.calibration_engine.validation.arbitrage import compute_g_function
 
 from vol_calibration.calibration_inputs import calibration_eligibility_error
+from vol_calibration.convex_call_core import (
+    ConvexCallTotalVariance,
+    build_convex_call_core,
+)
 
 
 DAYS_PER_YEAR = 365.0
 GAS_HYBRID_METHOD = "PCHIP-core/Wing-v2-tail hybrid"
+TTF_HYBRID_METHOD = "PCHIP/convex-call-price core with Wing-v2 tails"
 GAS_HYBRID_POLICY_VERSIONS = {
-    "TTF": "ttf_pchip_core_wing_tail_hybrid_v1",
+    "TTF": "ttf_quote_preserving_core_wing_tail_hybrid_v2",
     "JKM": "jkm_pchip_core_wing_tail_hybrid_v1",
     "NBP": "nbp_pchip_core_wing_tail_hybrid_v1",
 }
@@ -56,12 +61,11 @@ HYBRID_POLICIES = {
     "BRENT": (BRENT_HYBRID_METHOD, BRENT_HYBRID_POLICY_VERSION),
     "HH": (HH_HYBRID_METHOD, HH_HYBRID_POLICY_VERSION),
     **{
-        product: (GAS_HYBRID_METHOD, version)
+        product: (TTF_HYBRID_METHOD if product == "TTF" else GAS_HYBRID_METHOD, version)
         for product, version in GAS_HYBRID_POLICY_VERSIONS.items()
     },
 }
 TTF_HYBRID_POLICY_VERSION = GAS_HYBRID_POLICY_VERSIONS["TTF"]
-TTF_HYBRID_METHOD = GAS_HYBRID_METHOD
 TTF_CORE_SAMPLE_COUNT = 201
 CANONICAL_SURFACE_POINT_COUNT = 401
 TTF_VALIDATION_POINT_COUNT = 4001
@@ -122,7 +126,7 @@ def hybrid_policy(commodity: str) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class TTFPchipCore:
-    """Validated one-expiry total-variance PCHIP core."""
+    """Validated one-expiry variance core retaining the governed quote anchors."""
 
     x_nodes: np.ndarray
     strike_nodes: np.ndarray
@@ -133,8 +137,10 @@ class TTFPchipCore:
     dte: float
     source_name: str
     calibration_basis: str
-    interpolator: PchipInterpolator
+    interpolator: PchipInterpolator | ConvexCallTotalVariance
     commodity: str = "TTF"
+    core_interpolation: str = "pchip_total_variance"
+    core_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def time_to_expiry(self) -> float:
@@ -216,6 +222,43 @@ def build_ttf_pchip_core(
             f"{product} PCHIP core did not reproduce the governed nodes exactly."
         )
 
+    core_interpolation = "pchip_total_variance"
+    core_diagnostics = {}
+    if product == "TTF":
+        # Include both sides of each PCHIP second-derivative discontinuity. The
+        # fallback changes only failing cores, not any passing source slice.
+        density_x = np.unique(np.concatenate([
+            np.linspace(x[0], x[-1], TTF_VALIDATION_POINT_COUNT),
+            np.nextafter(x[1:-1], -np.inf),
+            np.nextafter(x[1:-1], np.inf),
+        ]))
+        w = interpolator(density_x)
+        d = interpolator.derivative(1)(density_x)
+        dd = interpolator.derivative(2)(density_x)
+        g = (
+            (1.0 - density_x * d / (2.0 * w))**2
+            - d**2 / 4.0 * (1.0 / w + 0.25) + dd / 2.0
+        )
+        minimum = float(np.min(g))
+        core_diagnostics["original_pchip_min_g"] = minimum
+        if not np.isfinite(g).all() or minimum < TTF_BUTTERFLY_MARGIN - 1e-8:
+            interpolator, repair = build_convex_call_core(
+                x, total_variance, interpolator, margin=TTF_BUTTERFLY_MARGIN
+            )
+            repaired_g = interpolator.density(density_x)
+            numeric_x = np.linspace(x[0], x[-1], TTF_VALIDATION_POINT_COUNT)
+            numeric_g = compute_g_function(numeric_x, interpolator(numeric_x))
+            if (
+                not np.isfinite(repaired_g).all()
+                or not np.isfinite(numeric_g).all()
+                or np.min(repaired_g) < TTF_BUTTERFLY_MARGIN - 1e-8
+                or np.min(numeric_g) < TTF_BUTTERFLY_MARGIN - 1e-8
+            ):
+                raise ValueError("TTF convex call-price core failed the existing density margin")
+            core_interpolation = "convex_call_price"
+            core_diagnostics.update(repair)
+            core_diagnostics["repaired_core_min_g"] = float(np.min(repaired_g))
+
     source_names = observations["source_name"].astype(str).str.strip().unique()
     bases = observations["calibration_basis"].astype(str).str.strip().str.lower().unique()
     if len(source_names) != 1 or len(bases) != 1:
@@ -235,6 +278,8 @@ def build_ttf_pchip_core(
         calibration_basis=str(bases[0]),
         interpolator=interpolator,
         commodity=product,
+        core_interpolation=core_interpolation,
+        core_diagnostics=core_diagnostics,
     )
 
 
@@ -501,6 +546,8 @@ def validate_ttf_hybrid(
         "right_join_x": float(core.xmax),
         "left_blend_width": float(left_blend_width),
         "right_blend_width": float(right_blend_width),
+        "core_interpolation": core.core_interpolation,
+        "core_diagnostics": core.core_diagnostics,
     }
 
 
@@ -1220,7 +1267,11 @@ def operational_surface_frame(
             (x > core.xmax) & (x <= right_tail_end),
             x > right_tail_end,
         ],
-        ["wing_left", "left_blend", "pchip_core", "right_blend", "wing_right"],
+        [
+            "wing_left", "left_blend",
+            "convex_call_core" if core.core_interpolation == "convex_call_price" else "pchip_core",
+            "right_blend", "wing_right",
+        ],
         default="invalid",
     )
     expiry = observations["expiry"].iloc[0]

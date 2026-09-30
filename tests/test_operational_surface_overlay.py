@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from pages import vol_surface
+import surface_data
 from vol_calibration.components.smile_grid import (
     create_smile_grid_figure,
     delta_curve_to_strike_iv,
@@ -43,34 +44,34 @@ def _normalized_surface():
         ],
         ignore_index=True,
     )
-    return vol_surface._normalize_surface_data(raw)
+    return surface_data._normalize_surface_data(raw)
 
 
 @pytest.fixture
 def governed_surface_cache(monkeypatch):
     normalized = _normalized_surface()
-    monkeypatch.setattr(vol_surface, 'surface_dataset', normalized)
-    monkeypatch.setattr(vol_surface, '_ensure_cached_data', lambda *args, **kwargs: None)
-    monkeypatch.setitem(vol_surface.DATA_CACHE_STATE, 'initialized', True)
+    monkeypatch.setattr(surface_data, 'surface_dataset', normalized)
+    monkeypatch.setattr(surface_data, '_ensure_cached_data', lambda *args, **kwargs: None)
+    monkeypatch.setitem(surface_data.DATA_CACHE_STATE, 'initialized', True)
     monkeypatch.setitem(
-        vol_surface.DATA_CACHE_STATE,
+        surface_data.DATA_CACHE_STATE,
         'surface',
         {
-            'source': vol_surface.SURFACE_POSTGRES_SOURCE_LABEL,
+            'source': surface_data.SURFACE_POSTGRES_SOURCE_LABEL,
             'error': None,
             'rows': len(normalized),
             'latest_cob_date': pd.Timestamp('2026-07-30'),
             'fallback_used': True,
         },
     )
-    vol_surface._SURFACE_SNAPSHOT_CACHE.clear()
+    surface_data._SURFACE_SNAPSHOT_CACHE.clear()
     return normalized
 
 
 def test_operational_snapshot_resolves_exact_and_normalizes_brent_name(
     governed_surface_cache,
 ):
-    snapshot = vol_surface.get_operational_surface_snapshot(
+    snapshot = surface_data.get_operational_surface_snapshot(
         'BRENT',
         '2026-07-27',
     )
@@ -86,11 +87,11 @@ def test_operational_snapshot_resolves_exact_and_normalizes_brent_name(
 def test_operational_snapshot_uses_product_scoped_prior_and_never_future(
     governed_surface_cache,
 ):
-    brent = vol_surface.get_operational_surface_snapshot(
+    brent = surface_data.get_operational_surface_snapshot(
         'BRENT',
         '2026-07-26',
     )
-    hh = vol_surface.get_operational_surface_snapshot('HH', '2026-07-26')
+    hh = surface_data.get_operational_surface_snapshot('HH', '2026-07-26')
 
     assert brent['actual_cob'] == pd.Timestamp('2026-07-08')
     assert hh['actual_cob'] == pd.Timestamp('2026-07-06')
@@ -102,7 +103,7 @@ def test_operational_snapshot_uses_product_scoped_prior_and_never_future(
 def test_operational_snapshot_supports_nbp_without_a_calibration_route(
     governed_surface_cache,
 ):
-    snapshot = vol_surface.get_operational_surface_snapshot(
+    snapshot = surface_data.get_operational_surface_snapshot(
         'NBP',
         '2026-07-30',
     )
@@ -117,7 +118,7 @@ def test_operational_snapshot_supports_nbp_without_a_calibration_route(
 def test_operational_snapshot_reports_no_prior_instead_of_using_future(
     governed_surface_cache,
 ):
-    snapshot = vol_surface.get_operational_surface_snapshot(
+    snapshot = surface_data.get_operational_surface_snapshot(
         'BRENT',
         '2026-07-01',
     )
@@ -137,8 +138,8 @@ def test_legacy_trino_surface_is_reported_as_a_source_fallback(monkeypatch):
             raise RuntimeError('synchronized source unavailable')
         return raw
 
-    monkeypatch.setattr(vol_surface, 'read_trino_query', fake_trino)
-    surface, metadata = vol_surface.load_surface_data()
+    monkeypatch.setattr(surface_data, 'read_trino_query', fake_trino)
+    surface, metadata = surface_data.load_surface_data()
 
     assert len(surface) == 3
     assert metadata['source'] == 'raw.icap.implied_volatility_surface'
@@ -165,7 +166,7 @@ def test_payload_preserves_date_and_source_fallback_metadata(
 
 
 def _chart_surface(expiries=('2026-09-01', '2026-10-01')):
-    return vol_surface._normalize_surface_data(
+    return surface_data._normalize_surface_data(
         pd.concat(
             [
                 _surface_rows('TTF', '2026-07-27', expiry)
@@ -194,7 +195,7 @@ def _metadata(product='TTF', requested='2026-07-27', actual='2026-07-27'):
         'product': product,
         'requested_cob': requested,
         'actual_cob': actual,
-        'source': vol_surface.SURFACE_POSTGRES_SOURCE_LABEL,
+        'source': surface_data.SURFACE_POSTGRES_SOURCE_LABEL,
     }
 
 

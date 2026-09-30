@@ -6,7 +6,7 @@ all expiries at once with safety measures.
 """
 import dash_bootstrap_components as dbc
 from dash import html, dash_table
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from vol_calibration.feature_flags import writes_enabled
 
@@ -258,49 +258,6 @@ def create_batch_results_table(results: List[Dict]) -> dash_table.DataTable:
             },
         ],
     )
-
-
-def format_batch_result_row(
-    expiry: str,
-    status: str,
-    old_rmse: Optional[float] = None,
-    new_rmse: Optional[float] = None,
-    basis: Optional[str] = None,
-) -> Dict:
-    """
-    Format a single batch calibration result.
-
-    Parameters
-    ----------
-    expiry : str
-        Expiry date string
-    status : str
-        'Success', 'Skipped', or 'Failed'
-    old_rmse : float, optional
-        Previous RMSE
-    new_rmse : float, optional
-        New RMSE after calibration
-
-    Returns
-    -------
-    dict
-        Formatted result row
-    """
-    row = {
-        'expiry': expiry,
-        'status': status,
-        'old_rmse': f"{old_rmse*100:.2f}%" if old_rmse is not None else "-",
-        'new_rmse': f"{new_rmse*100:.2f}%" if new_rmse is not None else "-",
-        'improvement': "-",
-    }
-    if basis:
-        row['basis'] = str(basis).strip().title()
-
-    if old_rmse is not None and new_rmse is not None and old_rmse > 0:
-        improvement = (old_rmse - new_rmse) / old_rmse * 100
-        row['improvement'] = f"{improvement:+.1f}%"
-
-    return row
 
 
 def create_batch_summary(results: List[Dict]) -> html.Div:

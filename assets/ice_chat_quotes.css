@@ -526,3 +526,21 @@
     .ice-chat-quotes-page { padding: 12px 0; }
     .ice-chat-status-item { flex-basis: 100%; }
 }
+
+
+.ice-chat-reply-audit { margin-top: 12px; color: var(--color-text-primary); }
+.ice-chat-reply-audit summary { font-weight: 600; padding: 8px 0; }
+.ice-chat-reply-metadata { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 8px 0; font-size: 12px; }
+.ice-chat-reply-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; padding: 12px;
+    background: var(--color-bg-light); color: var(--color-text-primary); border: 1px solid var(--color-border-light);
+    border-radius: 6px; font: inherit; font-size: 13px; line-height: 1.5; }
+
+.ice-chat-edge-audit { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.ice-chat-edge-audit p { margin: 8px 0; }
+.ice-chat-edge-audit-table { overflow-x: auto; margin: 8px 0; }
+.ice-chat-edge-audit-table table { border-collapse: collapse; min-width: 350px; }
+.ice-chat-edge-audit-table th, .ice-chat-edge-audit-table td { padding: 5px 14px; border-bottom: 1px solid #e2e8f0; text-align: right; font-variant-numeric: tabular-nums; }
+.ice-chat-edge-audit-table th:first-child, .ice-chat-edge-audit-table td:first-child { text-align: left; }
+.ice-chat-edge-qualified { color: #047857; font-weight: 700; }
+.ice-chat-edge-provisional { color: #92400e !important; font-weight: 700; }
+.ice-chat-edge-neutral { color: #64748b; }

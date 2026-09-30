@@ -7,7 +7,52 @@ import pytest
 from dash import dcc, html, no_update
 
 import pricer_structure
-from pages import pricer
+from pricer_exchange_registry import (
+    exchange_mapping_for_asset_model,
+    exchange_mapping_options,
+    exchange_mapping_pricing_supported,
+    exchange_option_mapping,
+)
+from pricer_structure import (
+    DEFAULT_ASSET,
+    MAX_LEGS,
+    MAX_OPTION_HORIZON_DAYS,
+    MODEL_LABELS,
+    SCHEMA_VERSION,
+    SUPPORTED_DELIVERY_SHAPES,
+    build_delivery_month_component,
+    calculate_structure,
+    default_context,
+    default_leg,
+)
+from pricer_surface_reference import REFERENCE_SCHEMA_VERSION
+from pricer_workspace import (
+    constants as pricer_constants,
+)
+from pricer_workspace import (
+    state as pricer_state,
+)
+
+# Explicit component fixture for low-level pricing/state contracts. It is not a route.
+from pricer_workspace import analysis_callbacks as pricer_analysis_callbacks
+from pricer_workspace import calculation_callbacks as pricer_calculation_callbacks
+from pricer_workspace import callback_context as pricer_callback_context
+from pricer_workspace import components as pricer_components
+from pricer_workspace import controls as pricer_controls
+from pricer_workspace import grids as pricer_grids
+from pricer_workspace import input_callbacks as pricer_input_callbacks
+from pricer_workspace import pricing as pricer_pricing
+from pricer_workspace import workspace_callbacks as pricer_workspace_callbacks
+
+pricing_components = html.Div([
+    *pricer_components.build_workspace_stores(),
+    pricer_components.build_workspace_actions(),
+    pricer_components._build_structure_panel(
+        {"structure_id": pricer_constants.DEFAULT_STRUCTURE_ID, "label": "S1", "template": None},
+        can_remove=False,
+    ),
+    pricer_components.build_detailed_analysis(),
+])
 
 
 class FrozenDate(dt.date):
@@ -18,7 +63,12 @@ class FrozenDate(dt.date):
 
 @pytest.fixture(autouse=True)
 def freeze_pricer_date(monkeypatch):
-    monkeypatch.setattr(pricer, "date", FrozenDate)
+    for module in (
+        pricer_calculation_callbacks, pricer_input_callbacks,
+        pricer_workspace_callbacks, pricer_components, pricer_controls,
+        pricer_state,
+    ):
+        monkeypatch.setattr(module, "date", FrozenDate)
     monkeypatch.setattr(
         component_by_id("pricer-valuation-date"),
         "date",
@@ -41,7 +91,7 @@ def walk(component):
 def component_by_id(component_id):
     exact = [
         item
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if getattr(item, "id", None) == component_id
     ]
     if exact:
@@ -51,12 +101,12 @@ def component_by_id(component_id):
 
 def component_by_pattern(
     component_type,
-    structure_id=pricer.DEFAULT_STRUCTURE_ID,
+    structure_id=pricer_constants.DEFAULT_STRUCTURE_ID,
     root=None,
 ):
     return next(
         item
-        for item in walk(root or pricer.layout)
+        for item in walk(root or pricing_components)
         if isinstance(getattr(item, "id", None), dict)
         and item.id.get("type") == component_type
         and item.id.get("structure_id") == structure_id
@@ -78,14 +128,14 @@ def leaf_columns(column_defs):
 
 
 def unified_grid_state(snapshot):
-    return pricer._leg_grid_options(snapshot)
+    return pricer_grids._leg_grid_options(snapshot)
 
 
 def unified_pricing_rows(snapshot):
     return unified_grid_state(snapshot)["context"]["pricingRows"]
 
 
-def black_context_states(structure_id=pricer.DEFAULT_STRUCTURE_ID):
+def black_context_states(structure_id=pricer_constants.DEFAULT_STRUCTURE_ID):
     params = ["futures_style", "MONTH", 100.0, 0.03]
     param_ids = [
         {
@@ -155,11 +205,11 @@ def two_leg_rows():
 
 
 def calculate_two_leg_snapshot(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "calculate-button")
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "calculate-button")
     params, param_ids, dates, date_ids = black_context_states()
     rows = two_leg_rows()
     rows[0]["ratio"] = 2
-    snapshot, status = pricer.calculate_structure_callback(
+    snapshot, status = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -185,8 +235,8 @@ def calculate_instance(
 ):
     params, param_ids, dates, date_ids = black_context_states(structure_id)
     params[2] = forward
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: trigger)
-    return pricer.calculate_structure_instance(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: trigger)
+    return pricer_calculation_callbacks.calculate_structure_instance(
         1,
         1,
         "TTF",
@@ -202,12 +252,12 @@ def calculate_instance(
     )
 
 
-def model_instance_state(model, structure_id=pricer.DEFAULT_STRUCTURE_ID):
-    context = copy.deepcopy(pricer.default_context(model, FrozenDate.today()))
+def model_instance_state(model, structure_id=pricer_constants.DEFAULT_STRUCTURE_ID):
+    context = copy.deepcopy(default_context(model, FrozenDate.today()))
     if model == "kirk":
         context["asset_1_code"] = "JKM"
         context["asset_2_code"] = "HH"
-    asset = context.pop("asset", pricer.DEFAULT_ASSET)
+    asset = context.pop("asset", DEFAULT_ASSET)
     param_values = []
     param_ids = []
     date_values = []
@@ -234,7 +284,7 @@ def model_instance_state(model, structure_id=pricer.DEFAULT_STRUCTURE_ID):
         "asset": asset,
         "model": model,
         "contract_multiplier": 1,
-        "rows": [pricer.default_leg(model, 1)],
+        "rows": [default_leg(model, 1)],
         "param_values": param_values,
         "date_values": date_values,
         "valuation_date": FrozenDate.today().isoformat(),
@@ -252,8 +302,8 @@ def invoke_instance_state(
     local_clicks=1,
     calculate_all_clicks=1,
 ):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: trigger)
-    return pricer.calculate_structure_instance(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: trigger)
+    return pricer_calculation_callbacks.calculate_structure_instance(
         local_clicks,
         calculate_all_clicks,
         state["asset"],
@@ -281,25 +331,22 @@ def set_context_state_value(state, param, value, *, is_date=False):
     return state[ids_key][index]
 
 
-def assert_output_is_masked(snapshot, structure_id=pricer.DEFAULT_STRUCTURE_ID):
+def assert_output_is_masked(snapshot, structure_id=pricer_constants.DEFAULT_STRUCTURE_ID):
     assert snapshot is None
     grid_state = unified_grid_state(snapshot)
     assert grid_state["context"]["pricingRows"] == {}
     assert grid_state["pinnedBottomRowData"] == []
-    assert pricer.render_structure_results(
+    assert pricer_calculation_callbacks.render_structure_results(
         snapshot,
-        pricer._instance_id("pricer-calculation-store", structure_id),
-    ) == ("", "", "", "", "", "")
+        pricer_state._instance_id("pricer-calculation-store", structure_id),
+    ) == ("", "", "")
 
 
 def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
-    headings = [item for item in walk(pricer.layout) if isinstance(item, html.H1)]
-    assert len(headings) == 1
-    assert headings[0].children == "Pricer Old"
-    assert not any(isinstance(item, html.P) for item in walk(pricer.layout))
+    assert not any(isinstance(item, html.P) for item in walk(pricing_components))
     subsection_titles = [
         item.children
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if isinstance(item, html.H3)
     ]
     assert "Market and sizing" not in subsection_titles
@@ -310,7 +357,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert "Signed trade contributions and totals" not in subsection_titles
     assert "Pricing output" not in subsection_titles
     layout_text = " ".join(
-        item for item in walk(pricer.layout) if isinstance(item, str)
+        item for item in walk(pricing_components) if isinstance(item, str)
     )
     assert "Option structure pricer" not in layout_text
     assert "Shared context" not in layout_text
@@ -326,7 +373,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     draft_store = component_by_pattern("pricer-draft-store")
     premium_convention = next(
         item
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if isinstance(getattr(item, "id", None), dict)
         and item.id.get("type") == "pricer-context-param"
         and item.id.get("param") == "premium_convention"
@@ -336,7 +383,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     valuation_date = component_by_pattern("pricer-valuation-date")
     context_row = next(
         item
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if "pricer-market-strip" in str(getattr(item, "className", ""))
     )
     context_component_ids = [
@@ -351,7 +398,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     ]
     leg_toolbar = next(
         item
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if getattr(item, "className", None) == "pricer-leg-toolbar"
     )
     leg_heading = leg_toolbar.children[0]
@@ -373,7 +420,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     grid = component_by_pattern("pricer-legs-grid")
     panel = next(
         item
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if "pricer-structure-panel"
         in str(getattr(item, "className", "")).split()
     )
@@ -407,7 +454,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     ]
     assert isinstance(workspace_store, dcc.Store)
     assert workspace_store.storage_type == "session"
-    assert workspace_store.data == pricer._default_workspace()
+    assert workspace_store.data == pricer_state._default_workspace()
     assert isinstance(calculation_store, dcc.Store)
     assert calculation_store.storage_type == "memory"
     assert draft_store.storage_type == "session"
@@ -519,13 +566,13 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
         "pricer-contract-multiplier",
     ]
     assert all(
-        component_id["structure_id"] == pricer.DEFAULT_STRUCTURE_ID
+        component_id["structure_id"] == pricer_constants.DEFAULT_STRUCTURE_ID
         for component_id in context_component_ids
         if isinstance(component_id, dict)
     )
     assert context_row.children[-1].id == {
         "type": "pricer-shared-context",
-        "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+        "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
     }
     assert context_row.children[0].children[0].children == "Valuation"
     assert context_row.children[1].children[0].children.children == "Contract size"
@@ -546,27 +593,27 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert context_row in list(walk(structure_header))
     assert not any(
         getattr(item, "className", None) == "pricer-market-sizing-layout"
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
     )
     config_body = next(
         item
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
         if getattr(item, "className", None)
         == "pricer-section-body pricer-config-body pricer-structure-body"
     )
     assert context_row not in list(walk(config_body))
     assert config_body.children[1].id == {
         "type": "pricer-legs-grid",
-        "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+        "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
     }
     assert config_body.children[2].id == {
         "type": "pricer-unit-results-container",
-        "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+        "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
     }
     assert not any(
         getattr(item, "className", None)
         == "pricer-section pricer-output-section"
-        for item in walk(pricer.layout)
+        for item in walk(pricing_components)
     )
     assert [component_id["type"] for component_id in heading_ids] == [
         "pricer-add-leg",
@@ -608,7 +655,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert valuation_date.date == "2026-07-29"
     assert valuation_date.min_date_allowed is None
     assert valuation_date.max_date_allowed.isoformat() == (
-        dt.date.today() + dt.timedelta(days=pricer.MAX_OPTION_HORIZON_DAYS)
+        dt.date.today() + dt.timedelta(days=MAX_OPTION_HORIZON_DAYS)
     ).isoformat()
     assert valuation_date.persistence == "pricer-structure-1-valuation-date-v1"
     assert valuation_date.persistence_type == "session"
@@ -626,7 +673,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert not any(
         isinstance(getattr(component, "id", None), dict)
         and component.id.get("type") == "pricer-structure-quantity"
-        for component in walk(pricer.layout)
+        for component in walk(pricing_components)
     )
     assert next(
         column
@@ -680,7 +727,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert grid.rowData[0]["quote_value"] == 0.2
     kirk_columns = {
         column.get("field"): column
-        for column in leaf_columns(pricer._leg_column_defs("kirk"))
+        for column in leaf_columns(pricer_grids._leg_column_defs("kirk"))
         if column.get("field")
     }
     kirk_fields = set(kirk_columns)
@@ -694,7 +741,7 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
 
 
 def test_pricing_model_dropdown_uses_compact_model_names():
-    field = pricer._build_pricing_model_field()
+    field = pricer_controls._build_pricing_model_field()
     dropdown = component_by_pattern("pricer-option-type", root=field)
     assert dropdown.options == [
         {"label": "Black-76", "value": "black76"},
@@ -704,13 +751,13 @@ def test_pricing_model_dropdown_uses_compact_model_names():
 
 
 def test_signed_lot_grid_removes_side_and_preserves_legacy_page_contract():
-    signed_columns = pricer._leg_column_defs("black76", signed_lots=True)
+    signed_columns = pricer_grids._leg_column_defs("black76", signed_lots=True)
     signed_fields = {
         column.get("field") for column in leaf_columns(signed_columns)
     }
     legacy_fields = {
         column.get("field")
-        for column in leaf_columns(pricer._leg_column_defs("black76"))
+        for column in leaf_columns(pricer_grids._leg_column_defs("black76"))
     }
     signed_lots = next(
         column
@@ -724,25 +771,25 @@ def test_signed_lot_grid_removes_side_and_preserves_legacy_page_contract():
     assert "=== 0" in signed_lots["cellClassRules"]["pricer-invalid-cell"]
 
     sell_row = {
-        **pricer.default_leg("black76", 1),
+        **default_leg("black76", 1),
         "side": "SELL",
         "ratio": 2,
     }
-    signed_rows = pricer._rows_for_lot_mode([sell_row], signed_lots=True)
+    signed_rows = pricer_state._rows_for_lot_mode([sell_row], signed_lots=True)
     assert signed_rows[0]["ratio"] == -2
     assert "side" not in signed_rows[0]
-    assert pricer._rows_for_lot_mode(signed_rows, signed_lots=False)[0] == sell_row
+    assert pricer_state._rows_for_lot_mode(signed_rows, signed_lots=False)[0] == sell_row
 
 
 def test_structure_panel_uses_route_specific_lot_mode():
     structure = {
-        "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+        "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
         "label": "S1",
         "template": {
             "model": "black76",
             "legs": [
                 {
-                    **pricer.default_leg("black76", 1),
+                    **default_leg("black76", 1),
                     "side": "SELL",
                     "ratio": 3,
                 }
@@ -750,12 +797,12 @@ def test_structure_panel_uses_route_specific_lot_mode():
         },
     }
 
-    signed_panel = pricer._build_structure_panel(
+    signed_panel = pricer_components._build_structure_panel(
         structure,
         signed_lots=True,
         use_published_surface=True,
     )
-    legacy_panel = pricer._build_structure_panel(structure)
+    legacy_panel = pricer_components._build_structure_panel(structure)
     signed_grid = component_by_pattern("pricer-legs-grid", root=signed_panel)
     legacy_grid = component_by_pattern("pricer-legs-grid", root=legacy_panel)
 
@@ -778,21 +825,21 @@ def test_structure_panel_uses_route_specific_lot_mode():
 
 def test_model_switch_keeps_signed_lot_columns_on_new_pricer(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-option-type", "structure_id": "structure-1"},
     )
 
-    outputs = pricer.manage_structure_legs(
+    outputs = pricer_input_callbacks.manage_structure_legs(
         "kirk",
         None,
         None,
         None,
         None,
-        [pricer.default_leg("black76", 1)],
+        [default_leg("black76", 1)],
         [],
         {"model": "black76", "legs": []},
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
         "TTF",
         "/pricer",
     )
@@ -806,7 +853,7 @@ def test_model_switch_keeps_signed_lot_columns_on_new_pricer(monkeypatch):
 
 
 def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
-    exchange_panel = pricer._build_structure_panel(
+    exchange_panel = pricer_components._build_structure_panel(
         {
             "structure_id": "exchange-structure-1",
             "label": "Structure 1",
@@ -835,7 +882,7 @@ def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
     )
     assert "pricer-forward-field" in children[note_index - 1].className
 
-    bzo_panel = pricer._build_structure_panel(
+    bzo_panel = pricer_components._build_structure_panel(
         {
             "structure_id": "exchange-bzo-1",
             "label": "Structure 1",
@@ -860,7 +907,7 @@ def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
 
     assert bzo_note.children == ""
     assert bzo_note.className == "pricer-surface-proxy-note"
-    assert pricer.sync_exchange_surface_proxy_note("CME-BRENT-BZO") == (
+    assert pricer_input_callbacks.sync_exchange_surface_proxy_note("CME-BRENT-BZO") == (
         "",
         "pricer-surface-proxy-note",
     )
@@ -870,7 +917,7 @@ def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
         ("JKM", "black76", "otc"),
         ("JKM", "black76", "legacy"),
     ):
-        panel = pricer._build_structure_panel(
+        panel = pricer_components._build_structure_panel(
             {
                 "structure_id": f"{workflow}-{asset}-{model}",
                 "label": "Structure 1",
@@ -891,8 +938,8 @@ def test_otc_header_starts_with_model_while_exchange_order_is_unchanged():
         "label": "Structure 1",
         "template": {"asset": "TTF", "model": "black76"},
     }
-    otc_panel = pricer._build_structure_panel(structure, workflow="otc")
-    exchange_panel = pricer._build_structure_panel(structure, workflow="exchange")
+    otc_panel = pricer_components._build_structure_panel(structure, workflow="otc")
+    exchange_panel = pricer_components._build_structure_panel(structure, workflow="exchange")
 
     def direct_control_types(panel):
         controls = next(
@@ -921,7 +968,7 @@ def test_otc_header_starts_with_model_while_exchange_order_is_unchanged():
 
 
 def test_otc_kirk_form_has_explicit_two_asset_inputs_and_unit_notional_default():
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "otc-kirk",
             "label": "Structure 1",
@@ -999,11 +1046,11 @@ def test_otc_kirk_form_has_explicit_two_asset_inputs_and_unit_notional_default()
         root=panel,
     ).style == {"display": "none"}
 
-    labels, _descriptions = pricer.display_kirk_asset_price_units(
+    labels, _descriptions = pricer_input_callbacks.display_kirk_asset_price_units(
         ["JKM", "HH"],
         [
-            pricer._context_id("kirk", "asset_1_code", structure_id="otc-kirk"),
-            pricer._context_id("kirk", "asset_2_code", structure_id="otc-kirk"),
+            pricer_state._context_id("kirk", "asset_1_code", structure_id="otc-kirk"),
+            pricer_state._context_id("kirk", "asset_2_code", structure_id="otc-kirk"),
         ],
         [
             {
@@ -1023,15 +1070,15 @@ def test_otc_kirk_form_has_explicit_two_asset_inputs_and_unit_notional_default()
 
 def test_dashboard_calculation_treats_negative_lots_as_sell(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "calculate-button",
     )
     params, param_ids, dates, date_ids = black_context_states()
-    sell_leg = pricer._rows_for_lot_mode(
+    sell_leg = pricer_state._rows_for_lot_mode(
         [
             {
-                **pricer.default_leg("black76", 1),
+                **default_leg("black76", 1),
                 "side": "SELL",
                 "ratio": 2,
             }
@@ -1039,7 +1086,7 @@ def test_dashboard_calculation_treats_negative_lots_as_sell(monkeypatch):
         signed_lots=True,
     )
 
-    snapshot, status = pricer.calculate_structure_callback(
+    snapshot, status = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -1061,29 +1108,29 @@ def test_dashboard_calculation_treats_negative_lots_as_sell(monkeypatch):
 
 def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-calculate-button", "structure_id": "structure-1"},
     )
     params, param_ids, dates, date_ids = black_context_states()
-    rows = pricer._rows_for_lot_mode(
+    rows = pricer_state._rows_for_lot_mode(
         [
             {
-                **pricer.default_leg("black76", 1),
+                **default_leg("black76", 1),
                 "quote_basis": "PREMIUM",
                 "quote_value": 999.0,
             }
         ],
         signed_lots=True,
     )
-    context = pricer._context_from_states(
+    context = pricer_state._context_from_states(
         "black76",
         params,
         param_ids,
         dates,
         date_ids,
     )
-    reference_signature = pricer._surface_reference_input_signature(
+    reference_signature = pricer_state._surface_reference_input_signature(
         "TTF",
         "black76",
         rows,
@@ -1097,7 +1144,7 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
         asset="TTF",
     )[0]
     surface_reference = {
-        "schema_version": pricer.REFERENCE_SCHEMA_VERSION,
+        "schema_version": REFERENCE_SCHEMA_VERSION,
         "asset": "TTF",
         "model": "black76",
         "publication_id": "published-42",
@@ -1117,7 +1164,7 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
     }
 
     snapshot, status, grid_options, _baseline = (
-        pricer.calculate_structure_instance_callback(
+        pricer_calculation_callbacks.calculate_structure_instance_callback(
             1,
             0,
             "TTF",
@@ -1174,12 +1221,12 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
     )
     adjusted_reference = {
         **surface_reference,
-        "_ui_reference_signature": pricer._surface_reference_input_signature(
+        "_ui_reference_signature": pricer_state._surface_reference_input_signature(
             "TTF", "black76", adjusted_rows, context, "2026-07-29"
         ),
     }
     adjusted_snapshot, adjusted_status, _grid_options, _baseline = (
-        pricer.calculate_structure_instance_callback(
+        pricer_calculation_callbacks.calculate_structure_instance_callback(
             2,
             0,
             "TTF",
@@ -1213,18 +1260,18 @@ def test_new_pricer_calculates_from_published_surface_not_hidden_quote(monkeypat
 
 def test_new_pricer_blocks_calculation_when_published_surface_is_missing(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-calculate-button", "structure_id": "structure-1"},
     )
     params, param_ids, dates, date_ids = black_context_states()
-    rows = pricer._rows_for_lot_mode(
-        [pricer.default_leg("black76", 1)],
+    rows = pricer_state._rows_for_lot_mode(
+        [default_leg("black76", 1)],
         signed_lots=True,
     )
 
     snapshot, status, grid_options, _baseline = (
-        pricer.calculate_structure_instance_callback(
+        pricer_calculation_callbacks.calculate_structure_instance_callback(
             1,
             0,
             "TTF",
@@ -1251,7 +1298,7 @@ def test_new_pricer_blocks_calculation_when_published_surface_is_missing(monkeyp
 
 def test_structure_panels_have_unique_scoped_ids_and_persistence_keys():
     panels = [
-        pricer._build_structure_panel(
+        pricer_components._build_structure_panel(
             {
                 "structure_id": structure_id,
                 "label": label,
@@ -1336,7 +1383,7 @@ def test_structure_panels_have_unique_scoped_ids_and_persistence_keys():
 
 
 def test_global_valuation_date_overrides_structure_dates_without_persistence():
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-1",
             "label": "S1",
@@ -1349,28 +1396,28 @@ def test_global_valuation_date_overrides_structure_dates_without_persistence():
     assert valuation.persistence is False
 
     valuation_ids = [
-        pricer._instance_id("pricer-valuation-date", "structure-1"),
-        pricer._instance_id("pricer-valuation-date", "structure-2"),
+        pricer_state._instance_id("pricer-valuation-date", "structure-1"),
+        pricer_state._instance_id("pricer-valuation-date", "structure-2"),
     ]
-    assert pricer.sync_pricer_global_valuation_date(
+    assert pricer_workspace_callbacks.sync_pricer_global_valuation_date(
         "2026-07-28",
         "/pricer",
         valuation_ids,
     ) == ["2026-07-28", "2026-07-28"]
     assert all(
         value is no_update
-        for value in pricer.sync_pricer_global_valuation_date(
+        for value in pricer_workspace_callbacks.sync_pricer_global_valuation_date(
             "2026-07-28",
-            "/pricer_old",
+            "/greeks",
             valuation_ids,
         )
     )
 
 
 def test_workspace_reducer_adds_duplicates_and_removes_without_aliasing_state():
-    base = pricer._normalize_workspace(None)
+    base = pricer_state._normalize_workspace(None)
     assert [structure["label"] for structure in base["structures"]] == ["S1"]
-    added = pricer._reduce_workspace(base, "add")
+    added = pricer_state._reduce_workspace(base, "add")
     assert [
         structure["structure_id"] for structure in added["structures"]
     ] == ["structure-1", "structure-2"]
@@ -1387,7 +1434,7 @@ def test_workspace_reducer_adds_duplicates_and_removes_without_aliasing_state():
         "legs": two_leg_rows(),
         "next_leg_sequence": 3,
     }
-    duplicated = pricer._reduce_workspace(
+    duplicated = pricer_state._reduce_workspace(
         added,
         "duplicate",
         "structure-1",
@@ -1402,11 +1449,11 @@ def test_workspace_reducer_adds_duplicates_and_removes_without_aliasing_state():
     assert duplicate["template"]["context"]["forward"] == 103.5
     assert duplicate["template"]["legs"][0]["strike"] == 95
 
-    removed = pricer._reduce_workspace(duplicated, "remove", "structure-2")
+    removed = pricer_state._reduce_workspace(duplicated, "remove", "structure-2")
     assert [
         structure["structure_id"] for structure in removed["structures"]
     ] == ["structure-1", "structure-3"]
-    assert pricer._reduce_workspace(base, "remove", "structure-1") == base
+    assert pricer_state._reduce_workspace(base, "remove", "structure-1") == base
 
 
 def test_instance_calculation_and_input_invalidation_are_isolated(monkeypatch):
@@ -1430,15 +1477,15 @@ def test_instance_calculation_and_input_invalidation_are_isolated(monkeypatch):
     assert_output_is_masked(cleared_1, "structure-1")
     assert changed_status.children == "Modified · outputs cleared · calculate again"
     calculation_store_ids = [
-        pricer._instance_id("pricer-calculation-store", "structure-1"),
-        pricer._instance_id("pricer-calculation-store", "structure-2"),
+        pricer_state._instance_id("pricer-calculation-store", "structure-1"),
+        pricer_state._instance_id("pricer-calculation-store", "structure-2"),
     ]
-    assert pricer.route_selected_structure_calculation(
+    assert pricer_workspace_callbacks.route_selected_structure_calculation(
         "structure-1",
         [cleared_1, snapshot_2],
         calculation_store_ids,
     ) is no_update
-    assert pricer.route_selected_structure_calculation(
+    assert pricer_workspace_callbacks.route_selected_structure_calculation(
         "structure-2",
         [cleared_1, snapshot_2],
         calculation_store_ids,
@@ -1487,13 +1534,13 @@ def test_committed_grid_event_clears_outputs_even_before_rowdata_updates(monkeyp
         trigger={"type": "pricer-calculate-button", "structure_id": "structure-1"},
     )
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-legs-grid", "structure_id": "structure-1"},
     )
 
     invalidated, status, grid_state, baseline = (
-        pricer.calculate_structure_instance_callback(
+        pricer_calculation_callbacks.calculate_structure_instance_callback(
             1,
             1,
             state["asset"],
@@ -1524,7 +1571,7 @@ def test_panel_restore_rejects_snapshot_whose_draft_signature_changed(monkeypatc
         state,
         trigger={"type": "pricer-calculate-button", "structure_id": "structure-1"},
     )
-    context = pricer._context_from_states(
+    context = pricer_state._context_from_states(
         state["model"],
         state["param_values"],
         state["param_ids"],
@@ -1540,9 +1587,9 @@ def test_panel_restore_rejects_snapshot_whose_draft_signature_changed(monkeypatc
         "legs": copy.deepcopy(state["rows"]),
         "next_leg_sequence": 2,
     }
-    assert pricer._snapshot_matches_template(snapshot, template)
+    assert pricer_state._snapshot_matches_template(snapshot, template)
 
-    current_panel = pricer._build_structure_panel(
+    current_panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-1",
             "label": "Structure 1",
@@ -1560,7 +1607,7 @@ def test_panel_restore_rejects_snapshot_whose_draft_signature_changed(monkeypatc
 
     stale_template = copy.deepcopy(template)
     stale_template["legs"][0]["strike"] += 1
-    stale_panel = pricer._build_structure_panel(
+    stale_panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-1",
             "label": "Structure 1",
@@ -1583,17 +1630,17 @@ def test_panel_restore_rejects_snapshot_whose_draft_signature_changed(monkeypatc
 
 def test_modified_input_status_prunes_the_session_snapshot(monkeypatch):
     snapshot, _status = calculate_instance(monkeypatch, "structure-1")
-    modified_status = pricer._build_pricer_message(
+    modified_status = pricer_controls._build_pricer_message(
         "Modified · outputs cleared · calculate again"
     )
-    workspace = pricer._default_workspace()
+    workspace = pricer_state._default_workspace()
 
-    persisted = pricer.persist_pricer_calculations(
+    persisted = pricer_workspace_callbacks.persist_pricer_calculations(
         workspace,
         [None],
-        [pricer._instance_id("pricer-calculation-store", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-store", "structure-1")],
         [modified_status],
-        [pricer._instance_id("pricer-calculation-status", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-status", "structure-1")],
         {"structure-1": snapshot},
     )
 
@@ -1708,7 +1755,7 @@ def test_header_date_and_model_specific_changes_mask_then_restore_output(
             "structure_id": state["structure_id"],
         },
     )
-    expected_signature = pricer._calculation_input_signature(
+    expected_signature = pricer_pricing._calculation_input_signature(
         changed_state["asset"],
         changed_state["model"],
         changed_state["contract_multiplier"],
@@ -1994,11 +2041,11 @@ def test_leg_actions_mask_outputs_and_recalculation_uses_the_new_leg_set(
         "next_leg_sequence": starting_leg_count + 1,
     }
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": action_type, "structure_id": "structure-1"},
     )
-    managed = pricer.manage_structure_legs(
+    managed = pricer_input_callbacks.manage_structure_legs(
         "black76",
         1,
         1,
@@ -2007,7 +2054,7 @@ def test_leg_actions_mask_outputs_and_recalculation_uses_the_new_leg_set(
         copy.deepcopy(state["rows"]),
         selected_rows,
         draft,
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
     )
     changed_state = copy.deepcopy(state)
     changed_state["rows"] = managed[2]
@@ -2058,25 +2105,25 @@ def test_calculate_all_keeps_valid_results_when_another_structure_fails(monkeypa
     assert invalid_status.className.endswith("danger")
     assert "volatility is required" in invalid_status.children
 
-    workspace = pricer._reduce_workspace(pricer._default_workspace(), "add")
+    workspace = pricer_state._reduce_workspace(pricer_state._default_workspace(), "add")
     store_ids = [
-        pricer._instance_id("pricer-calculation-store", structure_id)
+        pricer_state._instance_id("pricer-calculation-store", structure_id)
         for structure_id in ("structure-1", "structure-2")
     ]
-    assert pricer.render_pricer_workspace_status(
+    assert pricer_workspace_callbacks.render_pricer_workspace_status(
         workspace,
         [valid_snapshot, invalid_snapshot],
         store_ids,
     ) == "2 structures · 1 calculated"
 
-    persisted = pricer.persist_pricer_calculations(
+    persisted = pricer_workspace_callbacks.persist_pricer_calculations(
         workspace,
         [valid_snapshot, invalid_snapshot],
         store_ids,
         [valid_status, invalid_status],
         [
-            pricer._instance_id("pricer-calculation-status", "structure-1"),
-            pricer._instance_id("pricer-calculation-status", "structure-2"),
+            pricer_state._instance_id("pricer-calculation-status", "structure-1"),
+            pricer_state._instance_id("pricer-calculation-status", "structure-2"),
         ],
         {
             "structure-1": valid_snapshot,
@@ -2097,14 +2144,14 @@ def test_calculate_all_keeps_valid_results_when_another_structure_fails(monkeypa
 
 def test_session_snapshot_map_prunes_removed_structures(monkeypatch):
     removed_snapshot, _status = calculate_instance(monkeypatch, "structure-2")
-    workspace = pricer._default_workspace()
+    workspace = pricer_state._default_workspace()
 
-    persisted = pricer.persist_pricer_calculations(
+    persisted = pricer_workspace_callbacks.persist_pricer_calculations(
         workspace,
         [None],
-        [pricer._instance_id("pricer-calculation-store", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-store", "structure-1")],
         [""],
-        [pricer._instance_id("pricer-calculation-status", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-status", "structure-1")],
         {"structure-2": removed_snapshot},
     )
 
@@ -2114,30 +2161,30 @@ def test_session_snapshot_map_prunes_removed_structures(monkeypatch):
 def test_analysis_selector_and_snapshot_routing_follow_workspace_membership(monkeypatch):
     snapshot_1, _ = calculate_instance(monkeypatch, "structure-1", forward=100)
     snapshot_2, _ = calculate_instance(monkeypatch, "structure-2", forward=108)
-    workspace = pricer._reduce_workspace(pricer._default_workspace(), "add")
+    workspace = pricer_state._reduce_workspace(pricer_state._default_workspace(), "add")
 
-    options, selected = pricer.sync_analysis_structure_selector(
+    options, selected = pricer_workspace_callbacks.sync_analysis_structure_selector(
         workspace,
         persisted_selection="structure-2",
     )
     assert [option["value"] for option in options] == ["structure-1", "structure-2"]
     assert selected == "structure-2"
     store_ids = [
-        pricer._instance_id("pricer-calculation-store", structure_id)
+        pricer_state._instance_id("pricer-calculation-store", structure_id)
         for structure_id in ("structure-1", "structure-2")
     ]
-    routed = pricer.route_selected_structure_calculation(
+    routed = pricer_workspace_callbacks.route_selected_structure_calculation(
         selected,
         [snapshot_1, snapshot_2],
         store_ids,
     )
     assert routed is snapshot_2
-    assert pricer.update_payoff_chart(routed, None, 50).data[0].name == (
+    assert pricer_analysis_callbacks.update_payoff_chart(routed, None, 50).data[0].name == (
         "Total expiration payoff"
     )
 
-    reduced = pricer._reduce_workspace(workspace, "remove", "structure-2")
-    reduced_options, reduced_selected = pricer.sync_analysis_structure_selector(
+    reduced = pricer_state._reduce_workspace(workspace, "remove", "structure-2")
+    reduced_options, reduced_selected = pricer_workspace_callbacks.sync_analysis_structure_selector(
         reduced,
         selected,
     )
@@ -2149,7 +2196,7 @@ def test_pricer_number_inputs_publish_edits_without_debounce():
     controls = [
         component
         for model in ("black76", "asian76", "kirk")
-        for component in walk(pricer._build_context_form(model))
+        for component in walk(pricer_controls._build_context_form(model))
         if isinstance(component, dcc.Input) and component.type == "number"
     ]
     controls.append(component_by_id("pricer-contract-multiplier"))
@@ -2172,7 +2219,7 @@ def test_pricer_number_inputs_publish_edits_without_debounce():
     assert forward.persistence == "pricer-structure-1-black76-forward-step-any-v2"
     forward_field = next(
         component
-        for component in walk(pricer._build_context_form("black76"))
+        for component in walk(pricer_controls._build_context_form("black76"))
         if isinstance(component, html.Label)
         and any(
             isinstance(descendant, dcc.Input)
@@ -2225,7 +2272,7 @@ def test_new_structure_panel_uses_exchange_contract_size_default(
     context,
     expected,
 ):
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-9",
             "label": "S9",
@@ -2256,7 +2303,7 @@ def test_context_date_pickers_open_on_the_current_selected_date():
     controls = [
         component
         for model in ("black76", "asian76", "kirk")
-        for component in walk(pricer._build_context_form(model))
+        for component in walk(pricer_controls._build_context_form(model))
         if isinstance(component, dcc.DatePickerSingle)
     ]
 
@@ -2274,8 +2321,8 @@ def test_leg_reducer_adds_duplicates_removes_and_never_removes_last(monkeypatch)
         "legs": two_leg_rows()[:1],
         "next_leg_sequence": 2,
     }
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-add-leg")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-add-leg")
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76", 1, None, None, None, draft["legs"], [], draft
     )
     rows = output[2]
@@ -2283,11 +2330,11 @@ def test_leg_reducer_adds_duplicates_removes_and_never_removes_last(monkeypatch)
 
     draft = output[4]
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-duplicate-leg",
     )
-    output = pricer.manage_structure_legs(
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76", 1, 1, None, None, rows, [rows[0]], draft
     )
     rows = output[2]
@@ -2295,15 +2342,15 @@ def test_leg_reducer_adds_duplicates_removes_and_never_removes_last(monkeypatch)
     assert rows[-1]["name"] == "Leg 3"
 
     draft = output[4]
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-remove-leg")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-remove-leg")
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76", 1, 1, 1, None, rows, [rows[-1]], draft
     )
     rows = output[2]
     assert len(rows) == 2
 
     one_row = rows[:1]
-    output = pricer.manage_structure_legs(
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76",
         1,
         1,
@@ -2319,17 +2366,17 @@ def test_leg_reducer_adds_duplicates_removes_and_never_removes_last(monkeypatch)
 
 def test_leg_reducer_enforces_maximum_leg_count(monkeypatch):
     rows = [
-        pricer.default_leg("black76", sequence)
-        for sequence in range(1, pricer.MAX_LEGS + 1)
+        default_leg("black76", sequence)
+        for sequence in range(1, MAX_LEGS + 1)
     ]
     draft = {
         "schema_version": 1,
         "model": "black76",
         "legs": rows,
-        "next_leg_sequence": pricer.MAX_LEGS + 1,
+        "next_leg_sequence": MAX_LEGS + 1,
     }
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-add-leg")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-add-leg")
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76",
         1,
         None,
@@ -2339,16 +2386,16 @@ def test_leg_reducer_enforces_maximum_leg_count(monkeypatch):
         [],
         draft,
     )
-    assert len(output[2]) == pricer.MAX_LEGS
-    assert f"at most {pricer.MAX_LEGS}" in output[5]
+    assert len(output[2]) == MAX_LEGS
+    assert f"at most {MAX_LEGS}" in output[5]
 
 
 def test_grid_edit_commits_atm_adjustment_when_row_data_lags(monkeypatch):
-    row = pricer._rows_with_volatility_adjustments(
-        "black76", [pricer.default_leg("black76", 1)]
+    row = pricer_state._rows_with_volatility_adjustments(
+        "black76", [default_leg("black76", 1)]
     )[0]
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -2370,11 +2417,11 @@ def test_grid_edit_commits_atm_adjustment_when_row_data_lags(monkeypatch):
 
 
 def test_surface_adjustment_edit_applies_to_every_leg_in_structure(monkeypatch):
-    rows = pricer._rows_with_volatility_adjustments(
-        "black76", [pricer.default_leg("black76", 1), pricer.default_leg("black76", 2)]
+    rows = pricer_state._rows_with_volatility_adjustments(
+        "black76", [default_leg("black76", 1), default_leg("black76", 2)]
     )
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -2398,8 +2445,8 @@ def test_surface_adjustment_edit_applies_to_every_leg_in_structure(monkeypatch):
 
 
 def test_lagging_surface_edit_handoff_shares_overlay_across_legs():
-    rows = pricer._rows_with_volatility_adjustments(
-        "black76", [pricer.default_leg("black76", 1), pricer.default_leg("black76", 2)]
+    rows = pricer_state._rows_with_volatility_adjustments(
+        "black76", [default_leg("black76", 1), default_leg("black76", 2)]
     )
     event = [{
         "colId": "smile_vol_adjustment",
@@ -2407,17 +2454,17 @@ def test_lagging_surface_edit_handoff_shares_overlay_across_legs():
         "newValue": 3.0,
         "data": {**rows[1], "smile_vol_adjustment": 3.0},
     }]
-    committed = pricer._rows_with_committed_leg_edit(rows, event)
+    committed = pricer_state._rows_with_committed_leg_edit(rows, event)
     assert [row["smile_vol_adjustment"] for row in committed] == [3.0, 3.0]
     assert [row["smile_vol_adjustment"] for row in rows] == [0.0, 0.0]
 
     newer_rows = [dict(row, smile_vol_adjustment=5.0) for row in rows]
-    assert pricer._rows_with_committed_leg_edit(newer_rows, event) == newer_rows
+    assert pricer_state._rows_with_committed_leg_edit(newer_rows, event) == newer_rows
 
 
 def test_model_switch_resets_incompatible_legs_and_context(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "option-type")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "option-type")
+    output = pricer_input_callbacks.manage_structure_legs(
         "kirk",
         None,
         None,
@@ -2432,7 +2479,7 @@ def test_model_switch_resets_incompatible_legs_and_context(monkeypatch):
             "next_leg_sequence": 3,
         },
     )
-    assert output[2] == [pricer.default_leg("kirk", 1)]
+    assert output[2] == [default_leg("kirk", 1)]
     assert output[4]["model"] == "kirk"
     assert output[3] == []
 
@@ -2443,7 +2490,7 @@ def test_calculation_and_result_grids_reconcile_two_leg_trade(monkeypatch):
     assert snapshot["sizing"]["structure_quantity"] == 1
     assert snapshot["sizing"]["position_scale"] == 100
 
-    rendered = pricer.render_structure_results(snapshot)
+    rendered = pricer_calculation_callbacks.render_structure_results(snapshot)
     meta = rendered[0]
     assert [item.children[0].children for item in meta] == ["T", "Vol adj"]
     assert meta[0].children[1] == f"{snapshot['context']['time_to_expiry']:.6f}y"
@@ -2451,7 +2498,7 @@ def test_calculation_and_result_grids_reconcile_two_leg_trade(monkeypatch):
         f"{snapshot['context']['vol_adjustment_factor']:.6f}×"
     )
     assert "contract days" in meta[1].title
-    assert rendered[1:5] == ("", "", "", "")
+    assert rendered[1] == ""
 
     grid_state = unified_grid_state(snapshot)
     pricing_rows = grid_state["context"]["pricingRows"]
@@ -2467,7 +2514,7 @@ def test_calculation_and_result_grids_reconcile_two_leg_trade(monkeypatch):
     assert first["trade_value"] == pytest.approx(
         first["unit_value"] * 2 * 100
     )
-    column_defs = pricer._leg_column_defs("black76")
+    column_defs = pricer_grids._leg_column_defs("black76")
     assert [group["headerName"] for group in column_defs] == [
         "Leg",
         "Leg inputs",
@@ -2546,18 +2593,18 @@ def test_calculation_and_result_grids_reconcile_two_leg_trade(monkeypatch):
 
 def test_kirk_unified_grid_keeps_two_asset_analytics_without_summary_cards():
     as_of = FrozenDate(2026, 7, 29)
-    context = pricer.default_context("kirk", as_of)
+    context = default_context("kirk", as_of)
     context["asset_1_code"] = "JKM"
     context["asset_2_code"] = "HH"
-    snapshot = pricer.calculate_structure(
+    snapshot = calculate_structure(
         "kirk",
         context,
         {"structure_quantity": 1, "contract_multiplier": 1},
-        [pricer.default_leg("kirk", 1)],
+        [default_leg("kirk", 1)],
         as_of=as_of,
     )
 
-    assert [group["headerName"] for group in pricer._leg_column_defs("kirk")] == [
+    assert [group["headerName"] for group in pricer_grids._leg_column_defs("kirk")] == [
         "Leg",
         "Leg inputs",
         "Unit analytics",
@@ -2568,27 +2615,27 @@ def test_kirk_unified_grid_keeps_two_asset_analytics_without_summary_cards():
     assert row["raw_volatility_asset_2"] == pytest.approx(0.15)
     assert row["trade_delta_s1"] is not None
     assert row["trade_delta_s2"] is not None
-    meta = pricer.render_structure_results(snapshot)[0]
+    meta = pricer_calculation_callbacks.render_structure_results(snapshot)[0]
     assert meta[0].children[1] == f"{snapshot['context']['time_to_expiry']:.6f}y"
 
 
 def test_premium_quoted_leg_result_exposes_solved_contract_vol():
     as_of = FrozenDate(2026, 7, 29)
-    context = pricer.default_context("black76", as_of)
-    baseline = pricer.calculate_structure(
+    context = default_context("black76", as_of)
+    baseline = calculate_structure(
         "black76",
         context,
         {"structure_quantity": 1, "contract_multiplier": 1},
-        [pricer.default_leg("black76", 1)],
+        [default_leg("black76", 1)],
         as_of=as_of,
     )
     premium = baseline["legs"][0]["unit"]["value"]
     premium_leg = {
-        **pricer.default_leg("black76", 1),
+        **default_leg("black76", 1),
         "quote_basis": "PREMIUM",
         "quote_value": premium,
     }
-    snapshot = pricer.calculate_structure(
+    snapshot = calculate_structure(
         "black76",
         context,
         {"structure_quantity": 1, "contract_multiplier": 1},
@@ -2596,7 +2643,7 @@ def test_premium_quoted_leg_result_exposes_solved_contract_vol():
         as_of=as_of,
     )
 
-    rows, _total = pricer._combined_result_rows(snapshot)
+    rows, _total = pricer_state._combined_result_rows(snapshot)
     assert rows[0]["quote_basis"] == "Premium"
     assert rows[0]["entered_premium"] == pytest.approx(premium)
     assert rows[0]["raw_volatility"] == pytest.approx(0.2)
@@ -2607,25 +2654,25 @@ def test_premium_quoted_leg_result_exposes_solved_contract_vol():
 
 def test_asian_compact_meta_keeps_averaging_context():
     as_of = FrozenDate(2026, 7, 29)
-    snapshot = pricer.calculate_structure(
+    snapshot = calculate_structure(
         "asian76",
-        pricer.default_context("asian76", as_of),
+        default_context("asian76", as_of),
         {"structure_quantity": 1, "contract_multiplier": 1},
-        [pricer.default_leg("asian76", 1)],
+        [default_leg("asian76", 1)],
         as_of=as_of,
     )
 
-    meta = pricer.render_structure_results(snapshot)[0]
+    meta = pricer_calculation_callbacks.render_structure_results(snapshot)[0]
     assert [item.children[0].children for item in meta] == ["T", "Vol adj"]
     assert snapshot["context"]["averaging_start_date"] in meta[0].title
 
 
 def test_valuation_date_drives_time_basis_and_allows_past_or_future(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "calculate-button")
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "calculate-button")
     params, param_ids, dates, date_ids = black_context_states()
     rows = two_leg_rows()[:1]
 
-    past_snapshot, _ = pricer.calculate_structure_callback(
+    past_snapshot, _ = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -2637,7 +2684,7 @@ def test_valuation_date_drives_time_basis_and_allows_past_or_future(monkeypatch)
         param_ids,
         date_ids,
     )
-    future_snapshot, _ = pricer.calculate_structure_callback(
+    future_snapshot, _ = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -2664,9 +2711,9 @@ def test_valuation_date_drives_time_basis_and_allows_past_or_future(monkeypatch)
 
 
 def test_valuation_date_after_expiry_blocks_calculation(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "calculate-button")
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "calculate-button")
     params, param_ids, dates, date_ids = black_context_states()
-    snapshot, status = pricer.calculate_structure_callback(
+    snapshot, status = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -2684,20 +2731,20 @@ def test_valuation_date_after_expiry_blocks_calculation(monkeypatch):
 
 
 def test_empty_and_stale_output_use_one_consolidated_message():
-    empty = pricer.render_structure_results(None)
-    assert empty == ("", "", "", "", "", "")
+    empty = pricer_calculation_callbacks.render_structure_results(None)
+    assert empty == ("", "", "")
 
-    stale = pricer.render_structure_results({"schema_version": 1})
+    stale = pricer_calculation_callbacks.render_structure_results({"schema_version": 1})
     assert stale[0] == ""
     assert "stale" in stale[1].children
-    assert stale[2:5] == ("", "", "")
+    assert "Stale calculation" in stale[2].children
 
 
 def test_invalid_leg_clears_snapshot_and_exposes_actionable_error(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "calculate-button")
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "calculate-button")
     params, param_ids, dates, date_ids = black_context_states()
     bad_rows = [{**two_leg_rows()[0], "volatility": None}]
-    snapshot, status = pricer.calculate_structure_callback(
+    snapshot, status = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -2716,11 +2763,11 @@ def test_invalid_leg_clears_snapshot_and_exposes_actionable_error(monkeypatch):
 
 def test_structure_charts_only_expose_aggregate_traces(monkeypatch):
     snapshot, _status = calculate_two_leg_snapshot(monkeypatch)
-    payoff = pricer.update_payoff_chart(snapshot, None, 50)
+    payoff = pricer_analysis_callbacks.update_payoff_chart(snapshot, None, 50)
     assert [trace.name for trace in payoff.data] == ["Total expiration payoff"]
 
     volatility, rate, time, extension, correlation = (
-        pricer.render_structure_sensitivity_charts(snapshot)
+        pricer_analysis_callbacks.render_structure_sensitivity_charts(snapshot)
     )
     for figure in (volatility, time, extension):
         assert all("Leg " not in (trace.name or "") for trace in figure.data)
@@ -2731,8 +2778,8 @@ def test_structure_charts_only_expose_aggregate_traces(monkeypatch):
 
 
 def test_model_change_clears_calculation_snapshot(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "option-type")
-    output = pricer.calculate_structure_callback(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "option-type")
+    output = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "kirk",
@@ -2749,8 +2796,8 @@ def test_model_change_clears_calculation_snapshot(monkeypatch):
 
 
 def test_asset_change_clears_calculation_snapshot(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-asset")
-    output = pricer.calculate_structure_callback(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-asset")
+    output = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "Brent",
         "black76",
@@ -2778,7 +2825,7 @@ def test_asset_change_clears_calculation_snapshot(monkeypatch):
     ],
 )
 def test_asset_change_selects_the_concrete_premium_default(asset, model, expected):
-    assert pricer.select_asset_default_premium_convention(asset, model) == [expected]
+    assert pricer_input_callbacks.select_asset_default_premium_convention(asset, model) == [expected]
 
 
 @pytest.mark.parametrize(
@@ -2792,7 +2839,7 @@ def test_asset_change_selects_the_concrete_premium_default(asset, model, expecte
     ],
 )
 def test_asset_change_updates_visible_price_unit(asset, expected):
-    label, description = pricer.display_asset_price_unit(asset)
+    label, description = pricer_input_callbacks.display_asset_price_unit(asset)
     assert label == expected
     assert description
 
@@ -2807,7 +2854,7 @@ def _contract_size_state(
 ):
     param_values = [shape]
     param_ids = [
-        pricer._context_id(
+        pricer_state._context_id(
             model,
             "delivery_shape",
             structure_id="structure-1",
@@ -2816,7 +2863,7 @@ def _contract_size_state(
     if delivery_year is not None:
         param_values.append(delivery_year)
         param_ids.append(
-            pricer._context_id(
+            pricer_state._context_id(
                 model,
                 "delivery_year",
                 structure_id="structure-1",
@@ -2825,7 +2872,7 @@ def _contract_size_state(
     if delivery_month is not None:
         param_values.append(delivery_month)
         param_ids.append(
-            pricer._context_id(
+            pricer_state._context_id(
                 model,
                 "delivery_month",
                 structure_id="structure-1",
@@ -2836,7 +2883,7 @@ def _contract_size_state(
     if expiration is not None:
         date_values.append(expiration)
         date_ids.append(
-            pricer._context_id(
+            pricer_state._context_id(
                 model,
                 "expiration_date",
                 is_date=True,
@@ -2850,9 +2897,9 @@ def test_exchange_contract_size_tracks_strip_when_current_value_is_automatic(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
-        lambda: pricer._context_id(
+        lambda: pricer_state._context_id(
             "asian76",
             "delivery_shape",
             structure_id="structure-1",
@@ -2864,7 +2911,7 @@ def test_exchange_contract_size_tracks_strip_when_current_value_is_automatic(
         delivery_year=2027,
     )
 
-    value, default_state = pricer.sync_exchange_contract_size(
+    value, default_state = pricer_input_callbacks.sync_exchange_contract_size(
         "JKM",
         "asian76",
         param_values,
@@ -2882,9 +2929,9 @@ def test_exchange_contract_size_tracks_strip_when_current_value_is_automatic(
 
 def test_manual_contract_size_override_survives_delivery_change(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
-        lambda: pricer._context_id(
+        lambda: pricer_state._context_id(
             "asian76",
             "delivery_shape",
             structure_id="structure-1",
@@ -2896,7 +2943,7 @@ def test_manual_contract_size_override_survives_delivery_change(monkeypatch):
         delivery_year=2027,
     )
 
-    value, default_state = pricer.sync_exchange_contract_size(
+    value, default_state = pricer_input_callbacks.sync_exchange_contract_size(
         "JKM",
         "asian76",
         param_values,
@@ -2922,9 +2969,9 @@ def test_nbp_contract_size_tracks_delivery_days_without_overwriting_manual_overr
     expected_value,
 ):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
-        lambda: pricer._context_id(
+        lambda: pricer_state._context_id(
             "black76",
             "delivery_month",
             structure_id="structure-1",
@@ -2936,7 +2983,7 @@ def test_nbp_contract_size_tracks_delivery_days_without_overwriting_manual_overr
         delivery_month="2027-01-01",
     )
 
-    value, default_state = pricer.sync_exchange_contract_size(
+    value, default_state = pricer_input_callbacks.sync_exchange_contract_size(
         "NBP",
         "black76",
         param_values,
@@ -2954,9 +3001,9 @@ def test_nbp_contract_size_tracks_delivery_days_without_overwriting_manual_overr
 
 def test_asset_change_resets_contract_size_to_new_exchange_unit(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
-        lambda: pricer._instance_id("pricer-asset", "structure-1"),
+        lambda: pricer_state._instance_id("pricer-asset", "structure-1"),
     )
     param_values, date_values, param_ids, date_ids = _contract_size_state(
         "black76",
@@ -2964,7 +3011,7 @@ def test_asset_change_resets_contract_size_to_new_exchange_unit(monkeypatch):
         expiration="2026-09-25",
     )
 
-    value, default_state = pricer.sync_exchange_contract_size(
+    value, default_state = pricer_input_callbacks.sync_exchange_contract_size(
         "TTF",
         "black76",
         param_values,
@@ -2981,20 +3028,20 @@ def test_asset_change_resets_contract_size_to_new_exchange_unit(monkeypatch):
 
 
 def test_jkm_asset_change_defaults_to_average_price_option_model():
-    assert pricer.select_asset_default_model("JKM") == "asian76"
-    assert pricer.select_asset_default_model("TTF") is pricer.no_update
+    assert pricer_input_callbacks.select_asset_default_model("JKM") == "asian76"
+    assert pricer_input_callbacks.select_asset_default_model("TTF") is no_update
     assert (
-        pricer.select_asset_default_model("JKM", "ICE-JKM-JKZ", "exchange")
+        pricer_input_callbacks.select_asset_default_model("JKM", "ICE-JKM-JKZ", "exchange")
         == "black76"
     )
     assert (
-        pricer.select_asset_default_model("JKM", "ICE-JKM-APO", "exchange")
+        pricer_input_callbacks.select_asset_default_model("JKM", "ICE-JKM-APO", "exchange")
         == "asian76"
     )
 
 
 def test_header_uses_the_selected_asset_default_without_a_saved_override():
-    header = pricer._build_structure_header_context(
+    header = pricer_controls._build_structure_header_context(
         "black76",
         "structure-1",
         None,
@@ -3008,7 +3055,7 @@ def test_header_uses_the_selected_asset_default_without_a_saved_override():
 
 @pytest.mark.parametrize("model", ["black76", "asian76"])
 def test_futures_style_rate_is_zero_and_disabled_in_context_form(model):
-    form = pricer._build_context_form(
+    form = pricer_controls._build_context_form(
         model,
         "structure-1",
         {"premium_convention": "futures_style", "rate": 0.08},
@@ -3029,14 +3076,14 @@ def test_futures_style_rate_is_zero_and_disabled_in_context_form(model):
 
     assert rate.value == 0.0
     assert rate.disabled is True
-    assert rate_field.title == pricer.FUTURES_STYLE_RATE_NOTE
-    assert rate_field.children[0].title == pricer.FUTURES_STYLE_RATE_NOTE
-    assert rate_field.children[-1].children == pricer.FUTURES_STYLE_RATE_NOTE
+    assert rate_field.title == pricer_constants.FUTURES_STYLE_RATE_NOTE
+    assert rate_field.children[0].title == pricer_constants.FUTURES_STYLE_RATE_NOTE
+    assert rate_field.children[-1].children == pricer_constants.FUTURES_STYLE_RATE_NOTE
 
 
 @pytest.mark.parametrize("model", ["black76", "asian76"])
 def test_upfront_rate_remains_editable_in_context_form(model):
-    form = pricer._build_context_form(
+    form = pricer_controls._build_context_form(
         model,
         "structure-1",
         {"premium_convention": "upfront", "rate": 0.08},
@@ -3057,20 +3104,20 @@ def test_upfront_rate_remains_editable_in_context_form(model):
 
     assert rate.value == pytest.approx(0.08)
     assert rate.disabled is False
-    assert rate_field.title == pricer.UPFRONT_RATE_NOTE
+    assert rate_field.title == pricer_constants.UPFRONT_RATE_NOTE
 
 
 def test_premium_convention_controls_visible_risk_free_rate():
-    assert pricer.sync_risk_free_rate_control("futures_style") == (0.0, True)
+    assert pricer_input_callbacks.sync_risk_free_rate_control("futures_style") == (0.0, True)
 
-    upfront_value, upfront_disabled = pricer.sync_risk_free_rate_control("upfront")
+    upfront_value, upfront_disabled = pricer_input_callbacks.sync_risk_free_rate_control("upfront")
     assert upfront_value is no_update
     assert upfront_disabled is False
 
-    invalid_value, invalid_disabled = pricer.sync_risk_free_rate_control(None)
+    invalid_value, invalid_disabled = pricer_input_callbacks.sync_risk_free_rate_control(None)
     assert invalid_value is no_update
     assert invalid_disabled is no_update
-    assert pricer.sync_risk_free_rate_control(
+    assert pricer_input_callbacks.sync_risk_free_rate_control(
         "futures_style",
         "CME-TTF-TTO",
         "exchange",
@@ -3089,16 +3136,16 @@ def test_premium_convention_controls_visible_risk_free_rate():
 def test_exchange_rate_visibility_follows_mapping_premium(
     premium_convention, workflow, expected
 ):
-    assert pricer.sync_exchange_rate_visibility(premium_convention, workflow) == expected
+    assert pricer_input_callbacks.sync_exchange_rate_visibility(premium_convention, workflow) == expected
 
 
 def test_premium_convention_change_clears_calculation_snapshot(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-context-param",
     )
-    output = pricer.calculate_structure_callback(
+    output = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -3116,11 +3163,11 @@ def test_premium_convention_change_clears_calculation_snapshot(monkeypatch):
 
 def test_pricing_input_change_clears_calculation_snapshot(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-legs-grid",
     )
-    output = pricer.calculate_structure_callback(
+    output = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -3138,11 +3185,11 @@ def test_pricing_input_change_clears_calculation_snapshot(monkeypatch):
 
 def test_initial_pricing_input_hydration_keeps_status_area_empty(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-legs-grid",
     )
-    output = pricer.calculate_structure_callback(
+    output = pricer_calculation_callbacks.calculate_structure_callback(
         None,
         "TTF",
         "black76",
@@ -3160,8 +3207,8 @@ def test_initial_pricing_input_hydration_keeps_status_area_empty(monkeypatch):
 
 def test_cell_edit_only_updates_draft_without_replacing_grid(monkeypatch):
     rows = two_leg_rows()
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
-    output = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-legs-grid")
+    output = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -3179,13 +3226,13 @@ def test_cell_edit_only_updates_draft_without_replacing_grid(monkeypatch):
     assert output[0] is no_update
     assert output[1] is no_update
     assert output[2] is no_update
-    assert output[4]["legs"] == pricer._quote_ready_rows("black76", rows)
+    assert output[4]["legs"] == pricer_state._quote_ready_rows("black76", rows)
 
 
 def test_legacy_rows_migrate_and_changing_quote_basis_clears_the_quote(monkeypatch):
     rows = two_leg_rows()[:1]
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "option-type")
-    restored = pricer.manage_structure_legs(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "option-type")
+    restored = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -3208,9 +3255,9 @@ def test_legacy_rows_migrate_and_changing_quote_basis_clears_the_quote(monkeypat
         {**restored[2][0], "quote_basis": "PREMIUM", "quote_value": 4.25}
     ]
     monkeypatch.setattr(
-        pricer, "_get_pricer_triggered_id", lambda: "pricer-legs-grid"
+        pricer_callback_context, "_get_pricer_triggered_id", lambda: "pricer-legs-grid"
     )
-    changed = pricer.manage_structure_legs(
+    changed = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -3233,14 +3280,14 @@ def test_legacy_rows_migrate_and_changing_quote_basis_clears_the_quote(monkeypat
 
 
 def test_black_context_exposes_persisted_delivery_shape_and_year_controls():
-    form = pricer._build_context_form("black76")
+    form = pricer_controls._build_context_form("black76")
     delivery_year_field = component_by_pattern(
         "pricer-delivery-year-field",
         root=form,
     )
     winter_year_field = component_by_pattern(
         "pricer-delivery-year-field",
-        root=pricer._build_context_form(
+        root=pricer_controls._build_context_form(
             "black76",
             values={"delivery_shape": "WIN", "delivery_year": 2028},
         ),
@@ -3251,7 +3298,7 @@ def test_black_context_exposes_persisted_delivery_shape_and_year_controls():
         if getattr(item, "id", None)
         == {
             "type": "pricer-context-param",
-            "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+            "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
             "model": "black76",
             "param": "delivery_shape",
         }
@@ -3282,14 +3329,14 @@ def test_black_context_exposes_persisted_delivery_shape_and_year_controls():
 
 
 def test_jkm_asian_context_enables_exchange_delivery_strips():
-    form = pricer._build_context_form("asian76", asset="JKM")
+    form = pricer_controls._build_context_form("asian76", asset="JKM")
     shape = next(
         item
         for item in walk(form)
         if getattr(item, "id", None)
         == {
             "type": "pricer-context-param",
-            "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+            "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
             "model": "asian76",
             "param": "delivery_shape",
         }
@@ -3300,7 +3347,7 @@ def test_jkm_asian_context_enables_exchange_delivery_strips():
         if getattr(item, "id", None)
         == {
             "type": "pricer-context-param",
-            "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+            "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
             "model": "asian76",
             "param": "delivery_year",
         }
@@ -3320,22 +3367,22 @@ def test_jkm_asian_context_enables_exchange_delivery_strips():
     assert isinstance(delivery_year, dcc.Input)
     assert delivery_year.step == 1
     assert delivery_year.persistence_type == "session"
-    assert pricer.toggle_delivery_year_field("MONTH") == {"display": "none"}
-    assert pricer.toggle_delivery_year_field("Q1") == {}
-    assert pricer.toggle_delivery_year_field("SUM") == {}
-    assert pricer.toggle_delivery_year_field("WIN") == {}
+    assert pricer_input_callbacks.toggle_delivery_year_field("MONTH") == {"display": "none"}
+    assert pricer_input_callbacks.toggle_delivery_year_field("Q1") == {}
+    assert pricer_input_callbacks.toggle_delivery_year_field("SUM") == {}
+    assert pricer_input_callbacks.toggle_delivery_year_field("WIN") == {}
 
 
 def test_jkm_asian_month_context_keeps_otc_governed_defaults_editable():
     values = {"delivery_shape": "MONTH", "delivery_month": "2027-01-01"}
     header = html.Div(
-        pricer._build_structure_header_context(
+        pricer_controls._build_structure_header_context(
             "asian76",
             values=values,
             asset="JKM",
         )
     )
-    form = pricer._build_context_form(
+    form = pricer_controls._build_context_form(
         "asian76",
         values=values,
         asset="JKM",
@@ -3346,7 +3393,7 @@ def test_jkm_asian_month_context_keeps_otc_governed_defaults_editable():
         if getattr(item, "id", None)
         == {
             "type": "pricer-context-param",
-            "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+            "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
             "model": "asian76",
             "param": "delivery_month",
         }
@@ -3379,7 +3426,7 @@ def test_jkm_asian_month_context_keeps_otc_governed_defaults_editable():
 
 
 def test_jkm_apo_exchange_month_locks_all_governed_dates():
-    form = pricer._build_context_form(
+    form = pricer_controls._build_context_form(
         "asian76",
         values={"delivery_shape": "MONTH", "delivery_month": "2027-01-01"},
         asset="JKM",
@@ -3408,7 +3455,7 @@ def test_jkm_apo_exchange_month_locks_all_governed_dates():
     ],
 )
 def test_every_asset_model_header_has_delivery_immediately_after_shape(asset, model):
-    header = pricer._build_structure_header_context(
+    header = pricer_controls._build_structure_header_context(
         model,
         values={"delivery_shape": "MONTH"},
         asset=asset,
@@ -3433,7 +3480,7 @@ def test_every_asset_model_header_has_delivery_immediately_after_shape(asset, mo
 
 
 def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
-    options, selected, disabled, style = pricer.sync_delivery_month_control(
+    options, selected, disabled, style = pricer_input_callbacks.sync_delivery_month_control(
         "JKM",
         "asian76",
         ["MONTH"],
@@ -3449,7 +3496,7 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
     assert disabled is False
     assert style == {}
     assert {option["value"] for option in options} >= {"2027-01-01"}
-    assert pricer.sync_asian76_dates(
+    assert pricer_input_callbacks.sync_asian76_dates(
         "2026-09-01",
         "2026-10-01",
         "2027-01-01",
@@ -3471,7 +3518,7 @@ def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
         False,
     )
 
-    strip = pricer.sync_delivery_month_control(
+    strip = pricer_input_callbacks.sync_delivery_month_control(
         "JKM",
         "asian76",
         ["Q1"],
@@ -3499,12 +3546,12 @@ def test_asian76_governed_date_callback_passes_mapping_id():
 
     assert "pricer-mapping-id" in input_types
     assert len(callback["inputs"]) == len(
-        inspect.signature(pricer.sync_asian76_dates).parameters
+        inspect.signature(pricer_input_callbacks.sync_asian76_dates).parameters
     )
 
 
 def test_model_dependent_callbacks_ignore_transient_hydration_state():
-    assert pricer.manage_structure_legs(
+    assert pricer_input_callbacks.manage_structure_legs(
         None,
         None,
         None,
@@ -3514,7 +3561,7 @@ def test_model_dependent_callbacks_ignore_transient_hydration_state():
         None,
         None,
     ) == (no_update,) * 8
-    assert pricer.sync_delivery_month_control(
+    assert pricer_input_callbacks.sync_delivery_month_control(
         "HH",
         None,
         ["MONTH"],
@@ -3525,7 +3572,7 @@ def test_model_dependent_callbacks_ignore_transient_hydration_state():
 
 
 def test_otc_delivery_callback_keeps_contract_dates_editable():
-    assert pricer.sync_black76_contract_expiration_date(
+    assert pricer_input_callbacks.sync_black76_contract_expiration_date(
         "2027-01-01",
         "2027-01-31",
         "TTF",
@@ -3554,12 +3601,12 @@ def test_delivery_strip_hides_manual_date_fields(
     asset,
     expected_month_only_fields,
 ):
-    month_form = pricer._build_context_form(
+    month_form = pricer_controls._build_context_form(
         model,
         values={"delivery_shape": "MONTH"},
         asset=asset,
     )
-    strip_form = pricer._build_context_form(
+    strip_form = pricer_controls._build_context_form(
         model,
         values={"delivery_shape": "Q3", "delivery_year": 2027},
         asset=asset,
@@ -3581,22 +3628,22 @@ def test_delivery_strip_hides_manual_date_fields(
     assert all(item.style == {"display": "none"} for item in strip_fields)
 
     field_ids = [item.id for item in strip_fields]
-    assert pricer.toggle_month_only_fields(["MONTH"], field_ids) == [
+    assert pricer_input_callbacks.toggle_month_only_fields(["MONTH"], field_ids) == [
         {}
     ] * expected_month_only_fields
-    assert pricer.toggle_month_only_fields(["Q3"], field_ids) == [
+    assert pricer_input_callbacks.toggle_month_only_fields(["Q3"], field_ids) == [
         {"display": "none"}
     ] * expected_month_only_fields
 
 
 def test_month_signature_ignores_hidden_delivery_year_but_strip_signature_keeps_it():
-    month_2027 = pricer._normalized_signature_context(
+    month_2027 = pricer_state._normalized_signature_context(
         {"delivery_shape": "MONTH", "delivery_year": 2027, "forward": 100}
     )
-    month_2030 = pricer._normalized_signature_context(
+    month_2030 = pricer_state._normalized_signature_context(
         {"delivery_shape": "MONTH", "delivery_year": 2030, "forward": 100}
     )
-    strip_2027 = pricer._normalized_signature_context(
+    strip_2027 = pricer_state._normalized_signature_context(
         {"delivery_shape": "WIN", "delivery_year": 2027, "forward": 100}
     )
 
@@ -3606,7 +3653,7 @@ def test_month_signature_ignores_hidden_delivery_year_but_strip_signature_keeps_
 
 
 def test_strip_signature_ignores_hidden_manual_expiration_dates():
-    first = pricer._normalized_signature_context(
+    first = pricer_state._normalized_signature_context(
         {
             "delivery_shape": "Q1",
             "delivery_year": 2027,
@@ -3616,7 +3663,7 @@ def test_strip_signature_ignores_hidden_manual_expiration_dates():
             "delivery_month": "2027-01-01",
         }
     )
-    second = pricer._normalized_signature_context(
+    second = pricer_state._normalized_signature_context(
         {
             "delivery_shape": "Q1",
             "delivery_year": 2027,
@@ -3631,7 +3678,7 @@ def test_strip_signature_ignores_hidden_manual_expiration_dates():
 
 
 def test_ttf_sum27_callback_renders_monthly_component_audit(monkeypatch):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: "calculate-button")
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: "calculate-button")
     param_values = ["SUM", 2027, 42.9, 0.05]
     param_ids = [
         {
@@ -3668,7 +3715,7 @@ def test_ttf_sum27_callback_renders_monthly_component_audit(monkeypatch):
             "param": "contract_expiration_date",
         },
     ]
-    snapshot, status = pricer.calculate_structure_callback(
+    snapshot, status = pricer_calculation_callbacks.calculate_structure_callback(
         1,
         "TTF",
         "black76",
@@ -3695,15 +3742,15 @@ def test_ttf_sum27_callback_renders_monthly_component_audit(monkeypatch):
         5.894909897031116
     )
     assert status.children == "Calculated · 1 leg · Black-76 · 6 months"
-    rendered = pricer.render_structure_results(snapshot)
+    rendered = pricer_calculation_callbacks.render_structure_results(snapshot)
     assert [item.children[0].children for item in rendered[0]] == ["T", "Vol adj"]
     assert snapshot["context"]["delivery_component_count"] == 6
     assert snapshot["context"]["margin_style"] == "futures_style"
-    assert pricer.FUTURES_STYLE_RATE_NOTE in snapshot["warnings"]
-    warning_badges = rendered[5]
+    assert pricer_constants.FUTURES_STYLE_RATE_NOTE in snapshot["warnings"]
+    warning_badges = rendered[2]
     assert len(warning_badges) == 1
     assert all(
-        badge.children != pricer.FUTURES_STYLE_RATE_NOTE
+        badge.children != pricer_constants.FUTURES_STYLE_RATE_NOTE
         for badge in warning_badges
     )
     assert all(badge.title == badge.children for badge in warning_badges)
@@ -3720,7 +3767,7 @@ def test_ttf_sum27_callback_renders_monthly_component_audit(monkeypatch):
         if getattr(item, "id", None)
         == {
             "type": "pricer-strip-components-grid",
-            "structure_id": pricer.DEFAULT_STRUCTURE_ID,
+            "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
         }
     )
     assert len(component_grid.rowData) == 6
@@ -3728,11 +3775,11 @@ def test_ttf_sum27_callback_renders_monthly_component_audit(monkeypatch):
     assert sum(row["strip_weight_pct"] for row in component_grid.rowData) == (
         pytest.approx(100.0)
     )
-    assert pricer.sync_payoff_valuation_limit(snapshot, None)[:2] == (
+    assert pricer_analysis_callbacks.sync_payoff_valuation_limit(snapshot, None)[:2] == (
         "2026-08-21",
         "2027-03-25",
     )
-    payoff = pricer.update_payoff_chart(snapshot, None, 50)
+    payoff = pricer_analysis_callbacks.update_payoff_chart(snapshot, None, 50)
     assert [trace.name for trace in payoff.data] == [
         "Total structure value",
         "Parallel strip intrinsic benchmark",
@@ -3753,8 +3800,8 @@ def test_same_model_hydration_is_a_noop_for_context_legs_and_snapshot(
 ):
     state = model_instance_state("black76")
     state["rows"] = [
-        pricer.default_leg("black76", 1),
-        pricer.default_leg("black76", 2),
+        default_leg("black76", 1),
+        default_leg("black76", 2),
     ]
     set_context_state_value(state, "forward", 123.5)
     snapshot, _status = invoke_instance_state(
@@ -3762,7 +3809,7 @@ def test_same_model_hydration_is_a_noop_for_context_legs_and_snapshot(
         state,
         trigger={"type": "pricer-calculate-button", "structure_id": "structure-1"},
     )
-    context = pricer._context_from_states(
+    context = pricer_state._context_from_states(
         state["model"],
         state["param_values"],
         state["param_ids"],
@@ -3779,12 +3826,12 @@ def test_same_model_hydration_is_a_noop_for_context_legs_and_snapshot(
     original_draft = copy.deepcopy(draft)
     original_snapshot = copy.deepcopy(snapshot)
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: hydration_trigger,
     )
 
-    leg_outputs = pricer.manage_structure_legs(
+    leg_outputs = pricer_input_callbacks.manage_structure_legs(
         state["model"],
         None,
         None,
@@ -3793,9 +3840,9 @@ def test_same_model_hydration_is_a_noop_for_context_legs_and_snapshot(
         copy.deepcopy(state["rows"]),
         [],
         draft,
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
     )
-    calculation_outputs = pricer.calculate_structure_instance_callback(
+    calculation_outputs = pricer_calculation_callbacks.calculate_structure_instance_callback(
         1,
         7,
         state["asset"],
@@ -3824,16 +3871,16 @@ def test_actual_model_switch_replaces_columns_rows_context_and_column_state(
     monkeypatch,
 ):
     black_rows = [
-        pricer.default_leg("black76", 1),
-        pricer.default_leg("black76", 2),
+        default_leg("black76", 1),
+        default_leg("black76", 2),
     ]
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-option-type", "structure_id": "structure-1"},
     )
 
-    outputs = pricer.manage_structure_legs(
+    outputs = pricer_input_callbacks.manage_structure_legs(
         "kirk",
         None,
         None,
@@ -3848,7 +3895,7 @@ def test_actual_model_switch_replaces_columns_rows_context_and_column_state(
             "legs": copy.deepcopy(black_rows),
             "next_leg_sequence": 3,
         },
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
     )
 
     context_children, columns, rows, selected, draft, status, header, reset = outputs
@@ -3860,8 +3907,8 @@ def test_actual_model_switch_replaces_columns_rows_context_and_column_state(
         and item.id.get("type") in {"pricer-context-param", "pricer-context-date"}
     }
     assert context_ids == {"kirk"}
-    assert columns == pricer._leg_column_defs("kirk")
-    assert rows == [pricer.default_leg("kirk", 1)]
+    assert columns == pricer_grids._leg_column_defs("kirk")
+    assert rows == [default_leg("kirk", 1)]
     assert selected == []
     assert draft == {
         "schema_version": 1,
@@ -3901,12 +3948,12 @@ def test_switching_away_from_kirk_removes_two_asset_context_from_visible_state(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-option-type", "structure_id": "structure-1"},
     )
-    kirk_rows = [pricer.default_leg("kirk", 1)]
-    outputs = pricer.manage_structure_legs(
+    kirk_rows = [default_leg("kirk", 1)]
+    outputs = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -3926,7 +3973,7 @@ def test_switching_away_from_kirk_removes_two_asset_context_from_visible_state(
             "legs": kirk_rows,
             "next_leg_sequence": 2,
         },
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
         "TTF",
     )
 
@@ -3953,7 +4000,7 @@ def test_switching_away_from_kirk_removes_two_asset_context_from_visible_state(
 
 def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatch):
     state = model_instance_state("black76")
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-1",
             "label": "Structure 1",
@@ -3966,8 +4013,8 @@ def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatc
         root=panel,
     ).data == 9
 
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: None)
-    assert pricer.calculate_structure_instance_callback(
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: None)
+    assert pricer_calculation_callbacks.calculate_structure_instance_callback(
         0,
         9,
         state["asset"],
@@ -3985,11 +4032,11 @@ def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatc
     ) == (no_update,) * 4
 
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-calculate-all",
     )
-    assert pricer.calculate_structure_instance_callback(
+    assert pricer_calculation_callbacks.calculate_structure_instance_callback(
         0,
         8,
         state["asset"],
@@ -4007,7 +4054,7 @@ def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatc
     ) == (no_update,) * 4
 
     snapshot, status, grid_options, baseline = (
-        pricer.calculate_structure_instance_callback(
+        pricer_calculation_callbacks.calculate_structure_instance_callback(
             0,
             10,
             state["asset"],
@@ -4028,7 +4075,7 @@ def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatc
     assert status.className.endswith("success")
     assert grid_options["pinnedBottomRowData"]
     assert baseline == 10
-    assert pricer.calculate_structure_instance_callback(
+    assert pricer_calculation_callbacks.calculate_structure_instance_callback(
         0,
         10,
         state["asset"],
@@ -4049,12 +4096,12 @@ def test_calculate_all_baseline_blocks_stale_replay_and_consumes_once(monkeypatc
 def test_exchange_calculate_all_routes_only_to_exchange_structures(monkeypatch):
     state = model_instance_state("black76")
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-exchange-calculate-all",
     )
     snapshot, status, _grid_options, baseline = (
-        pricer.calculate_structure_instance_callback(
+        pricer_calculation_callbacks.calculate_structure_instance_callback(
             0,
             0,
             state["asset"],
@@ -4077,11 +4124,11 @@ def test_exchange_calculate_all_routes_only_to_exchange_structures(monkeypatch):
     assert baseline == 1
 
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: "pricer-calculate-all",
     )
-    assert pricer.calculate_structure_instance_callback(
+    assert pricer_calculation_callbacks.calculate_structure_instance_callback(
         0,
         1,
         state["asset"],
@@ -4101,7 +4148,7 @@ def test_exchange_calculate_all_routes_only_to_exchange_structures(monkeypatch):
 
 
 def test_exchange_mapping_id_restores_registry_identity_and_contract_size():
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "exchange-structure-9",
             "label": "E9",
@@ -4166,14 +4213,14 @@ def test_exchange_mapping_id_restores_registry_identity_and_contract_size():
 
 
 def test_delivery_strip_selector_enables_nbp_only_for_ice_ukf():
-    ukf_field = pricer._build_delivery_shape_field(
+    ukf_field = pricer_controls._build_delivery_shape_field(
         "black76",
         "exchange-ukf",
         "Q1",
         "NBP",
         "ICE-NBP-UKF",
     )
-    uko_field = pricer._build_delivery_shape_field(
+    uko_field = pricer_controls._build_delivery_shape_field(
         "black76",
         "exchange-uko",
         "Q1",
@@ -4187,7 +4234,7 @@ def test_delivery_strip_selector_enables_nbp_only_for_ice_ukf():
         component for component in walk(uko_field) if isinstance(component, dcc.Dropdown)
     )
     assert [option["value"] for option in ukf_dropdown.options] == list(
-        pricer.SUPPORTED_DELIVERY_SHAPES
+        SUPPORTED_DELIVERY_SHAPES
     )
     assert ukf_dropdown.value == "Q1"
     assert ukf_dropdown.disabled is False
@@ -4198,10 +4245,10 @@ def test_delivery_strip_selector_enables_nbp_only_for_ice_ukf():
         "Strips use governed monthly expiries and product-specific weights."
     )
 
-    legacy_ttf = pricer._build_delivery_shape_field(
+    legacy_ttf = pricer_controls._build_delivery_shape_field(
         "black76", "legacy-ttf", "Q1", "TTF"
     )
-    legacy_jkm = pricer._build_delivery_shape_field(
+    legacy_jkm = pricer_controls._build_delivery_shape_field(
         "asian76", "legacy-jkm", "Q1", "JKM"
     )
     assert legacy_ttf.title == (
@@ -4258,7 +4305,7 @@ def test_exchange_strip_presentation_does_not_change_legacy_result_labels():
         }
         return {
             "model": model,
-            "model_label": pricer.MODEL_LABELS[model],
+            "model_label": MODEL_LABELS[model],
             "calculation_date": "2026-08-28",
             "context": context,
             "legs": [
@@ -4279,9 +4326,9 @@ def test_exchange_strip_presentation_does_not_change_legacy_result_labels():
         product_code="UKF",
     )
 
-    legacy_ttf_grid = pricer._build_strip_component_grid(legacy_ttf)
-    legacy_jkm_grid = pricer._build_strip_component_grid(legacy_jkm)
-    exchange_nbp_grid = pricer._build_strip_component_grid(exchange_nbp)
+    legacy_ttf_grid = pricer_grids._build_strip_component_grid(legacy_ttf)
+    legacy_jkm_grid = pricer_grids._build_strip_component_grid(legacy_jkm)
+    exchange_nbp_grid = pricer_grids._build_strip_component_grid(exchange_nbp)
     legacy_ttf_headers = [
         column["headerName"] for column in legacy_ttf_grid.columnDefs
     ]
@@ -4313,33 +4360,15 @@ def test_exchange_strip_presentation_does_not_change_legacy_result_labels():
     )["tooltipField"] == "product_detail"
     assert exchange_nbp_grid.rowData[0]["product_code"] == "UKF"
 
-    def summary(snapshot_value):
-        return {
-            card.children[0].children: (
-                card.children[1].children,
-                card.children[2].children if card.children[2] else None,
-            )
-            for card in pricer._model_inputs_summary(snapshot_value)
-        }
-
-    legacy_ttf_summary = summary(legacy_ttf)
-    legacy_jkm_summary = summary(legacy_jkm)
-    exchange_nbp_summary = summary(exchange_nbp)
-    assert legacy_ttf_summary["Monthly components"][1] == "744 delivery hours"
-    assert "TFO expiry range" in legacy_ttf_summary
-    assert legacy_jkm_summary["Monthly components"][1] == "10,000 MMBtu"
-    assert "APO expiry range" in legacy_jkm_summary
-    assert exchange_nbp_summary["Monthly components"][1] == "31,000 therms"
-    assert "UKF expiry range" in exchange_nbp_summary
 
 
 def test_product_result_card_enrichment_requires_an_exchange_mapping():
     as_of = FrozenDate(2026, 7, 29)
-    context = pricer.default_context("asian76", as_of)
+    context = default_context("asian76", as_of)
     context.update(asset="JKM", forward=16.0, premium_convention="futures_style")
-    leg = pricer.default_leg("asian76", 1)
+    leg = default_leg("asian76", 1)
     leg.update(strike=16.0, quote_value=0.4)
-    snapshot = pricer.calculate_structure(
+    snapshot = calculate_structure(
         "asian76",
         context,
         {"structure_quantity": 1, "contract_multiplier": 10_000},
@@ -4347,7 +4376,7 @@ def test_product_result_card_enrichment_requires_an_exchange_mapping():
         as_of=as_of,
     )
 
-    meta = pricer.render_structure_results(snapshot)[0]
+    meta = pricer_calculation_callbacks.render_structure_results(snapshot)[0]
     product = next(
         card
         for card in meta
@@ -4358,7 +4387,7 @@ def test_product_result_card_enrichment_requires_an_exchange_mapping():
 
 
 def test_american_futures_is_not_exposed_in_the_otc_model_selector():
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {"structure_id": "otc-structure-1", "label": "O1", "template": None},
         workflow="otc",
     )
@@ -4373,20 +4402,20 @@ def test_american_futures_is_not_exposed_in_the_otc_model_selector():
 
 
 def test_hh_exchange_default_is_the_ready_cme_lne_mapping():
-    mapping = pricer.exchange_mapping_for_asset_model("HH", "black76")
+    mapping = exchange_mapping_for_asset_model("HH", "black76")
     assert mapping.mapping_id == "CME-HH-LNE"
     assert mapping.contract_size == 10_000.0
     assert mapping.premium_convention == "upfront"
-    assert pricer.exchange_mapping_pricing_supported("CME-HH-LNE")
-    assert pricer.exchange_mapping_pricing_supported("ICE-HH-CURRENT")
-    assert pricer.exchange_option_mapping("ICE-HH-CURRENT").mapping_id == (
+    assert exchange_mapping_pricing_supported("CME-HH-LNE")
+    assert exchange_mapping_pricing_supported("ICE-HH-CURRENT")
+    assert exchange_option_mapping("ICE-HH-CURRENT").mapping_id == (
         "ICE-HH-PHE"
     )
-    assert pricer.exchange_mapping_pricing_supported("CME-HH-ON")
+    assert exchange_mapping_pricing_supported("CME-HH-ON")
 
 
 def test_ice_brent_uses_the_governed_futures_style_black76_equivalent():
-    mapping = pricer.exchange_option_mapping("ICE-BRENT-B")
+    mapping = exchange_option_mapping("ICE-BRENT-B")
 
     assert mapping.asset == "Brent"
     assert mapping.model == "black76"
@@ -4394,11 +4423,11 @@ def test_ice_brent_uses_the_governed_futures_style_black76_equivalent():
     assert mapping.contract_size == 1_000.0
     assert mapping.implementation_status == "Ready"
     assert mapping.pricing_supported
-    assert pricer.exchange_mapping_for_asset_model("Brent", "black76") == mapping
+    assert exchange_mapping_for_asset_model("Brent", "black76") == mapping
 
 
 def test_cme_bzo_is_ready_with_the_futures_style_brent_proxy_workflow():
-    mapping = pricer.exchange_option_mapping("CME-BRENT-BZO")
+    mapping = exchange_option_mapping("CME-BRENT-BZO")
 
     assert mapping.asset == "Brent"
     assert mapping.model == "black76"
@@ -4408,24 +4437,24 @@ def test_cme_bzo_is_ready_with_the_futures_style_brent_proxy_workflow():
     assert mapping.pricing_supported
     assert mapping.max_surface_extension_days == 1
     assert (
-        pricer.exchange_option_mapping("CME-BRENT-BE").max_surface_extension_days
+        exchange_option_mapping("CME-BRENT-BE").max_surface_extension_days
         == 1
     )
 
 
 def test_exchange_registry_premium_and_size_override_asset_defaults(monkeypatch):
     monkeypatch.setattr(
-        pricer,
+        pricer_callback_context,
         "_get_pricer_triggered_id",
         lambda: {"type": "pricer-mapping-id"},
     )
-    assert pricer.select_asset_default_premium_convention(
+    assert pricer_input_callbacks.select_asset_default_premium_convention(
         "TTF",
         "black76",
         mapping_id="CME-TTF-TTO",
         workflow="exchange",
     ) == ["upfront"]
-    value, default_state = pricer.sync_exchange_contract_size(
+    value, default_state = pricer_input_callbacks.sync_exchange_contract_size(
         "HH",
         "black76",
         [],
@@ -4469,8 +4498,8 @@ def test_ready_exchange_mapping_initializes_premium_rate_size_and_governed_dates
     premium,
     expected_size,
 ):
-    mapping = pricer.exchange_option_mapping(mapping_id)
-    panel = pricer._build_structure_panel(
+    mapping = exchange_option_mapping(mapping_id)
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "exchange-structure-1",
             "label": "E1",
@@ -4509,7 +4538,7 @@ def test_ready_exchange_mapping_initializes_premium_rate_size_and_governed_dates
         and item.id.get("type") == "pricer-context-date"
         and item.id.get("model") == mapping.model
     }
-    expected_component = pricer.build_delivery_month_component(
+    expected_component = build_delivery_month_component(
         mapping.asset,
         mapping.model,
         delivery_month,
@@ -4545,7 +4574,7 @@ def test_workspace_and_direct_panel_migrate_the_retired_phe_mapping_id():
             "premium_convention": "upfront",
         },
     }
-    normalized = pricer._normalize_workspace(
+    normalized = pricer_state._normalize_workspace(
         {
             "schema_version": 7,
             "next_structure_sequence": 2,
@@ -4569,7 +4598,7 @@ def test_workspace_and_direct_panel_migrate_the_retired_phe_mapping_id():
         assert template["context"]["exchange_mapping_id"] == "ICE-HH-PHE"
         assert template["contract_multiplier"] == 2_500.0
 
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "exchange-structure-1",
             "label": "E1",
@@ -4587,18 +4616,18 @@ def test_workspace_and_direct_panel_migrate_the_retired_phe_mapping_id():
 
 
 def test_all_registry_mappings_are_ready_for_pricing():
-    options = pricer.exchange_mapping_options()
+    options = exchange_mapping_options()
 
     assert len(options) == 19
     assert all(
-        pricer.exchange_mapping_pricing_supported(option["value"])
+        exchange_mapping_pricing_supported(option["value"])
         for option in options
     )
 
 
 def test_corrupt_persisted_snapshot_is_pruned_and_panel_recovers(monkeypatch):
     state = model_instance_state("black76")
-    context = pricer._context_from_states(
+    context = pricer_state._context_from_states(
         state["model"],
         state["param_values"],
         state["param_ids"],
@@ -4615,14 +4644,14 @@ def test_corrupt_persisted_snapshot_is_pruned_and_panel_recovers(monkeypatch):
         "next_leg_sequence": 2,
     }
     corrupt_snapshot = {
-        "schema_version": pricer.SCHEMA_VERSION - 1,
+        "schema_version": SCHEMA_VERSION - 1,
         "model": "black76",
         "context": {},
         "legs": [],
         "totals": {},
     }
 
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-1",
             "label": "Structure 1",
@@ -4633,26 +4662,26 @@ def test_corrupt_persisted_snapshot_is_pruned_and_panel_recovers(monkeypatch):
 
     assert component_by_pattern("pricer-calculation-store", root=panel).data is None
     grid = component_by_pattern("pricer-legs-grid", root=panel)
-    assert grid.rowData == pricer._quote_ready_rows("black76", state["rows"])
+    assert grid.rowData == pricer_state._quote_ready_rows("black76", state["rows"])
     assert grid.dashGridOptions["context"]["pricingRows"] == {}
     assert grid.dashGridOptions["pinnedBottomRowData"] == []
     assert "outputs cleared" in component_by_pattern(
         "pricer-calculation-status",
         root=panel,
     ).children.children
-    assert pricer.persist_pricer_calculations(
-        pricer._default_workspace(),
+    assert pricer_workspace_callbacks.persist_pricer_calculations(
+        pricer_state._default_workspace(),
         [None],
-        [pricer._instance_id("pricer-calculation-store", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-store", "structure-1")],
         [""],
-        [pricer._instance_id("pricer-calculation-status", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-status", "structure-1")],
         {"structure-1": corrupt_snapshot},
     ) == {}
 
 
 def test_current_schema_snapshot_with_missing_nested_fields_is_rejected():
     corrupt_snapshot = {
-        "schema_version": pricer.SCHEMA_VERSION,
+        "schema_version": SCHEMA_VERSION,
         "model": "black76",
         "model_label": "Black-76",
         "calculation_date": "2026-07-29",
@@ -4663,18 +4692,18 @@ def test_current_schema_snapshot_with_missing_nested_fields_is_rejected():
         "greek_labels": {},
     }
 
-    assert pricer._is_valid_calculation_snapshot(corrupt_snapshot) is False
-    assert "stale" in pricer.render_structure_results(corrupt_snapshot)[1].children
+    assert pricer_state._is_valid_calculation_snapshot(corrupt_snapshot) is False
+    assert "stale" in pricer_calculation_callbacks.render_structure_results(corrupt_snapshot)[1].children
 
 
 def test_unchanged_selected_snapshot_routes_no_update(monkeypatch):
     snapshot, _status = calculate_instance(monkeypatch, "structure-1")
     equal_snapshot = copy.deepcopy(snapshot)
 
-    routed = pricer.route_selected_structure_calculation(
+    routed = pricer_workspace_callbacks.route_selected_structure_calculation(
         "structure-1",
         [equal_snapshot],
-        [pricer._instance_id("pricer-calculation-store", "structure-1")],
+        [pricer_state._instance_id("pricer-calculation-store", "structure-1")],
         current_routed_snapshot=snapshot,
     )
 
@@ -4686,13 +4715,13 @@ def test_invalid_persisted_rows_restore_valid_draft_and_bad_draft_types_are_prun
     monkeypatch,
 ):
     saved_rows = [
-        pricer.default_leg("black76", 1),
-        pricer.default_leg("black76", 2),
+        default_leg("black76", 1),
+        default_leg("black76", 2),
     ]
     saved_context = {"forward": 123.5}
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: None)
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: None)
 
-    outputs = pricer.manage_structure_legs(
+    outputs = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -4707,18 +4736,18 @@ def test_invalid_persisted_rows_restore_valid_draft_and_bad_draft_types_are_prun
             "legs": copy.deepcopy(saved_rows),
             "next_leg_sequence": 3,
         },
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
     )
 
-    assert outputs[2] == pricer._quote_ready_rows("black76", saved_rows)
+    assert outputs[2] == pricer_state._quote_ready_rows("black76", saved_rows)
     assert outputs[4]["context"] == saved_context
     assert len(outputs[4]["legs"]) == 2
     assert outputs[5] == "Invalid saved leg state was reset."
     assert outputs[7] is True
 
-    normalized = pricer._normalize_workspace(
+    normalized = pricer_state._normalize_workspace(
         {
-            "schema_version": pricer.PRICER_WORKSPACE_SCHEMA_VERSION,
+            "schema_version": pricer_constants.PRICER_WORKSPACE_SCHEMA_VERSION,
             "next_structure_sequence": 2,
             "structures": [
                 {
@@ -4747,9 +4776,9 @@ def test_legacy_settlement_workspace_migrates_to_asset_default_convention():
             "premium_convention": "product_default",
             "forward": 42.9,
         },
-        "legs": [pricer.default_leg("black76", 1)],
+        "legs": [default_leg("black76", 1)],
     }
-    normalized = pricer._normalize_workspace(
+    normalized = pricer_state._normalize_workspace(
         {
             "schema_version": 1,
             "next_structure_sequence": 2,
@@ -4764,7 +4793,7 @@ def test_legacy_settlement_workspace_migrates_to_asset_default_convention():
         }
     )
 
-    assert normalized["schema_version"] == pricer.PRICER_WORKSPACE_SCHEMA_VERSION
+    assert normalized["schema_version"] == pricer_constants.PRICER_WORKSPACE_SCHEMA_VERSION
     for template in (
         normalized["structures"][0]["template"],
         normalized["drafts"]["structure-1"],
@@ -4809,13 +4838,13 @@ def test_legacy_default_multiplier_migrates_to_exchange_contract_size(
         "valuation_date": "2026-07-29",
         "context": context,
         "legs": [
-            pricer.default_leg(
+            default_leg(
                 "asian76" if asset == "JKM" else "black76",
                 1,
             )
         ],
     }
-    normalized = pricer._normalize_workspace(
+    normalized = pricer_state._normalize_workspace(
         {
             "schema_version": 3,
             "next_structure_sequence": 2,
@@ -4844,7 +4873,7 @@ def test_legacy_hh_workspace_migrates_to_upfront():
         "model": "asian76",
         "context": {"premium_convention": "product_default"},
     }
-    migrated = pricer._migrate_template_premium_convention(copy.deepcopy(template))
+    migrated = pricer_state._migrate_template_premium_convention(copy.deepcopy(template))
     assert migrated["context"]["premium_convention"] == "upfront"
 
 
@@ -4858,7 +4887,7 @@ def test_futures_style_workspace_migration_zeroes_saved_rate():
         },
     }
 
-    migrated = pricer._migrate_template_premium_convention(copy.deepcopy(template))
+    migrated = pricer_state._migrate_template_premium_convention(copy.deepcopy(template))
 
     assert migrated["context"]["rate"] == 0.0
 
@@ -4877,7 +4906,7 @@ def test_legacy_kirk_draft_migrates_forwards_dates_and_only_defensible_asset_cod
         },
     }
 
-    migrated = pricer._migrate_template_premium_convention(
+    migrated = pricer_state._migrate_template_premium_convention(
         copy.deepcopy(template),
         migrate_legacy_contract_size=True,
     )
@@ -4896,7 +4925,7 @@ def test_legacy_kirk_draft_migrates_forwards_dates_and_only_defensible_asset_cod
 
 def test_current_kirk_workspace_does_not_infer_asset_1_from_hidden_legacy_asset():
     workspace = {
-        "schema_version": pricer.PRICER_WORKSPACE_SCHEMA_VERSION,
+        "schema_version": pricer_constants.PRICER_WORKSPACE_SCHEMA_VERSION,
         "next_structure_sequence": 2,
         "drafts": {},
         "structures": [
@@ -4915,7 +4944,7 @@ def test_current_kirk_workspace_does_not_infer_asset_1_from_hidden_legacy_asset(
         ],
     }
 
-    normalized = pricer._normalize_workspace(workspace)
+    normalized = pricer_state._normalize_workspace(workspace)
 
     context = normalized["structures"][0]["template"]["context"]
     assert "asset_1_code" not in context
@@ -4925,9 +4954,9 @@ def test_current_kirk_workspace_does_not_infer_asset_1_from_hidden_legacy_asset(
 def test_fully_corrupt_draft_recovers_one_default_leg_and_finite_sequence(
     monkeypatch,
 ):
-    monkeypatch.setattr(pricer, "_get_pricer_triggered_id", lambda: None)
+    monkeypatch.setattr(pricer_callback_context, "_get_pricer_triggered_id", lambda: None)
 
-    outputs = pricer.manage_structure_legs(
+    outputs = pricer_input_callbacks.manage_structure_legs(
         "black76",
         None,
         None,
@@ -4941,15 +4970,15 @@ def test_fully_corrupt_draft_recovers_one_default_leg_and_finite_sequence(
             "legs": "bad",
             "next_leg_sequence": float("inf"),
         },
-        pricer._instance_id("pricer-option-type", "structure-1"),
+        pricer_state._instance_id("pricer-option-type", "structure-1"),
     )
 
-    assert outputs[2] == [pricer.default_leg("black76", 1)]
+    assert outputs[2] == [default_leg("black76", 1)]
     assert outputs[4]["context"] is None
     assert outputs[4]["next_leg_sequence"] == 2
     assert outputs[5] == "Invalid saved leg state was reset."
 
-    panel = pricer._build_structure_panel(
+    panel = pricer_components._build_structure_panel(
         {
             "structure_id": "structure-1",
             "label": "Structure 1",
@@ -4965,207 +4994,13 @@ def test_fully_corrupt_draft_recovers_one_default_leg_and_finite_sequence(
 
 
 def test_leg_action_buttons_only_enable_for_valid_selected_rows():
-    one_row = [pricer.default_leg("black76", 1)]
-    two_rows = [*one_row, pricer.default_leg("black76", 2)]
+    one_row = [default_leg("black76", 1)]
+    two_rows = [*one_row, default_leg("black76", 2)]
 
-    assert pricer.toggle_leg_action_buttons([], one_row) == (True, True)
-    assert pricer.toggle_leg_action_buttons([one_row[0]], one_row) == (False, True)
-    assert pricer.toggle_leg_action_buttons([one_row[0]], two_rows) == (False, False)
-    assert pricer.toggle_leg_action_buttons([{"leg_id": "missing"}], two_rows) == (
+    assert pricer_input_callbacks.toggle_leg_action_buttons([], one_row) == (True, True)
+    assert pricer_input_callbacks.toggle_leg_action_buttons([one_row[0]], one_row) == (False, True)
+    assert pricer_input_callbacks.toggle_leg_action_buttons([one_row[0]], two_rows) == (False, False)
+    assert pricer_input_callbacks.toggle_leg_action_buttons([{"leg_id": "missing"}], two_rows) == (
         True,
         True,
     )
-
-
-def _surface_view_fixture():
-    return {
-        "schema_version": 1,
-        "context_key": "context-1",
-        "status": "ready",
-        "structure_ids": ["structure-1"],
-        "structure_labels": ["S1"],
-        "structure_label": "S1",
-        "asset": "JKM",
-        "model": "asian76",
-        "model_label": "Asian-76",
-        "delivery_label": "Apr-27",
-        "valuation_date": "2026-07-29",
-        "source_kind": "governed",
-        "source_label": "Governed calibrated publication",
-        "surface_cob": "2026-07-28",
-        "published_at": "2026-07-29T12:34:56+00:00",
-        "warnings": [
-            "Prior COB: using 2026-07-28 for valuation 2026-07-29."
-        ],
-        "curve_points": [
-            {
-                "delta": 0.10,
-                "call_delta": 0.90,
-                "strike": 14.0,
-                "input_volatility": 0.58,
-                "pricing_volatility": 0.58,
-            },
-            {
-                "delta": 0.50,
-                "call_delta": 0.50,
-                "strike": 17.0,
-                "input_volatility": 0.56,
-                "pricing_volatility": 0.56,
-            },
-            {
-                "delta": 0.90,
-                "call_delta": 0.10,
-                "strike": 20.0,
-                "input_volatility": 0.60,
-                "pricing_volatility": 0.60,
-            },
-        ],
-        "quote_points": [
-            {
-                "structure_id": "structure-1",
-                "structure_label": "S1",
-                "leg_id": "leg-1",
-                "leg_label": "Leg 1",
-                "short_label": "S1 L1",
-                "call_put": "C",
-                "strike": 17.0,
-                "quote_basis": "PREMIUM",
-                "quote_basis_label": "Premium-implied",
-                "contract_volatility": 0.5646,
-                "reference_volatility": 0.5607,
-                "pricing_volatility": 0.5607,
-                "difference_vol_points": 0.39,
-                "delta": 0.50,
-                "call_delta": 0.50,
-                "surface_cob": "2026-07-28",
-                "source": "Governed calibrated publication",
-            }
-        ],
-    }
-
-
-def test_surface_comparison_section_precedes_detailed_analysis_and_starts_empty():
-    h2_titles = [
-        item.children
-        for item in walk(pricer.layout)
-        if isinstance(item, html.H2)
-    ]
-    assert h2_titles.index("Contract vols vs volatility surface") < h2_titles.index(
-        "Detailed analysis"
-    )
-    grid = component_by_id("pricer-surface-comparison-grid")
-    assert "Calculate a structure" in grid.children.children
-    assert pricer.render_surface_comparison_cards(
-        pricer._default_workspace(),
-        {},
-    ).children.startswith("Calculate a structure")
-    assert (
-        pricer.render_surface_comparison_cards(
-            pricer._default_workspace(),
-            {},
-            pathname="/pricer",
-        )
-        is no_update
-    )
-
-
-def test_surface_comparison_figure_has_fixed_trader_delta_axis_and_raw_quote():
-    view = _surface_view_fixture()
-    figure = pricer._surface_comparison_figure(view)
-
-    assert figure.layout.xaxis.tickvals == (0.10, 0.25, 0.50, 0.75, 0.90)
-    assert figure.layout.xaxis.ticktext == ("10P", "25P", "ATM", "25C", "10C")
-    assert figure.layout.xaxis.range == (0.0, 1.0)
-    assert figure.layout.yaxis.title.text == "IV (%)"
-    assert [trace.name for trace in figure.data] == [
-        "Calibrated surface",
-        None,
-        "Contract vol",
-    ]
-    assert figure.data[-1].y[0] == pytest.approx(56.46)
-    assert figure.data[-1].x[0] == pytest.approx(0.50)
-    assert figure.data[-1].customdata[0][7] == "+0.39"
-    assert "+.2f" not in figure.data[-1].hovertemplate
-
-
-def test_surface_comparison_card_shows_source_minute_warning_and_quote_key():
-    card = pricer._surface_comparison_card(_surface_view_fixture())
-    text = " ".join(item for item in walk(card) if isinstance(item, str))
-
-    assert "S1 · JKM · Apr-27 · Asian-76" in text
-    assert "Governed calibrated publication" in text
-    assert "Published 2026-07-29 12:34 UTC" in text
-    assert "Prior COB" in text
-    assert "S1 L1 56.46% vs 56.07% (+0.39 vol pts)" in text
-    assert any(isinstance(item, dcc.Graph) for item in walk(card))
-
-
-def test_surface_comparison_callback_filters_removed_and_invalid_snapshots(
-    monkeypatch,
-):
-    snapshot_1, _ = calculate_instance(monkeypatch, "structure-1", forward=100)
-    snapshot_2, _ = calculate_instance(monkeypatch, "structure-2", forward=108)
-    workspace = pricer._reduce_workspace(pricer._default_workspace(), "add")
-
-    structures = pricer._calculated_surface_structures(
-        workspace,
-        {
-            "structure-1": snapshot_1,
-            "structure-2": snapshot_2,
-            "removed": snapshot_1,
-            "invalid": {"schema_version": -1},
-        },
-    )
-    assert [item["structure_id"] for item in structures] == [
-        "structure-1",
-        "structure-2",
-    ]
-
-    captured = {}
-
-    def build(items, *, force_refresh=False):
-        captured["items"] = items
-        captured["force_refresh"] = force_refresh
-        return [_surface_view_fixture()]
-
-    monkeypatch.setattr(pricer, "build_surface_comparison_views", build)
-    monkeypatch.setattr(
-        pricer,
-        "_get_pricer_triggered_id",
-        lambda: "refresh-options-data",
-    )
-    cards = pricer.render_surface_comparison_cards(
-        workspace,
-        {"structure-1": snapshot_1, "structure-2": snapshot_2},
-        1,
-    )
-
-    assert len(captured["items"]) == 2
-    assert captured["force_refresh"] is True
-    assert len(cards) == 1
-    assert "pricer-surface-card" in cards[0].className
-
-
-def test_surface_comparison_error_and_kirk_cards_are_isolated():
-    error = {
-        **_surface_view_fixture(),
-        "status": "error",
-        "message": "Exact contract surface unavailable.",
-    }
-    unsupported = {
-        **_surface_view_fixture(),
-        "status": "unsupported",
-        "message": "Kirk has two volatility inputs.",
-    }
-
-    error_card = pricer._surface_comparison_card(error)
-    kirk_card = pricer._surface_comparison_card(unsupported)
-
-    assert "Exact contract surface unavailable." in " ".join(
-        item for item in walk(error_card) if isinstance(item, str)
-    )
-    assert "Kirk has two volatility inputs." in " ".join(
-        item for item in walk(kirk_card) if isinstance(item, str)
-    )
-    assert "pricer-surface-card-error" in error_card.className
-    assert "pricer-surface-card-unsupported" in kirk_card.className

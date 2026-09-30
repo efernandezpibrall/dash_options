@@ -7,6 +7,8 @@ import pandas as pd
 import pytest
 from dash.exceptions import PreventUpdate
 
+from vol_calibration import calibration_inputs
+from vol_calibration import ttf_batch
 from vol_calibration.calibration_inputs import (
     UNDISCOUNTED_CALL_DELTA,
     calibration_eligibility_error,
@@ -184,7 +186,7 @@ def test_selected_calibration_accepts_sep_26_and_passes_delta_convention(monkeyp
         "ctx",
         SimpleNamespace(triggered_id="ttf-calibrate-all-btn"),
     )
-    monkeypatch.setattr(ttf, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
     monkeypatch.setattr(ttf, "create_comparison_plot", lambda *args, **kwargs: {})
 
     table_data = [
@@ -274,7 +276,7 @@ def test_manual_node_edit_refits_tail_before_updating_session_final(monkeypatch)
         calls.append((candidate_observations.copy(), initial_params, basis, selected_expiry))
         return fitted
 
-    monkeypatch.setattr(ttf, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(ttf_batch, "_run_ttf_candidate", fake_run)
     node_rows = [
         {
             "delta": float(row.delta),
@@ -315,7 +317,7 @@ def test_invalid_manual_node_edit_is_visibly_restored(monkeypatch):
     node_rows = ttf._ttf_node_editor_rows(observations, "Sep-26")
     node_rows[7]["final_iv_pct"] += 10.0
     monkeypatch.setattr(
-        ttf,
+        ttf_batch,
         "_run_ttf_candidate",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid hybrid")),
     )
@@ -345,7 +347,7 @@ def test_ttf_acceptance_uses_complete_gate_for_feasible_nonconverged_result():
         "validation": {"is_valid": True, "min_g": 0.0061},
     }
 
-    assert ttf._accepted_calibration_result(result) is True
+    assert ttf_batch._accepted_calibration_result(result) is True
 
 
 def _valid_extrapolated_observations(expiry="2029-04-01", dte=974.0):
@@ -568,7 +570,7 @@ def test_selected_apr_29_uses_editable_row_and_extrapolated_retry(monkeypatch):
         "ctx",
         SimpleNamespace(triggered_id="ttf-calibrate-all-btn"),
     )
-    monkeypatch.setattr(ttf, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
     monkeypatch.setattr(ttf, "create_comparison_plot", lambda *args, **kwargs: {})
 
     table_data = [_table_row("Apr-29", "extrapolated", 0.54)]
@@ -610,7 +612,7 @@ def test_copy_candidate_updates_extrapolated_final_in_session(monkeypatch):
         SimpleNamespace(triggered_id="ttf-copy-candidate-btn"),
     )
     monkeypatch.setattr(
-        ttf,
+        ttf_batch,
         "_evaluate_existing_hybrid",
         lambda *args, **kwargs: {
             "core_tv_rmse": 0.0,
@@ -824,7 +826,7 @@ def test_batch_chains_tail_retries_and_continues_after_failure(monkeypatch):
         SimpleNamespace(triggered_id="ttf-batch-confirm-btn"),
     )
     monkeypatch.setattr(ttf, "writes_enabled", lambda: False)
-    monkeypatch.setattr(ttf, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
 
     result = ttf.run_batch_calibration(
         1,
@@ -876,7 +878,7 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
 
     def fake_settlement(market, expiry):
         observed_calls["settlement_target"] = True
-        return ttf._select_ttf_expiry_inputs(market, expiry)
+        return calibration_inputs.select_hybrid_expiry_inputs(market, expiry)
 
     def fake_node_edits(observations, edits, expiry=None):
         observed_calls["node_store"] = edits
@@ -901,7 +903,7 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
         "ctx",
         SimpleNamespace(triggered_id="ttf-batch-confirm-btn"),
     )
-    monkeypatch.setattr(ttf, "_settlement_ttf_observations", fake_settlement)
+    monkeypatch.setattr(ttf_batch, "_settlement_ttf_observations", fake_settlement)
     monkeypatch.setattr(
         ttf,
         "_base_ttf_observations",
@@ -909,8 +911,8 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
             "batch calibration used the published intraday base"
         ),
     )
-    monkeypatch.setattr(ttf, "_apply_node_edits", fake_node_edits)
-    monkeypatch.setattr(ttf, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_batch, "_apply_node_edits", fake_node_edits)
+    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
 
     output = ttf.run_batch_calibration(
         1,
@@ -981,7 +983,7 @@ def test_batch_uses_ordered_prefitted_observed_results(monkeypatch):
         return results
 
     monkeypatch.setattr(ttf, "ctx", SimpleNamespace(triggered_id="ttf-batch-confirm-btn"))
-    monkeypatch.setattr(ttf, "prefit_observed_expiries", fake_prefit)
+    monkeypatch.setattr(ttf_batch, "prefit_observed_expiries", fake_prefit)
     seen = []
 
     def fake_run(_observations, initial, *, basis, selected_expiry):
@@ -997,9 +999,9 @@ def test_batch_uses_ordered_prefitted_observed_results(monkeypatch):
             "validation": {"is_valid": True, "min_g": 0.01},
         }
 
-    monkeypatch.setattr(ttf, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(ttf_batch, "_run_ttf_candidate", fake_run)
     monkeypatch.setattr(
-        ttf, "_evaluate_existing_hybrid",
+        ttf_batch, "_evaluate_existing_hybrid",
         lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
     )
 
@@ -1047,19 +1049,19 @@ def test_ttf_batch_resumes_verified_prefix_and_warm_start(monkeypatch):
             "validation": {"is_valid": True, "min_g": 0.01},
         }
 
-    monkeypatch.setattr(ttf, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(ttf_batch, "_run_ttf_candidate", fake_run)
     monkeypatch.setattr(
-        ttf, "_evaluate_existing_hybrid",
+        ttf_batch, "_evaluate_existing_hybrid",
         lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
     )
     saved = {}
-    full = ttf.calibrate_ttf_batch(
+    full = ttf_batch.calibrate_ttf_batch(
         market, [dict(row) for row in table],
         checkpoint_callback=lambda row: saved.update({row["expiry"]: row}),
     )
     assert full["fail_count"] == 0
     calls.clear()
-    resumed = ttf.calibrate_ttf_batch(
+    resumed = ttf_batch.calibrate_ttf_batch(
         market, [dict(row) for row in table],
         checkpoints={key: saved[key] for key in list(saved)[:2]},
     )
@@ -1069,7 +1071,7 @@ def test_ttf_batch_resumes_verified_prefix_and_warm_start(monkeypatch):
     changed = [dict(row) for row in table]
     changed[0]["vr"] += 0.01
     with pytest.raises(StaleCalibrationCheckpoint, match="2029-03-01"):
-        ttf.calibrate_ttf_batch(market, changed, checkpoints=saved)
+        ttf_batch.calibrate_ttf_batch(market, changed, checkpoints=saved)
 
 
 def test_hybrid_comparison_cannot_persist_even_when_writes_enabled(monkeypatch):

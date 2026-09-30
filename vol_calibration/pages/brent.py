@@ -32,10 +32,10 @@ from vol_calibration.data_cache import cached_workspace_callback
 from vol_calibration.components.batch_calibration_modal import (
     create_batch_calibration_confirm_modal,
     create_batch_calibration_progress_modal,
-    format_batch_result_row,
     create_batch_summary,
     create_batch_results_table,
 )
+from vol_calibration.batch_results import format_batch_result_row
 from vol_calibration.feature_flags import writes_enabled
 from vol_calibration.brent_intraday import (
     ADJUSTMENT_LABELS,
@@ -205,7 +205,7 @@ def load_data(trade_date, reload_clicks, inline_context=None):
         and inline_context.get('market_product') == 'BRENT'
         and inline_context.get('market_snapshot_id')
     ):
-        from pages.brent_vol_history import load_chain_snapshot, prepare_market_observations
+        from vol_trades_data import load_chain_snapshot, prepare_market_observations
 
         snapshot_id = str(inline_context['market_snapshot_id'])
         snapshot_kind = str(inline_context.get('market_snapshot_kind') or 'SETTLEMENT')

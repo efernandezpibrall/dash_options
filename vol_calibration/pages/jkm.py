@@ -3,6 +3,12 @@ JKM (Japan Korea Marker) commodity page.
 
 Asian LNG benchmark with call skew characteristic.
 """
+
+from vol_calibration.components.data_status import calibration_blocked_status
+
+from vol_calibration import ttf_publication as publication_data
+
+from vol_calibration import batch_results, calibration_inputs
 from datetime import date, timedelta
 import getpass
 import hashlib
@@ -17,10 +23,12 @@ from dash import html, dcc, callback, clientside_callback, Input, Output, State,
 from dash.exceptions import PreventUpdate
 from flask import has_request_context, request
 
+from vol_calibration import jkm_batch
+from vol_calibration.batch_results import parse_table_data
+
 from vol_calibration.components.parameter_table import (
     create_parameter_table,
     format_params_for_table,
-    parse_table_data,
 )
 from vol_calibration.components.smile_grid import create_smile_grid, create_smile_grid_figure
 from vol_calibration.components.comparison_modal import (
@@ -34,7 +42,6 @@ from vol_calibration.data_cache import cached_workspace_callback
 from vol_calibration.components.batch_calibration_modal import (
     create_batch_calibration_confirm_modal,
     create_batch_calibration_progress_modal,
-    format_batch_result_row,
     create_batch_summary,
     create_batch_results_table,
 )
@@ -43,18 +50,13 @@ from vol_calibration.calibration_inputs import (
     calibration_eligibility_error,
     calibration_readiness,
     expiry_month,
-    select_expiry_observations,
 )
 from vol_calibration.jkm_hybrid_surface import (
     JKM_HYBRID_METHOD,
     JKM_HYBRID_POLICY_VERSION,
-    evaluate_jkm_hybrid_candidate,
-    fit_jkm_hybrid_candidate,
     hybrid_iv,
     operational_surface_frame as jkm_hybrid_operational_surface_frame,
 )
-from vol_calibration.ttf_hybrid_surface import HybridFitNoCandidate
-from vol_calibration.observed_fit_pool import prefit_observed_expiries
 from vol_calibration.batch_job_runner import (
     background_jobs_enabled,
     build_payload as build_background_payload,
@@ -67,9 +69,6 @@ from vol_calibration.batch_job_runner import (
 from vol_calibration.jobs import JobStatus
 from vol_calibration.batch_checkpoints import (
     digest as checkpoint_digest,
-    expiry_input_fingerprint,
-    make_checkpoint,
-    verified_checkpoint,
 )
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.session_state import restore_product_table
@@ -94,9 +93,6 @@ from options.calibration_engine.io.storage import (
 
 COMMODITY = 'JKM'
 COMMODITY_LOWER = COMMODITY.lower()
-JKM_OBSERVED_STARTS = 3
-JKM_EXTRAPOLATED_STARTS = 3
-JKM_EXTRAPOLATED_RETRY_STARTS = 9
 JKM_BATCH_STATE_VERSION = 1
 JKM_NODE_REPRODUCTION_ATOL = 1e-10
 JKM_ADVANCED_PARAMS = [
@@ -104,150 +100,6 @@ JKM_ADVANCED_PARAMS = [
     'left_blend_width',
     'right_blend_width',
 ]
-
-
-def _select_jkm_expiry_inputs(market_data, expiry):
-    return select_expiry_observations(
-        market_data,
-        expiry,
-        include_extrapolated=True,
-    )
-
-
-def _calibration_basis(observations):
-    values = {
-        value
-        for value in observations.get('calibration_basis', pd.Series(dtype=str))
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        if value
-    }
-    if values not in ({'observed'}, {'extrapolated'}):
-        raise ValueError("JKM calibration inputs have an invalid basis.")
-    return next(iter(values))
-
-
-def _model_params(values):
-    return {
-        name: float(values[name])
-        for name in PARAM_COLUMNS
-        if name in values and pd.notna(values[name])
-    }
-
-
-def _candidate_params(result):
-    return {
-        **_model_params(result.get('params', {})),
-        'left_blend_width': float(result['left_blend_width']),
-        'right_blend_width': float(result['right_blend_width']),
-    }
-
-
-def _format_tv_rmse(value):
-    numeric = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
-    return f"{float(numeric):.6f}" if np.isfinite(numeric) else "Unavailable"
-
-
-def _evaluate_existing_hybrid(observations, values):
-    left_width = pd.to_numeric(
-        pd.Series([values.get('left_blend_width')]), errors='coerce'
-    ).iloc[0]
-    right_width = pd.to_numeric(
-        pd.Series([values.get('right_blend_width')]), errors='coerce'
-    ).iloc[0]
-    if not np.isfinite(left_width) or not np.isfinite(right_width):
-        raise ValueError("No accepted JKM PCHIP/Wing join is available for this row.")
-    return evaluate_jkm_hybrid_candidate(
-        observations,
-        _model_params(values),
-        left_blend_width=float(left_width),
-        right_blend_width=float(right_width),
-    )
-
-
-def _accepted_calibration_result(result):
-    if not isinstance(result, dict):
-        return False
-    params = result.get('params')
-    validation = result.get('validation')
-    rmse = pd.to_numeric(
-        pd.Series([result.get('tail_fit_tv_rmse')]), errors='coerce'
-    ).iloc[0]
-    if (
-        not isinstance(params, dict)
-        or not np.isfinite(rmse)
-        or not isinstance(validation, dict)
-        or not validation.get('is_valid', False)
-    ):
-        return False
-    try:
-        values = np.asarray([params[name] for name in PARAM_COLUMNS], dtype=float)
-    except (KeyError, TypeError, ValueError):
-        return False
-    return bool(np.all(np.isfinite(values)))
-
-
-def _run_jkm_candidate(observations, initial_params, *, basis):
-    if basis not in {'observed', 'extrapolated'}:
-        raise ValueError(f"Unsupported JKM calibration basis: {basis}.")
-    starts = (
-        JKM_OBSERVED_STARTS
-        if basis == 'observed'
-        else JKM_EXTRAPOLATED_STARTS
-    )
-    attempts = []
-    first_error = None
-    try:
-        attempts.append(
-            fit_jkm_hybrid_candidate(
-                observations,
-                _model_params(initial_params),
-                n_starts=starts,
-                seed=42,
-            )
-        )
-    except Exception as exc:
-        first_error = exc
-    if (
-        basis == 'extrapolated'
-        and not any(_accepted_calibration_result(item) for item in attempts)
-    ):
-        try:
-            resume = (
-                {
-                    'resume_start_count': starts,
-                    'resume_attempts': first_error.attempts,
-                }
-                if isinstance(first_error, HybridFitNoCandidate)
-                else {}
-            )
-            attempts.append(
-                fit_jkm_hybrid_candidate(
-                    observations,
-                    _model_params(initial_params),
-                    n_starts=JKM_EXTRAPOLATED_RETRY_STARTS,
-                    seed=42,
-                    **resume,
-                )
-            )
-        except Exception:
-            pass
-    accepted = [item for item in attempts if _accepted_calibration_result(item)]
-    if not accepted:
-        if first_error is not None:
-            raise first_error
-        raise ValueError("JKM calibration produced no butterfly-valid hybrid.")
-    return min(accepted, key=lambda item: float(item['tail_fit_tv_rmse']))
-
-
-def _calibration_blocked_status(message):
-    return dbc.Alert(
-        [html.Strong("Calibration blocked: "), str(message)],
-        color="danger",
-        className="mb-0 py-1 px-2",
-    )
 
 
 def get_default_date():
@@ -259,21 +111,6 @@ def get_default_date():
     return d
 
 
-def _published_expiry_result(publication_payload, observations):
-    target = pd.to_datetime(
-        observations['option_expiration_date'].iloc[0], errors='coerce'
-    )
-    if pd.isna(target):
-        return None
-    for item in (publication_payload or {}).get('expiry_results') or []:
-        item_expiry = pd.to_datetime(
-            item.get('option_expiration_date'), errors='coerce'
-        )
-        if not pd.isna(item_expiry) and item_expiry.date() == target.date():
-            return item
-    return None
-
-
 def _apply_published_parameters(table_rows, market_data, publication_payload):
     updated = [dict(row) for row in (table_rows or [])]
     rows_by_period = {
@@ -283,10 +120,10 @@ def _apply_published_parameters(table_rows, market_data, publication_payload):
     }
     for expiry in sorted(market_data['expiry'].dropna().unique()):
         try:
-            observations = _select_jkm_expiry_inputs(market_data, expiry)
+            observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
         except ValueError:
             continue
-        saved = _published_expiry_result(publication_payload, observations)
+        saved = publication_data.published_expiry_result(publication_payload, observations)
         target = rows_by_period.get(expiry_month(expiry))
         if not saved or target is None:
             continue
@@ -304,7 +141,7 @@ def _apply_published_parameters(table_rows, market_data, publication_payload):
             ).iloc[0]
             if np.isfinite(value):
                 target[name] = float(value)
-        target['rmse'] = _format_tv_rmse(target.get('core_tv_rmse', 0.0))
+        target['rmse'] = batch_results.format_tv_rmse(target.get('core_tv_rmse', 0.0))
         target['arb_status'] = (
             'Pass'
             if (saved.get('validation') or {}).get('is_valid', False)
@@ -315,29 +152,13 @@ def _apply_published_parameters(table_rows, market_data, publication_payload):
     return updated
 
 
-def _same_day_publication_id(publication_payload, trading_date):
-    publication_id = (publication_payload or {}).get('publication_id')
-    publication_date = pd.to_datetime(
-        (publication_payload or {}).get('publication_date'), errors='coerce'
-    )
-    selected = pd.to_datetime(trading_date, errors='coerce')
-    if (
-        publication_id
-        and not pd.isna(publication_date)
-        and not pd.isna(selected)
-        and publication_date.date() == selected.date()
-    ):
-        return str(publication_id)
-    return None
-
-
 def _published_surface_for_market(publication_payload):
     return hybrid_publication_frame(publication_payload)
 
 
 def _publication_candidate_for_expiry(market_data, table_row, expiry):
-    observations = _select_jkm_expiry_inputs(market_data, expiry)
-    result = _evaluate_existing_hybrid(observations, table_row)
+    observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+    result = jkm_batch._evaluate_existing_hybrid(observations, table_row)
     reproduced_ivs = hybrid_iv(
         result['core'].strike_nodes,
         result['core'],
@@ -357,7 +178,7 @@ def _publication_candidate_for_expiry(market_data, table_row, expiry):
         )
     surface = jkm_hybrid_operational_surface_frame(
         observations,
-        _model_params(table_row),
+        batch_results.model_params(table_row),
         left_blend_width=float(result['left_blend_width']),
         right_blend_width=float(result['right_blend_width']),
         n_points=401,
@@ -372,7 +193,7 @@ def _publication_candidate_for_expiry(market_data, table_row, expiry):
             observations['option_expiration_date'].iloc[0]
         ).date().isoformat(),
         'parameters': {
-            **_model_params(table_row),
+            **batch_results.model_params(table_row),
             'left_blend_width': float(result['left_blend_width']),
             'right_blend_width': float(result['right_blend_width']),
         },
@@ -388,226 +209,6 @@ def _publication_candidate_for_expiry(market_data, table_row, expiry):
         'unweighted_rmse': float(result['tail_fit_tv_rmse']),
         'max_error': None,
         'optimizer_success': True,
-    }
-
-
-def _update_hybrid_row(row, result, basis):
-    for name, value in _candidate_params(result).items():
-        row[name] = float(value)
-    row['core_tv_rmse'] = float(result['core_tv_rmse'])
-    row['tail_fit_tv_rmse'] = float(result['tail_fit_tv_rmse'])
-    row['iv_rmse'] = float(result['iv_rmse'])
-    row['rmse'] = _format_tv_rmse(result['core_tv_rmse'])
-    row['arb_status'] = 'Pass'
-    row['calibration_basis'] = basis.title()
-    row['calibration_method'] = JKM_HYBRID_METHOD
-    row['calibration_policy_version'] = JKM_HYBRID_POLICY_VERSION
-
-
-def _fit_jkm_observed_task(task):
-    key, observations, initial_params = task
-    try:
-        return key, (True, _run_jkm_candidate(
-            observations, initial_params, basis='observed'
-        ))
-    except Exception as exc:
-        return key, (False, str(exc))
-
-
-def calibrate_jkm_batch(
-    market_data, table_data, *, skip_good=False, checkpoints=None,
-    checkpoint_callback=None, cancellation_check=None,
-):
-    """Chronologically calibrate all observed and governed extrapolated smiles."""
-    params_df = parse_table_data(table_data)
-    updated = [dict(row) for row in table_data]
-    row_by_period = {}
-    for index, row in enumerate(table_data):
-        try:
-            row_by_period[expiry_month(row.get('expiry'))] = index
-        except ValueError:
-            continue
-
-    expiries = sorted(market_data['expiry'].dropna().unique())
-    checkpoints = checkpoints or {}
-    observed_tasks = []
-    if not skip_good and len(expiries) >= 8:
-        for expiry in expiries:
-            if pd.Timestamp(expiry).strftime('%Y-%m-%d') in checkpoints:
-                continue
-            try:
-                row_index = row_by_period[expiry_month(expiry)]
-                observations = _select_jkm_expiry_inputs(market_data, expiry)
-                if (
-                    _calibration_basis(observations) == 'observed'
-                    and not calibration_eligibility_error(observations)
-                ):
-                    initial = _model_params(params_df.iloc[row_index].to_dict())
-                    observed_tasks.append(
-                        (pd.Timestamp(expiry).isoformat(), observations, initial)
-                    )
-            except (KeyError, IndexError, ValueError, TypeError):
-                # The chronological loop reports the original per-expiry error.
-                continue
-    prefitted = prefit_observed_expiries(
-        observed_tasks,
-        _fit_jkm_observed_task,
-        environment_variable='JKM_OBSERVED_FIT_WORKERS',
-    )
-
-    results = []
-    success_count = 0
-    skip_count = 0
-    fail_count = 0
-    last_successful_params = None
-    for expiry in expiries:
-        expiry_str = pd.Timestamp(expiry).strftime('%Y-%m-%d')
-        row_index = row_by_period.get(expiry_month(expiry))
-        if cancellation_check is not None:
-            cancellation_check()
-        input_fingerprint = expiry_input_fingerprint(
-            market_data, expiry,
-            table_data[row_index] if row_index is not None else None,
-            policy=JKM_HYBRID_POLICY_VERSION,
-            skip_good=skip_good,
-        )
-        dependency_fingerprint = checkpoint_digest(last_successful_params)
-        if expiry_str in checkpoints:
-            saved = verified_checkpoint(
-                checkpoints[expiry_str],
-                expiry=expiry_str,
-                input_fingerprint=input_fingerprint,
-                dependency_fingerprint=dependency_fingerprint,
-            )
-            updated[row_index] = dict(saved['updated_row'])
-            last_successful_params = dict(saved['warm_start_after'])
-            results.append(dict(saved['result_row']))
-            if saved['result_row']['status'] == 'Skipped':
-                skip_count += 1
-            else:
-                success_count += 1
-            continue
-        basis = None
-        old_rmse = None
-        result_count_before = len(results)
-        try:
-            if row_index is None or row_index >= len(params_df):
-                raise ValueError("No editable parameter row exists for this expiry.")
-            observations = _select_jkm_expiry_inputs(market_data, expiry)
-            basis = _calibration_basis(observations)
-            eligibility_error = calibration_eligibility_error(observations)
-            if eligibility_error:
-                raise ValueError(eligibility_error)
-            current_values = params_df.iloc[row_index].to_dict()
-            current_params = _model_params(current_values)
-            try:
-                current_result = _evaluate_existing_hybrid(
-                    observations,
-                    current_values,
-                )
-                old_rmse = float(current_result['core_tv_rmse'])
-            except Exception:
-                current_result = None
-
-            if (
-                basis == 'observed'
-                and skip_good
-                and current_result is not None
-                and current_result['validation']['is_valid']
-            ):
-                _update_hybrid_row(updated[row_index], current_result, basis)
-                last_successful_params = _model_params(current_result['params'])
-                results.append(
-                    format_batch_result_row(
-                        expiry_str,
-                        'Skipped',
-                        old_rmse,
-                        old_rmse,
-                        basis=basis,
-                    )
-                )
-                skip_count += 1
-                continue
-
-            initial_params = (
-                current_params if basis == 'observed' else last_successful_params
-            )
-            if initial_params is None:
-                raise ValueError(
-                    "No successful observed JKM calibration is available to seed "
-                    "the extrapolated tail."
-                )
-            prefitted_result = (
-                prefitted.get(pd.Timestamp(expiry).isoformat())
-                if basis == 'observed' else None
-            )
-            if prefitted_result is None:
-                candidate = _run_jkm_candidate(
-                    observations, initial_params, basis=basis,
-                )
-            else:
-                succeeded, payload = prefitted_result
-                if not succeeded:
-                    raise ValueError(payload)
-                candidate = payload
-            _update_hybrid_row(updated[row_index], candidate, basis)
-            last_successful_params = _model_params(candidate['params'])
-            results.append(
-                {
-                    **format_batch_result_row(
-                        expiry_str,
-                        'Success',
-                        old_rmse,
-                        float(candidate['core_tv_rmse']),
-                        basis=basis,
-                    ),
-                    'old_rmse': _format_tv_rmse(old_rmse),
-                    'new_rmse': _format_tv_rmse(candidate['core_tv_rmse']),
-                    'improvement': '-',
-                    'core_tv_rmse': _format_tv_rmse(candidate['core_tv_rmse']),
-                    'tail_fit_tv_rmse': _format_tv_rmse(
-                        candidate['tail_fit_tv_rmse']
-                    ),
-                    'iv_rmse': f"{float(candidate['iv_rmse']) * 100:.2f}%",
-                    'blend_width': f"{float(candidate['left_blend_width']):.2f}",
-                    'min_g': f"{float(candidate['validation']['min_g']):.6f}",
-                    'method': JKM_HYBRID_METHOD,
-                }
-            )
-            success_count += 1
-        except Exception as exc:
-            if basis is None and row_index is not None:
-                basis = str(
-                    table_data[row_index].get('calibration_basis', '')
-                ).strip().lower() or None
-            failed = format_batch_result_row(
-                expiry_str,
-                'Failed',
-                old_rmse,
-                None,
-                basis=basis,
-            )
-            failed['error'] = str(exc)
-            results.append(failed)
-            fail_count += 1
-        finally:
-            if checkpoint_callback is not None and len(results) > result_count_before:
-                checkpoint_callback(make_checkpoint(
-                    expiry=expiry_str,
-                    result_row=results[-1],
-                    updated_row=(
-                        updated[row_index] if row_index is not None else None
-                    ),
-                    warm_start_after=last_successful_params,
-                    input_fingerprint=input_fingerprint,
-                    dependency_fingerprint=dependency_fingerprint,
-                ))
-    return {
-        'results': results,
-        'table_data': updated,
-        'success_count': success_count,
-        'skip_count': skip_count,
-        'fail_count': fail_count,
     }
 
 
@@ -940,8 +541,8 @@ def load_data(trade_date, reload_clicks):
     loaded_from_db = False
     for expiry in sorted(market_data['expiry'].unique()):
         try:
-            exp_data = _select_jkm_expiry_inputs(market_data, expiry)
-            basis = _calibration_basis(exp_data)
+            exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+            basis = jkm_batch._calibration_basis(exp_data)
         except Exception:
             exp_data = pd.DataFrame()
             basis = ''
@@ -1215,28 +816,28 @@ def handle_calibration(
             raise PreventUpdate
         expiry = params_df.iloc[row_idx]['expiry']
         try:
-            observations = _select_jkm_expiry_inputs(market_data, expiry)
-            basis = _calibration_basis(observations)
+            observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+            basis = jkm_batch._calibration_basis(observations)
             error = calibration_eligibility_error(observations)
             if error:
                 raise ValueError(error)
             forward = float(observations['forward'].iloc[0])
             current_values = params_df.iloc[row_idx].to_dict()
-            current_params = _model_params(current_values)
-            candidate = _run_jkm_candidate(
+            current_params = batch_results.model_params(current_values)
+            candidate = jkm_batch._run_jkm_candidate(
                 observations,
                 current_params,
                 basis=basis,
             )
-            candidate_params = _candidate_params(candidate)
+            candidate_params = batch_results.candidate_params(candidate)
         except Exception as exc:
             return (
                 False, None, "", "", [], empty_fig, "", "", "",
-                _calibration_blocked_status(str(exc)), no_update,
+                calibration_blocked_status(str(exc)), no_update,
             )
 
         try:
-            current_result = _evaluate_existing_hybrid(
+            current_result = jkm_batch._evaluate_existing_hybrid(
                 observations,
                 current_values,
             )
@@ -1308,9 +909,9 @@ def handle_calibration(
             f"${forward:.2f}/MMBtu",
             comparison_table,
             fig,
-            _format_tv_rmse(current_rmse),
-            _format_tv_rmse(candidate['core_tv_rmse']),
-            _format_tv_rmse(current_rmse),
+            batch_results.format_tv_rmse(current_rmse),
+            batch_results.format_tv_rmse(candidate['core_tv_rmse']),
+            batch_results.format_tv_rmse(current_rmse),
             no_update,
             no_update,
         )
@@ -1331,13 +932,13 @@ def handle_calibration(
         final_params = extract_final_params(comparison_table_data)
 
     try:
-        observations = _select_jkm_expiry_inputs(market_data, expiry)
-        final_result = _evaluate_existing_hybrid(observations, final_params)
+        observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+        final_result = jkm_batch._evaluate_existing_hybrid(observations, final_params)
     except Exception as exc:
         return (
             True, comparison_store, f"Expiry: {expiry}", f"${forward:.2f}/MMBtu",
             comparison_table_data, empty_fig, "", "", "",
-            _calibration_blocked_status(str(exc)), no_update,
+            calibration_blocked_status(str(exc)), no_update,
         )
 
     comparison_data = dict(comparison_store)
@@ -1359,7 +960,7 @@ def handle_calibration(
     )
     if target_row is None:
         raise PreventUpdate
-    _update_hybrid_row(
+    jkm_batch._update_hybrid_row(
         target_row,
         final_result,
         str(comparison_store.get('calibration_basis')).strip().lower(),
@@ -1391,9 +992,9 @@ def handle_calibration(
         f"${forward:.2f}/MMBtu" if keep_open else "",
         comparison_table if keep_open else [],
         fig if keep_open else empty_fig,
-        _format_tv_rmse(comparison_store.get('current_rmse')) if keep_open else "",
-        _format_tv_rmse(comparison_store.get('candidate_rmse')) if keep_open else "",
-        _format_tv_rmse(final_result['core_tv_rmse']) if keep_open else "",
+        batch_results.format_tv_rmse(comparison_store.get('current_rmse')) if keep_open else "",
+        batch_results.format_tv_rmse(comparison_store.get('candidate_rmse')) if keep_open else "",
+        batch_results.format_tv_rmse(final_result['core_tv_rmse']) if keep_open else "",
         no_update,
         updated_table,
     )
@@ -1429,9 +1030,9 @@ def render_hybrid_comparison_metrics(comparison_data):
         return f"{float(value) * 100:.2f}%" if np.isfinite(value) else "Unavailable"
 
     return (
-        _format_tv_rmse(data.get('current_tail_fit_tv_rmse')),
-        _format_tv_rmse(data.get('candidate_tail_fit_tv_rmse')),
-        _format_tv_rmse(data.get('final_tail_fit_tv_rmse')),
+        batch_results.format_tv_rmse(data.get('current_tail_fit_tv_rmse')),
+        batch_results.format_tv_rmse(data.get('candidate_tail_fit_tv_rmse')),
+        batch_results.format_tv_rmse(data.get('final_tail_fit_tv_rmse')),
         iv_value('current_iv_rmse'),
         iv_value('candidate_iv_rmse'),
         iv_value('final_iv_rmse'),
@@ -1648,7 +1249,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
             )
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    outcome = calibrate_jkm_batch(
+    outcome = jkm_batch.calibrate_jkm_batch(
         market_data,
         table_data,
         skip_good=skip_good,

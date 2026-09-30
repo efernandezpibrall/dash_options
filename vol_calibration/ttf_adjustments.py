@@ -148,18 +148,45 @@ def apply_ttf_smile_adjustments(
 
         lower = max(-1.5, -float(np.min(base_iv[bump > 0])) + 1e-6)
         upper = 1.5
-        lower_value = objective(lower)
-        upper_value = objective(upper)
-        if lower_value == 0:
-            amplitude = lower
-        elif upper_value == 0:
-            amplitude = upper
-        elif lower_value * upper_value > 0:
-            raise ValueError(
-                "The selected trade cannot be matched with a bounded local smile move."
-            )
-        else:
-            amplitude = float(brentq(objective, lower, upper, xtol=1e-12, rtol=1e-12))
+        base_value = objective(0.0)
+        amplitude = 0.0
+        if base_value != 0:
+            # Extreme local bumps can invalidate fixed call-price anchors even
+            # when a small move reaches the target. Search from the valid base
+            # toward the target, refining any invalid trial boundary rather
+            # than requiring both original extreme endpoints to be valid.
+            direction = 1.0 if base_value < 0 else -1.0
+            limit = upper if direction > 0 else lower
+            previous = 0.0
+            previous_value = base_value
+            invalid_boundary = None
+            probe = direction * min(abs(limit), max(0.005, abs(base_value)))
+            bracket = None
+            for _ in range(64):
+                try:
+                    probe_value = objective(probe)
+                except ValueError:
+                    invalid_boundary = probe
+                else:
+                    if previous_value * probe_value <= 0:
+                        bracket = sorted((previous, probe))
+                        break
+                    previous, previous_value = probe, probe_value
+                    if probe == limit:
+                        break
+                if invalid_boundary is not None:
+                    probe = (previous + invalid_boundary) / 2.0
+                    if abs(probe - previous) < 1e-12:
+                        break
+                else:
+                    probe = direction * min(abs(limit), abs(probe) * 2.0)
+            if bracket is None:
+                raise ValueError(
+                    "The selected trade cannot be matched with a bounded local smile move."
+                )
+            amplitude = float(brentq(
+                objective, *bracket, xtol=1e-12, rtol=1e-12,
+            ))
         adjusted["iv"] = base_iv + amplitude * bump
         matched_iv = _core_iv_at_strike(adjusted, float(strike))
         trade_diagnostics = {

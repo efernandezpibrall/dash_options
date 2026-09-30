@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import text
 
 from options.brent_single_surface import (
     BRENT_SINGLE_SURFACE_POLICY_VERSION,
@@ -17,6 +16,7 @@ from options.brent_single_surface import (
 )
 from options.build_brent_vol_surface import horizon_from_as_of
 from vol_calibration.ttf_publication import ttf_surface_fingerprint
+from vol_trades_data import read_brent_snapshot, read_preceding_brent_settlement
 
 
 @dataclass(frozen=True)
@@ -30,66 +30,6 @@ class BrentCandidate:
     settlement_cob: date
 
 
-def active_brent_publication(engine, trading_date) -> dict[str, Any]:
-    """Read only the active exact-COB revision identity, without its dense grid."""
-    with engine.connect() as connection:
-        row = connection.execute(
-            text("""
-                SELECT publication_id, cob_date AS publication_date, published_at
-                FROM at_lng.vol_surface_publications
-                WHERE commodity = 'BRENT' AND status = 'published' AND is_active
-                  AND cob_date = :cob_date
-                ORDER BY published_at DESC, created_at DESC
-                LIMIT 1
-            """),
-            {"cob_date": pd.Timestamp(trading_date).date()},
-        ).mappings().one_or_none()
-    if row is None:
-        return {"publication_id": None, "publication_date": None, "published_at": None}
-    return {
-        "publication_id": str(row["publication_id"]),
-        "publication_date": pd.Timestamp(row["publication_date"]).date().isoformat(),
-        "published_at": pd.Timestamp(row["published_at"]).isoformat(),
-    }
-
-
-def _snapshot(engine, snapshot_id: str, kind: str) -> dict[str, Any]:
-    with engine.connect() as connection:
-        row = connection.execute(
-            text("""
-                SELECT snapshot_id, business_date, observed_at, input_fingerprint
-                FROM at_lng.vol_market_snapshots
-                WHERE snapshot_id = CAST(:snapshot_id AS uuid)
-                  AND commodity = 'BRENT' AND status = 'complete'
-                  AND COALESCE(metadata ->> 'snapshot_kind', 'SETTLEMENT') = :kind
-            """),
-            {"snapshot_id": snapshot_id, "kind": kind},
-        ).mappings().one_or_none()
-    if row is None:
-        raise ValueError(f"Pinned Brent {kind.lower()} snapshot is unavailable.")
-    return dict(row)
-
-
-def _preceding_settlement(engine, trading_date: date, as_of) -> dict[str, Any]:
-    with engine.connect() as connection:
-        row = connection.execute(
-            text("""
-                SELECT snapshot_id, business_date, observed_at, input_fingerprint
-                FROM at_lng.vol_market_snapshots
-                WHERE commodity = 'BRENT' AND status = 'complete'
-                  AND COALESCE(metadata ->> 'snapshot_kind', 'SETTLEMENT') = 'SETTLEMENT'
-                  AND business_date <= :trading_date AND observed_at <= :as_of
-                ORDER BY business_date DESC, observed_at DESC, created_at DESC,
-                         snapshot_id DESC
-                LIMIT 1
-            """),
-            {"trading_date": trading_date, "as_of": as_of},
-        ).mappings().one_or_none()
-    if row is None:
-        raise ValueError("No point-in-time Brent settlement precedes this intraday snapshot.")
-    return dict(row)
-
-
 def build_brent_candidate(engine, context: dict[str, Any]) -> BrentCandidate:
     """Recompute only from immutable database snapshots, never browser quote data."""
     if context.get("market_product") != "BRENT":
@@ -99,14 +39,14 @@ def build_brent_candidate(engine, context: dict[str, Any]) -> BrentCandidate:
     kind = str(context["market_snapshot_kind"]).upper()
     if kind not in {"SETTLEMENT", "INTRADAY"}:
         raise ValueError("Select a Brent settlement or intraday snapshot.")
-    selected = _snapshot(engine, selected_id, kind)
+    selected = read_brent_snapshot(engine, selected_id, kind)
     if pd.Timestamp(selected["business_date"]).date() != trading_date:
         raise ValueError("The selected Brent snapshot no longer matches the market date.")
     selected_as_of = pd.Timestamp(selected["observed_at"], tz="UTC") if pd.Timestamp(selected["observed_at"]).tzinfo is None else pd.Timestamp(selected["observed_at"]).tz_convert("UTC")
     if selected_as_of != pd.Timestamp(context["market_as_of"]).tz_convert("UTC"):
         raise ValueError("The selected Brent snapshot no longer matches the market as-of.")
 
-    anchor = selected if kind == "SETTLEMENT" else _preceding_settlement(
+    anchor = selected if kind == "SETTLEMENT" else read_preceding_brent_settlement(
         engine, trading_date, selected_as_of.to_pydatetime()
     )
     settlement_cob = pd.Timestamp(anchor["business_date"]).date()
@@ -120,7 +60,7 @@ def build_brent_candidate(engine, context: dict[str, Any]) -> BrentCandidate:
     intraday_diagnostics: dict[str, Any] = {}
     intraday_contract_dates: list[str] = []
     if kind == "INTRADAY":
-        from pages.brent_vol_history import load_chain_snapshot
+        from vol_trades_data import load_chain_snapshot
 
         model = model.roll_to(trading_date)
         chain = load_chain_snapshot(

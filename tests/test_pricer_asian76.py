@@ -1,10 +1,11 @@
 from dash import no_update
 
-from pages import pricer
 
+
+from pricer_workspace import input_callbacks as pricer_input_callbacks
 
 def test_asian_date_sync_enforces_ordering_bounds():
-    corrected = pricer.sync_asian76_dates(
+    corrected = pricer_input_callbacks.sync_asian76_dates(
         '2026-10-19',
         '2026-09-01',
         '2026-09-15',
@@ -27,7 +28,7 @@ def test_asian_date_sync_enforces_ordering_bounds():
         False,
     )
 
-    valid = pricer.sync_asian76_dates(
+    valid = pricer_input_callbacks.sync_asian76_dates(
         '2026-10-19',
         '2027-01-17',
         '2027-04-17',

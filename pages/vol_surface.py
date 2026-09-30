@@ -1,120 +1,21 @@
 """Volatility surface dashboard page."""
-import hashlib
 import io
-import json
-import threading
 
 from dash import html, dcc, callback, Output, Input, State
-import dash
 import dash_ag_grid as dag
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import pandas as pd
-from sqlalchemy import text
 
 from dataframe_utils import concat_dataframes
-from db_fallback import DB_SCHEMA, read_trino_query, safe_exception_message
-from runtime_config import get_database_engine
-from snapshot_cache import (
-    SnapshotReferenceError,
-    latest_snapshot,
-    publish_snapshot,
-    resolve_snapshot,
-    snapshot_lock,
-)
+from db_fallback import safe_exception_message
+from snapshot_cache import SnapshotReferenceError
+import surface_data
 
 
-_DATA_CACHE_LOCK = threading.Lock()
-
-
-UNIFIED_ATM_COLUMNS = ['cob_date', 'code', 'contract_date', 'year', 'month', 'method', 'volatility']
-SURFACE_COLUMNS = [
-    'cob_date',
-    'code',
-    'contract_date',
-    'option_expiration_date',
-    'delta',
-    'delta_abs',
-    'put_call',
-    'volatility',
-    'delta_bucket',
-    'delta_sort_key',
-    'delta_pct',
-]
-SURFACE_SOURCE_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF', 'NBP'}
 VOL_TRADES_PRODUCTS = {'BRENT', 'HH', 'JKM', 'TTF'}
-SURFACE_PRODUCT_DISPLAY_MAP = {'BRENT': 'Brent'}
-ICE_SUMMER_MONTHS = {4, 5, 6, 7, 8, 9}
-SURFACE_EXPIRY_MONTH = 'month'
-SURFACE_EXPIRY_QUARTER = 'quarter'
-SURFACE_EXPIRY_SEASON = 'season'
-SURFACE_EXPIRY_TYPES = {
-    SURFACE_EXPIRY_MONTH,
-    SURFACE_EXPIRY_QUARTER,
-    SURFACE_EXPIRY_SEASON,
-}
-SURFACE_SOURCE_COLUMNS = [
-    'cob_date',
-    'product',
-    'maturity_date',
-    'option_expiration_date',
-    'put_call',
-    'delta',
-    'value',
-]
-SURFACE_SOURCE_SELECT = ', '.join(SURFACE_SOURCE_COLUMNS)
 
-SURFACE_POSTGRES_SOURCE_LABEL = f'{DB_SCHEMA}.implied_volatility_surface_from_prices'
-SURFACE_SOURCE_LABEL = 'raw.icap.implied_volatility_surface_from_prices'
-SURFACE_TRINO_SOURCES = [
-    ('raw.icap.implied_volatility_surface_from_prices', 'implied_volatility_surface_from_prices'),
-    ('raw.icap.implied_volatility_surface', 'implied_volatility_surface'),
-]
-SURFACE_POSTGRES_SOURCES = [
-    (
-        SURFACE_POSTGRES_SOURCE_LABEL,
-        f'select {SURFACE_SOURCE_SELECT} from {SURFACE_POSTGRES_SOURCE_LABEL}',
-    ),
-]
-TTF_COMPARISON_TABLE = (
-    f'{DB_SCHEMA}.option_volatility_surface_comparison_current'
-)
-VALUATION_CURRENT_TABLE = f'{DB_SCHEMA}.trades_options_valuation_current'
-
-
-def _empty_unified_atm_df():
-    return pd.DataFrame(columns=UNIFIED_ATM_COLUMNS)
-
-
-def _empty_surface_df():
-    return pd.DataFrame(columns=SURFACE_COLUMNS)
-
-
-def _source_status_template(source_name):
-    return {
-        'source': source_name,
-        'error': None,
-        'rows': 0,
-        'latest_cob_date': None,
-        'fallback_used': False,
-    }
-
-
-atm_dataset = _empty_unified_atm_df()
-surface_dataset = _empty_surface_df()
-_SURFACE_SNAPSHOT_CACHE = {}
-_SURFACE_PIVOT_CACHE = {}
-_SURFACE_SNAPSHOT_GENERATION = 0
-_SURFACE_SNAPSHOT_CACHE_ATTR = '_surface_snapshot_cache_key'
-VOL_SURFACE_SNAPSHOT_NAMESPACE = 'vol-surface-v1'
-_ACTIVE_SURFACE_SNAPSHOT_ID = None
-DATA_CACHE_STATE = {
-    'initialized': False,
-    'last_refresh_token': None,
-    'atm': _source_status_template(SURFACE_SOURCE_LABEL),
-    'surface': _source_status_template(SURFACE_SOURCE_LABEL),
-}
 
 VOL_CHART_FONT = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
 VOL_CHART_GRID = 'rgba(148, 163, 184, 0.18)'
@@ -237,106 +138,13 @@ def _format_vol_mode(value):
     return mode_labels.get(value, str(value).replace('_', ' ').title() if value else None)
 
 
-def _surface_quarter_key(value):
-    timestamp = pd.to_datetime(value, errors='coerce')
-    if pd.isna(timestamp):
-        return None
-    return f'{timestamp.year}-Q{timestamp.quarter}'
-
-
-def _surface_season_key(value):
-    timestamp = pd.to_datetime(value, errors='coerce')
-    if pd.isna(timestamp):
-        return None
-    if timestamp.month in ICE_SUMMER_MONTHS:
-        return f'{timestamp.year}-Summer'
-    winter_year = timestamp.year if timestamp.month >= 10 else timestamp.year - 1
-    return f'{winter_year}-Winter'
-
-
-def _surface_expiry_value(expiry_type, key):
-    if expiry_type not in SURFACE_EXPIRY_TYPES or key is None:
-        return None
-    if expiry_type == SURFACE_EXPIRY_MONTH:
-        timestamp = pd.to_datetime(key, errors='coerce')
-        if pd.isna(timestamp):
-            return None
-        key = timestamp.strftime('%Y-%m-%d')
-    return f'{expiry_type}:{key}'
-
-
-def _parse_surface_expiry_selection(value):
-    if value is None or value == '':
-        return None, None
-
-    text_value = str(value)
-    if ':' in text_value:
-        expiry_type, key = text_value.split(':', 1)
-        if expiry_type in SURFACE_EXPIRY_TYPES:
-            if expiry_type == SURFACE_EXPIRY_MONTH:
-                timestamp = pd.to_datetime(key, errors='coerce')
-                if pd.isna(timestamp):
-                    return None, None
-                return expiry_type, timestamp.strftime('%Y-%m-%d')
-            return expiry_type, key
-
-    timestamp = pd.to_datetime(text_value, errors='coerce')
-    if pd.isna(timestamp):
-        return None, None
-    return SURFACE_EXPIRY_MONTH, timestamp.strftime('%Y-%m-%d')
-
-
-def _normalize_surface_expiry_selection(value):
-    expiry_type, key = _parse_surface_expiry_selection(value)
-    return _surface_expiry_value(expiry_type, key)
-
-
 def _format_surface_expiry_selection_label(value):
-    expiry_type, key = _parse_surface_expiry_selection(value)
-    if expiry_type == SURFACE_EXPIRY_MONTH:
+    expiry_type, key = surface_data._parse_surface_expiry_selection(value)
+    if expiry_type == surface_data.SURFACE_EXPIRY_MONTH:
         return pd.to_datetime(key).strftime("%b'%y")
-    if expiry_type in {SURFACE_EXPIRY_QUARTER, SURFACE_EXPIRY_SEASON}:
+    if expiry_type in {surface_data.SURFACE_EXPIRY_QUARTER, surface_data.SURFACE_EXPIRY_SEASON}:
         return _format_vol_period_header(key)
     return None
-
-
-def _filter_surface_by_expiry_selection(surface_df, selected_expiry):
-    if surface_df.empty:
-        return surface_df.copy()
-
-    expiry_type, key = _parse_surface_expiry_selection(selected_expiry)
-    if expiry_type is None:
-        return surface_df.iloc[0:0].copy()
-
-    contract_dates = pd.to_datetime(surface_df['contract_date'], errors='coerce')
-    if expiry_type == SURFACE_EXPIRY_MONTH:
-        selected_date = pd.to_datetime(key).normalize()
-        mask = contract_dates.dt.normalize().eq(selected_date)
-    elif expiry_type == SURFACE_EXPIRY_QUARTER:
-        key_parts = str(key).split('-Q', 1)
-        if len(key_parts) != 2 or not all(value.isdigit() for value in key_parts):
-            return surface_df.iloc[0:0].copy()
-        year, quarter = map(int, key_parts)
-        mask = contract_dates.dt.year.eq(year) & contract_dates.dt.quarter.eq(
-            quarter
-        )
-    else:
-        key_parts = str(key).rsplit('-', 1)
-        if len(key_parts) != 2 or not key_parts[0].isdigit():
-            return surface_df.iloc[0:0].copy()
-        season_year, season = int(key_parts[0]), key_parts[1]
-        months = contract_dates.dt.month
-        if season == 'Summer':
-            mask = contract_dates.dt.year.eq(season_year) & months.isin(ICE_SUMMER_MONTHS)
-        elif season == 'Winter':
-            mask = (
-                (contract_dates.dt.year.eq(season_year) & months.ge(10))
-                | (contract_dates.dt.year.eq(season_year + 1) & months.le(3))
-            )
-        else:
-            return surface_df.iloc[0:0].copy()
-
-    return surface_df.loc[mask].copy()
 
 
 def _build_surface_expiry_options(surface_df):
@@ -355,29 +163,29 @@ def _build_surface_expiry_options(surface_df):
     month_options = [
         {
             'label': expiry.strftime("%b'%y"),
-            'value': _surface_expiry_value(SURFACE_EXPIRY_MONTH, expiry),
+            'value': surface_data._surface_expiry_value(surface_data.SURFACE_EXPIRY_MONTH, expiry),
         }
         for expiry in expiries
     ]
 
-    quarter_keys = {_surface_quarter_key(expiry) for expiry in expiries}
+    quarter_keys = {surface_data._surface_quarter_key(expiry) for expiry in expiries}
     quarter_keys.discard(None)
-    quarter_keys = _sort_grouped_period_columns(quarter_keys, 'quarterly')
+    quarter_keys = surface_data._sort_grouped_period_columns(quarter_keys, 'quarterly')
     quarter_options = [
         {
             'label': _format_vol_period_header(key),
-            'value': _surface_expiry_value(SURFACE_EXPIRY_QUARTER, key),
+            'value': surface_data._surface_expiry_value(surface_data.SURFACE_EXPIRY_QUARTER, key),
         }
         for key in quarter_keys
     ]
 
-    season_keys = {_surface_season_key(expiry) for expiry in expiries}
+    season_keys = {surface_data._surface_season_key(expiry) for expiry in expiries}
     season_keys.discard(None)
-    season_keys = _sort_grouped_period_columns(season_keys, 'season')
+    season_keys = surface_data._sort_grouped_period_columns(season_keys, 'season')
     season_options = [
         {
             'label': _format_vol_period_header(key),
-            'value': _surface_expiry_value(SURFACE_EXPIRY_SEASON, key),
+            'value': surface_data._surface_expiry_value(surface_data.SURFACE_EXPIRY_SEASON, key),
         }
         for key in season_keys
     ]
@@ -422,555 +230,15 @@ def _build_vol_chart_card(graph, title, className=None):
     )
 
 
-def _select_existing_column(df, candidates):
-    for column in candidates:
-        if column in df.columns:
-            return column
-    return None
-
-
-def load_surface_atm_data(surface_df=None):
-    surface_df = load_surface_data()[0] if surface_df is None else surface_df.copy()
-    if surface_df.empty:
-        return _empty_unified_atm_df()
-
-    surface_df = surface_df.copy()
-    surface_df['delta_distance'] = (surface_df['delta_abs'] - 0.5).abs()
-    surface_df = surface_df.sort_values(['code', 'cob_date', 'contract_date', 'delta_distance', 'delta_sort_key'])
-    surface_df = surface_df.drop_duplicates(['code', 'cob_date', 'contract_date'], keep='first')
-    surface_df['year'] = surface_df['contract_date'].dt.year
-    surface_df['month'] = surface_df['contract_date'].dt.month
-    surface_df['method'] = 'implied_volatility_surface_atm'
-
-    return surface_df[UNIFIED_ATM_COLUMNS]
-
-
-def _normalize_surface_data(surface_df):
-    if surface_df.empty:
-        return _empty_surface_df()
-
-    surface_df = surface_df.copy()
-
-    product_col = _select_existing_column(surface_df, ['product', 'commodity', 'code'])
-    contract_col = _select_existing_column(surface_df, ['maturity_date', 'expiry', 'contract_date'])
-    option_expiration_col = _select_existing_column(surface_df, ['option_expiration_date', 'expiration_date'])
-    vol_col = _select_existing_column(surface_df, ['value', 'implied_vol', 'volatility', 'iv'])
-    delta_col = _select_existing_column(surface_df, ['delta'])
-    put_call_col = _select_existing_column(surface_df, ['put_call', 'option_type', 'option_side'])
-
-    required_columns = [product_col, contract_col, vol_col, delta_col]
-    if any(column is None for column in required_columns) or 'cob_date' not in surface_df.columns:
-        return _empty_surface_df()
-
-    rename_map = {
-        product_col: 'code',
-        contract_col: 'contract_date',
-        vol_col: 'volatility',
-        delta_col: 'delta',
-    }
-    if put_call_col is not None:
-        rename_map[put_call_col] = 'put_call'
-    if option_expiration_col is not None:
-        rename_map[option_expiration_col] = 'option_expiration_date'
-
-    surface_df = surface_df.rename(columns=rename_map)
-    surface_df['code'] = surface_df['code'].astype(str).str.strip().str.upper()
-    surface_df = surface_df[surface_df['code'].isin(SURFACE_SOURCE_PRODUCTS)]
-    if surface_df.empty:
-        return _empty_surface_df()
-    surface_df['code'] = surface_df['code'].replace(SURFACE_PRODUCT_DISPLAY_MAP)
-
-    surface_df['cob_date'] = pd.to_datetime(surface_df['cob_date'], errors='coerce')
-    surface_df['contract_date'] = pd.to_datetime(surface_df['contract_date'], errors='coerce')
-    if 'option_expiration_date' in surface_df.columns:
-        surface_df['option_expiration_date'] = pd.to_datetime(surface_df['option_expiration_date'], errors='coerce')
-    else:
-        surface_df['option_expiration_date'] = pd.NaT
-    surface_df['volatility'] = pd.to_numeric(surface_df['volatility'], errors='coerce')
-    surface_df['delta'] = pd.to_numeric(surface_df['delta'], errors='coerce')
-
-    if 'put_call' not in surface_df.columns:
-        surface_df['put_call'] = None
-
-    normalized_side = surface_df['put_call'].astype('string').str.strip().str.lower()
-    normalized_side = normalized_side.map(
-        {'p': 'put', 'put': 'put', 'c': 'call', 'call': 'call'}
-    )
-    surface_df['put_call'] = normalized_side.astype(object).where(
-        normalized_side.notna(), None
-    )
-    surface_df['delta_abs'] = surface_df['delta'].abs()
-    surface_df.loc[surface_df['delta_abs'] > 1, 'delta_abs'] = surface_df.loc[surface_df['delta_abs'] > 1, 'delta_abs'] / 100.0
-
-    has_signed_delta_convention = surface_df['delta'].lt(0).any()
-    if has_signed_delta_convention:
-        signed_put_mask = surface_df['put_call'].isna() & (surface_df['delta'] < 0)
-        signed_call_mask = surface_df['put_call'].isna() & (surface_df['delta'] > 0)
-        surface_df.loc[signed_put_mask, 'put_call'] = 'put'
-        surface_df.loc[signed_call_mask, 'put_call'] = 'call'
-
-    if not surface_df['volatility'].dropna().empty and surface_df['volatility'].max() > 5:
-        surface_df['volatility'] = surface_df['volatility'] / 100.0
-
-    surface_df = surface_df.dropna(subset=['cob_date', 'contract_date', 'volatility', 'delta_abs'])
-    if surface_df.empty:
-        return _empty_surface_df()
-
-    delta_pct = (surface_df['delta_abs'] * 100).round()
-    delta_label = delta_pct.astype('Int64').astype('string')
-    is_atm = surface_df['delta_abs'].sub(0.5).abs().lt(1e-8)
-    is_put = surface_df['put_call'].eq('put')
-    is_call = surface_df['put_call'].eq('call')
-    delta_bucket = (delta_label + 'D').mask(is_put, delta_label + 'P')
-    delta_bucket = delta_bucket.mask(is_call, delta_label + 'C').mask(is_atm, 'ATM')
-    surface_df['delta_bucket'] = delta_bucket.astype(object).where(delta_bucket.notna(), None)
-    surface_df['delta_sort_key'] = delta_pct.mask(is_call, 100.0 - delta_pct).mask(is_atm, 50.0)
-    surface_df['delta_pct'] = surface_df['delta_abs'] * 100.0
-    surface_df = surface_df.dropna(subset=['delta_bucket', 'delta_sort_key'])
-    surface_df = surface_df.sort_values(['code', 'cob_date', 'contract_date', 'delta_sort_key']).reset_index(drop=True)
-
-    return surface_df[SURFACE_COLUMNS]
-
-
-def load_surface_data():
-    load_errors = []
-
-    for source_index, (source_label, table_name) in enumerate(
-        SURFACE_TRINO_SOURCES
-    ):
-        try:
-            surface_df = read_trino_query(
-                f'select {SURFACE_SOURCE_SELECT} from {table_name}',
-                catalog='raw',
-                schema='icap',
-            )
-            normalized_surface = _normalize_surface_data(surface_df)
-            if normalized_surface.empty:
-                load_errors.append(f'{source_label}: no usable rows')
-                continue
-            return normalized_surface, {
-                'source': source_label,
-                'error': None,
-                'fallback_used': source_index > 0,
-            }
-        except Exception as exc:
-            load_errors.append(f'{source_label}: {safe_exception_message(exc)}')
-
-    for source_label, surface_query in SURFACE_POSTGRES_SOURCES:
-        try:
-            surface_df = pd.read_sql(sql=surface_query, con=get_database_engine())
-            normalized_surface = _normalize_surface_data(surface_df)
-            if normalized_surface.empty:
-                load_errors.append(f'{source_label}: no usable rows')
-                continue
-            return normalized_surface, {
-                'source': source_label,
-                'error': None,
-                'fallback_used': True,
-            }
-        except Exception as exc:
-            load_errors.append(f'{source_label}: {safe_exception_message(exc)}')
-
-    attempted_sources = ', '.join(
-        [source for source, _ in SURFACE_TRINO_SOURCES] +
-        [source for source, _ in SURFACE_POSTGRES_SOURCES]
-    )
-    return _empty_surface_df(), {
-        'source': attempted_sources,
-        'error': f'Surface load failed from all sources: {" | ".join(load_errors)}',
-        'fallback_used': False,
-    }
-
-
-def _build_source_status(df, source_name, error_message=None, fallback_used=False):
-    latest_cob_date = None
-    if not df.empty and 'cob_date' in df.columns:
-        cob_dates = pd.to_datetime(df['cob_date'], errors='coerce').dropna()
-        if not cob_dates.empty:
-            latest_cob_date = cob_dates.max()
-
-    return {
-        'source': source_name,
-        'error': error_message,
-        'rows': int(len(df)),
-        'latest_cob_date': latest_cob_date,
-        'fallback_used': fallback_used,
-    }
-
-
-def _surface_source_revision(surface_df, source_meta):
-    if surface_df.empty:
-        frame_digest = 'empty'
-        latest_cob = None
-    else:
-        frame_digest = hashlib.sha256(
-            pd.util.hash_pandas_object(surface_df, index=True).values.tobytes()
-        ).hexdigest()
-        latest_cob = pd.to_datetime(
-            surface_df['cob_date'], errors='coerce'
-        ).max()
-    revision = {
-        'schema_version': 1,
-        'source': source_meta.get('source'),
-        'latest_cob': str(latest_cob),
-        'rows': int(len(surface_df)),
-        'frame_sha256': frame_digest,
-    }
-    encoded = json.dumps(revision, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
-
-
-def _build_surface_snapshot_payload(refresh_token=None):
-    loaded_surface_df = _empty_surface_df()
-    atm_error = None
-    surface_meta = _source_status_template(SURFACE_SOURCE_LABEL)
-    try:
-        loaded_surface_df, surface_loader_meta = load_surface_data()
-        surface_meta.update(surface_loader_meta)
-    except Exception as exc:
-        surface_meta.update({
-            'source': SURFACE_SOURCE_LABEL,
-            'error': safe_exception_message(exc),
-            'fallback_used': False,
-        })
-
-    try:
-        loaded_atm_df = load_surface_atm_data(loaded_surface_df)
-    except Exception as exc:
-        atm_error = f'surface-derived ATM build failed: {safe_exception_message(exc)}'
-        loaded_atm_df = _empty_unified_atm_df()
-
-    state = {
-        'initialized': True,
-        'last_refresh_token': refresh_token,
-        'atm': _build_source_status(
-            loaded_atm_df,
-            surface_meta['source'],
-            atm_error,
-            fallback_used=surface_meta.get('fallback_used', False),
-        ),
-        'surface': _build_source_status(
-            loaded_surface_df,
-            surface_meta['source'],
-            surface_meta['error'],
-            fallback_used=surface_meta.get('fallback_used', False),
-        ),
-    }
-    payload = {
-        'atm_dataset': loaded_atm_df,
-        'surface_dataset': loaded_surface_df,
-        'data_cache_state': state,
-    }
-    return payload, _surface_source_revision(loaded_surface_df, surface_meta)
-
-
-def _activate_surface_snapshot(reference):
-    global atm_dataset, surface_dataset, DATA_CACHE_STATE
-    global _SURFACE_SNAPSHOT_GENERATION, _ACTIVE_SURFACE_SNAPSHOT_ID
-
-    snapshot_id = reference.get('snapshot_id') if isinstance(reference, dict) else None
-    if (
-        snapshot_id
-        and snapshot_id == _ACTIVE_SURFACE_SNAPSHOT_ID
-        and DATA_CACHE_STATE['initialized']
-    ):
-        return reference
-
-    payload = resolve_snapshot(
-        reference,
-        expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE,
-    )
-    loaded_atm = payload.get('atm_dataset')
-    loaded_surface = payload.get('surface_dataset')
-    loaded_state = payload.get('data_cache_state')
-    if not isinstance(loaded_atm, pd.DataFrame) or not isinstance(loaded_surface, pd.DataFrame):
-        raise SnapshotReferenceError('Volatility snapshot payload is invalid')
-    if not isinstance(loaded_state, dict):
-        raise SnapshotReferenceError('Volatility snapshot status is invalid')
-
-    with _DATA_CACHE_LOCK:
-        atm_dataset = loaded_atm
-        surface_dataset = loaded_surface
-        DATA_CACHE_STATE = loaded_state
-        _SURFACE_SNAPSHOT_CACHE.clear()
-        _SURFACE_PIVOT_CACHE.clear()
-        _SURFACE_SNAPSHOT_GENERATION += 1
-        _ACTIVE_SURFACE_SNAPSHOT_ID = snapshot_id
-    return reference
-
-
-def prepare_vol_surface_snapshot(*, force=False, refresh_token=None):
-    """Resolve or publish the immutable page dataset used by every renderer."""
-    if not force:
-        reference = latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
-        if reference:
-            try:
-                return _activate_surface_snapshot(reference)
-            except SnapshotReferenceError:
-                pass
-
-    with snapshot_lock('build-vol-surface-v1', expire=300):
-        if not force:
-            reference = latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
-            if reference:
-                try:
-                    return _activate_surface_snapshot(reference)
-                except SnapshotReferenceError:
-                    pass
-
-        payload, source_revision = _build_surface_snapshot_payload(refresh_token)
-        state = payload['data_cache_state']
-        reference = publish_snapshot(
-            VOL_SURFACE_SNAPSHOT_NAMESPACE,
-            source_revision,
-            payload,
-            metadata={
-                'source': state['surface']['source'],
-                'rows': state['surface']['rows'],
-                'latest_cob_date': state['surface']['latest_cob_date'],
-                'fallback_used': state['surface']['fallback_used'],
-                'error': state['surface']['error'],
-            },
-            group='vol-surface',
-            force=force,
-        )
-        return _activate_surface_snapshot(reference)
-
-
-def _refresh_cached_data(refresh_token=None, force=False):
-    if isinstance(refresh_token, dict):
-        return _activate_surface_snapshot(refresh_token)
-    if force:
-        return prepare_vol_surface_snapshot(
-            force=True,
-            refresh_token=refresh_token,
-        )
-    if DATA_CACHE_STATE['initialized']:
-        return latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
-    return prepare_vol_surface_snapshot(force=False, refresh_token=refresh_token)
-
-
-def _ensure_cached_data(snapshot_reference=None):
-    return _refresh_cached_data(refresh_token=snapshot_reference, force=False)
-
-
-def _get_all_available_dates():
-    date_series = []
-    if not atm_dataset.empty and 'cob_date' in atm_dataset.columns:
-        date_series.append(pd.to_datetime(atm_dataset['cob_date'], errors='coerce'))
-    if not surface_dataset.empty and 'cob_date' in surface_dataset.columns:
-        date_series.append(pd.to_datetime(surface_dataset['cob_date'], errors='coerce'))
-
-    if not date_series:
-        return []
-
-    all_dates = concat_dataframes(date_series, ignore_index=True).dropna().drop_duplicates()
-    return sorted(all_dates.tolist())
-
-
-def _get_supported_surface_products(selected_products, selected_date=None):
-    if not selected_products:
-        return []
-
-    available_products = set(surface_dataset['code'].unique()) if not surface_dataset.empty else set()
-    supported_products = [product for product in selected_products if product in available_products]
-
-    if selected_date is None or surface_dataset.empty:
-        return supported_products
-
-    selected_date = pd.to_datetime(selected_date).normalize()
-    current_products = set(
-        surface_dataset.loc[
-            surface_dataset['cob_date'].dt.normalize() == selected_date,
-            'code',
-        ].dropna().unique()
-    )
-    current_supported = [product for product in supported_products if product in current_products]
-    other_supported = [product for product in supported_products if product not in current_products]
-    return current_supported + other_supported
-
-
-def _get_surface_snapshot(code, cob_date):
-    if surface_dataset.empty or code is None or cob_date is None:
-        return _empty_surface_df()
-
-    cob_date = pd.to_datetime(cob_date)
-    cache_key = (_SURFACE_SNAPSHOT_GENERATION, str(code), cob_date.normalize().strftime('%Y-%m-%d'))
-    if cache_key in _SURFACE_SNAPSHOT_CACHE:
-        snapshot = _SURFACE_SNAPSHOT_CACHE[cache_key].copy()
-        snapshot.attrs[_SURFACE_SNAPSHOT_CACHE_ATTR] = cache_key
-        return snapshot
-
-    surface_df = surface_dataset
-
-    snapshot = surface_df[
-        (surface_df['code'] == code) &
-        (surface_df['cob_date'].dt.normalize() == cob_date.normalize())
-    ].copy()
-
-    snapshot = snapshot.sort_values(['contract_date', 'delta_sort_key'])
-    _SURFACE_SNAPSHOT_CACHE[cache_key] = snapshot
-    snapshot = snapshot.copy()
-    snapshot.attrs[_SURFACE_SNAPSHOT_CACHE_ATTR] = cache_key
-    return snapshot
-
-
-def get_operational_surface_snapshot(product, requested_cob, refresh=False):
-    """Return the governed surface for an exact COB or its nearest prior COB.
-
-    The returned rows use the same normalized schema and source order as the
-    ``/vol_surface`` page.  Resolution is product-scoped and can only move
-    backwards in time.
-    """
-    requested_timestamp = pd.to_datetime(requested_cob, errors='coerce')
-    normalized_product = str(product or '').strip().upper()
-    display_product = SURFACE_PRODUCT_DISPLAY_MAP.get(
-        normalized_product,
-        normalized_product,
-    )
-
-    result = {
-        'data': _empty_surface_df(),
-        'product': display_product,
-        'requested_cob': requested_timestamp.normalize()
-        if not pd.isna(requested_timestamp)
-        else None,
-        'actual_cob': None,
-        'date_fallback_used': False,
-        'source': DATA_CACHE_STATE['surface']['source'],
-        'source_fallback_used': bool(
-            DATA_CACHE_STATE['surface'].get('fallback_used', False)
-        ),
-        'error': None,
-    }
-
-    if normalized_product not in SURFACE_SOURCE_PRODUCTS:
-        result['error'] = f'Unsupported operational surface product: {product}'
-        return result
-    if pd.isna(requested_timestamp):
-        result['error'] = f'Invalid requested COB: {requested_cob}'
-        return result
-
-    if refresh:
-        _refresh_cached_data(force=True)
-    else:
-        _ensure_cached_data()
-
-    surface_status = DATA_CACHE_STATE['surface']
-    result['source'] = surface_status['source']
-    result['source_fallback_used'] = bool(
-        surface_status.get('fallback_used', False)
-    )
-
-    if surface_dataset.empty:
-        result['error'] = (
-            surface_status.get('error')
-            or f'No operational surface data is available for {display_product}'
-        )
-        return result
-
-    requested_timestamp = requested_timestamp.normalize()
-    product_rows = surface_dataset.loc[
-        surface_dataset['code'] == display_product
-    ]
-    eligible_dates = (
-        pd.to_datetime(product_rows['cob_date'], errors='coerce')
-        .dt.normalize()
-        .loc[lambda values: values <= requested_timestamp]
-        .dropna()
-    )
-    if eligible_dates.empty:
-        result['error'] = (
-            f'No operational surface COB exists on or before '
-            f'{requested_timestamp:%Y-%m-%d} for {display_product}'
-        )
-        return result
-
-    actual_cob = eligible_dates.max()
-    snapshot = _get_surface_snapshot(display_product, actual_cob)
-    if snapshot.empty:
-        result['error'] = (
-            f'Operational surface resolution returned no rows for '
-            f'{display_product} on {actual_cob:%Y-%m-%d}'
-        )
-        return result
-
-    result['data'] = snapshot
-    result['actual_cob'] = actual_cob
-    result['date_fallback_used'] = actual_cob < requested_timestamp
-    return result
-
-
-def _get_surface_delta_order(surface_df):
-    if surface_df.empty:
-        return pd.DataFrame(columns=['delta_bucket', 'delta_sort_key'])
-
-    return (
-        surface_df[['delta_bucket', 'delta_sort_key']]
-        .drop_duplicates()
-        .sort_values(['delta_sort_key', 'delta_bucket'])
-    )
-
-
-def _build_surface_pivot(surface_df):
-    if surface_df.empty:
-        return pd.DataFrame(), []
-
-    snapshot_cache_key = surface_df.attrs.get(_SURFACE_SNAPSHOT_CACHE_ATTR)
-    pivot_cache_key = None
-    if snapshot_cache_key is not None:
-        pivot_cache_key = (snapshot_cache_key, len(surface_df))
-        cached_pivot = _SURFACE_PIVOT_CACHE.get(pivot_cache_key)
-        if cached_pivot is not None:
-            pivot, delta_columns = cached_pivot
-            return pivot.copy(), list(delta_columns)
-
-    delta_order = _get_surface_delta_order(surface_df)
-    delta_columns = delta_order['delta_bucket'].tolist()
-
-    pivot = surface_df.pivot_table(
-        values='volatility',
-        index='contract_date',
-        columns='delta_bucket',
-        aggfunc='first'
-    )
-    pivot = pivot.reindex(columns=delta_columns).sort_index()
-
-    if pivot_cache_key is not None:
-        _SURFACE_PIVOT_CACHE[pivot_cache_key] = (pivot.copy(), tuple(delta_columns))
-
-    return pivot, delta_columns
-
-
 def _get_delta_bucket_options(surface_df):
     if surface_df.empty:
         return []
 
-    delta_order = _get_surface_delta_order(surface_df)
+    delta_order = surface_data._get_surface_delta_order(surface_df)
     return [
         {'label': bucket, 'value': bucket}
         for bucket in delta_order['delta_bucket'].tolist()
     ]
-
-
-def _build_surface_dte_lookup(surface_df):
-    if surface_df.empty or 'option_expiration_date' not in surface_df.columns:
-        return pd.DataFrame(columns=['contract_date', 'option_expiration_date'])
-
-    lookup = surface_df[['contract_date', 'option_expiration_date']].copy()
-    lookup['contract_date'] = pd.to_datetime(lookup['contract_date'], errors='coerce')
-    lookup['option_expiration_date'] = pd.to_datetime(lookup['option_expiration_date'], errors='coerce')
-    lookup = lookup.dropna(subset=['contract_date', 'option_expiration_date'])
-    if lookup.empty:
-        return pd.DataFrame(columns=['contract_date', 'option_expiration_date'])
-
-    return (
-        lookup
-        .drop_duplicates(['contract_date', 'option_expiration_date'])
-        .sort_values(['contract_date', 'option_expiration_date'])
-        .drop_duplicates('contract_date', keep='first')
-        .reset_index(drop=True)
-    )
 
 
 def _format_surface_table_df(
@@ -1030,81 +298,6 @@ def _empty_figure(message, title):
         align='center',
     )
     return fig
-
-
-def _load_ttf_source_comparison(selected_date, selected_expiry, engine=None):
-    """Load published normalized ICAP/ICE nodes and TFO trade-strike marks."""
-    if not selected_date or not selected_expiry:
-        return pd.DataFrame(), pd.DataFrame()
-    db_engine = engine or get_database_engine(required=False)
-    params = {
-        'cob_date': pd.Timestamp(selected_date).date(),
-        'maturity_date': pd.Timestamp(selected_expiry).date(),
-    }
-    curve_query = text(f"""
-        SELECT
-            valuation_run_id,
-            valuation_revision,
-            valuation_methodology_version,
-            'EUR' AS currency,
-            cob_date,
-            maturity_date,
-            option_expiration_date,
-            surface_source,
-            native_node_type,
-            native_node_value,
-            strike,
-            call_delta,
-            volatility,
-            forward_value,
-            settlement_price,
-            contract_type,
-            total_volume,
-            open_interest,
-            vendor_volatility,
-            vendor_volatility_difference,
-            put_call_parity_difference,
-            quality_status,
-            valid_for_comparison,
-            source_name,
-            vendor_published_at,
-            ingested_at,
-            method,
-            day_count,
-            delta_convention
-        FROM {TTF_COMPARISON_TABLE}
-        WHERE cob_date = :cob_date
-          AND product = 'TTF'
-          AND maturity_date = :maturity_date
-        ORDER BY surface_source, strike
-    """)
-    trade_query = text(f"""
-        SELECT
-            valuation_run_id,
-            valuation_revision,
-            currency,
-            substrategy,
-            buy_sell,
-            put_call,
-            strike,
-            forward_price_used,
-            volatility_used,
-            comparison_call_delta_used,
-            comparison_volatility_used,
-            comparison_status,
-            price,
-            comparison_price,
-            qty_pnl,
-            comparison_qty_pnl
-        FROM {VALUATION_CURRENT_TABLE}
-        WHERE cob_date = :cob_date
-          AND contract_convention_code = 'ICE_TTF_TFO'
-          AND maturity_date_a = :maturity_date
-        ORDER BY strike, buy_sell
-    """)
-    curves = pd.read_sql(curve_query, db_engine, params=params)
-    trades = pd.read_sql(trade_query, db_engine, params=params)
-    return curves, trades
 
 
 def _create_ttf_source_comparison_figure(curves, trades):
@@ -1319,7 +512,7 @@ def _calculate_heatmap_bounds(values):
 
 
 def _prepare_heatmap_matrix(current_surface, previous_surface, heatmap_mode):
-    pivot_df, delta_columns = _build_surface_pivot(current_surface)
+    pivot_df, delta_columns = surface_data._build_surface_pivot(current_surface)
     if pivot_df.empty or not delta_columns:
         return None, None, None, None, None, None
 
@@ -1345,7 +538,7 @@ def _prepare_heatmap_matrix(current_surface, previous_surface, heatmap_mode):
         hover_template = 'Expiry %{y}<br>Bucket %{x}<br>Vol %{customdata:.2%}<br>vs ATM %{z:+.2%}<extra></extra>'
 
     elif heatmap_mode == 'vs_previous':
-        previous_pivot, _ = _build_surface_pivot(previous_surface)
+        previous_pivot, _ = surface_data._build_surface_pivot(previous_surface)
         if previous_pivot.empty:
             return None, None, None, None, None, 'No previous-date surface data is available for comparison.'
 
@@ -1436,7 +629,7 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
         return _empty_figure('Select an expiry with available surface data to see the smile.', f'{product} Smile Evolution')
 
     expiry_label = _format_surface_expiry_selection_label(selected_expiry) or 'selected expiry'
-    current_expiry = _filter_surface_by_expiry_selection(current_surface, selected_expiry)
+    current_expiry = surface_data._filter_surface_by_expiry_selection(current_surface, selected_expiry)
 
     if current_expiry.empty:
         return _empty_figure(f'No current-date smile data available for {expiry_label}.', f'{product} Smile Evolution')
@@ -1444,7 +637,7 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
     combined = current_expiry.copy()
     previous_expiry = pd.DataFrame()
     if not previous_surface.empty:
-        previous_expiry = _filter_surface_by_expiry_selection(previous_surface, selected_expiry)
+        previous_expiry = surface_data._filter_surface_by_expiry_selection(previous_surface, selected_expiry)
         if not previous_expiry.empty:
             combined = concat_dataframes([combined, previous_expiry], ignore_index=True)
 
@@ -1455,14 +648,14 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
-    history_df = surface_dataset.copy()
+    history_df = surface_data.surface_dataset.copy()
     if not history_df.empty:
         history_df = history_df[
             (history_df['code'] == product) &
             (history_df['cob_date'].dt.normalize() >= start_date) &
             (history_df['cob_date'].dt.normalize() <= end_date)
         ].copy()
-        history_df = _filter_surface_by_expiry_selection(history_df, selected_expiry)
+        history_df = surface_data._filter_surface_by_expiry_selection(history_df, selected_expiry)
 
     previous_date = None
     if not previous_expiry.empty:
@@ -1533,52 +726,18 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
     return fig
 
 
-def _get_selected_tenor_rank(product, selected_expiry, end_date):
-    current_surface = _get_surface_snapshot(product, end_date)
-    if current_surface.empty:
-        return 0
-
-    expiries = sorted(pd.to_datetime(current_surface['contract_date']).drop_duplicates())
-    if not expiries:
-        return 0
-
-    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
-    if expiry_type != SURFACE_EXPIRY_MONTH:
-        return 0
-
-    selected_expiry = pd.to_datetime(expiry_key)
-    return expiries.index(selected_expiry) if selected_expiry in expiries else 0
-
-
-def _select_rolling_tenor_history(history_df, tenor_rank):
-    if history_df.empty:
-        return history_df
-
-    selected_rows = []
-    for cob_date, cob_slice in history_df.groupby('cob_date'):
-        expiries = sorted(pd.to_datetime(cob_slice['contract_date']).drop_duplicates())
-        if not expiries:
-            continue
-        selected_expiry = expiries[min(tenor_rank, len(expiries) - 1)]
-        selected_rows.append(cob_slice[cob_slice['contract_date'] == selected_expiry])
-
-    if not selected_rows:
-        return history_df.iloc[0:0].copy()
-    return concat_dataframes(selected_rows, ignore_index=True)
-
-
 def _create_delta_history_figure(product, selected_expiry, selected_buckets, lookback_days, end_date, history_mode):
     if product is None or selected_expiry is None or not selected_buckets or end_date is None:
         return _empty_figure('Select a product, expiry, and delta bucket to view history.', 'Delta Vol History')
 
     end_date = pd.to_datetime(end_date)
-    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
+    expiry_type, expiry_key = surface_data._parse_surface_expiry_selection(selected_expiry)
     if expiry_type is None:
         return _empty_figure('Select a valid expiry, quarter, or season to view history.', 'Delta Vol History')
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
-    history_df = surface_dataset.copy()
+    history_df = surface_data.surface_dataset.copy()
     if history_df.empty:
         return _empty_figure('No surface history available.', 'Delta Vol History')
 
@@ -1589,11 +748,11 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
         (history_df['cob_date'] <= end_date)
     ].copy()
 
-    if history_mode == 'fixed_expiry' or expiry_type != SURFACE_EXPIRY_MONTH:
-        history_df = _filter_surface_by_expiry_selection(history_df, selected_expiry)
+    if history_mode == 'fixed_expiry' or expiry_type != surface_data.SURFACE_EXPIRY_MONTH:
+        history_df = surface_data._filter_surface_by_expiry_selection(history_df, selected_expiry)
     else:
-        tenor_rank = _get_selected_tenor_rank(product, selected_expiry, end_date)
-        history_df = _select_rolling_tenor_history(history_df, tenor_rank)
+        tenor_rank = surface_data._get_selected_tenor_rank(product, selected_expiry, end_date)
+        history_df = surface_data._select_rolling_tenor_history(history_df, tenor_rank)
 
     if history_df.empty:
         return _empty_figure(
@@ -1638,11 +797,10 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     return fig
 
 
-
 def _build_surface_tables(current_surface, previous_surface, cob_date):
-    current_pivot, current_columns = _build_surface_pivot(current_surface)
-    previous_pivot, previous_columns = _build_surface_pivot(previous_surface)
-    dte_lookup = _build_surface_dte_lookup(
+    current_pivot, current_columns = surface_data._build_surface_pivot(current_surface)
+    previous_pivot, previous_columns = surface_data._build_surface_pivot(previous_surface)
+    dte_lookup = surface_data._build_surface_dte_lookup(
         concat_dataframes([current_surface, previous_surface], ignore_index=True)
     )
     is_brent_surface = 'Brent' in set(current_surface.get('code', pd.Series(dtype=str)).dropna())
@@ -2395,143 +1553,16 @@ def _build_message_span(message, tone='neutral'):
     return html.Span(message, style={'color': colors.get(tone, colors['neutral'])})
 
 
-def group_data_by_period(data, grouping_mode):
-    data = data.copy()
-    data['contract_date'] = pd.to_datetime(data['contract_date'])
-
-    if grouping_mode == 'monthly':
-        data['period'] = data['contract_date'].dt.strftime('%m-%y')
-        return data
-
-    if grouping_mode == 'quarterly':
-        data['period'] = (
-            data['contract_date'].dt.year.astype(str)
-            + '-Q'
-            + data['contract_date'].dt.quarter.astype(str)
-        )
-        return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
-
-    if grouping_mode == 'season':
-        years = data['contract_date'].dt.year
-        months = data['contract_date'].dt.month
-        season_years = years.where(months.isin(ICE_SUMMER_MONTHS) | months.ge(10), years - 1)
-        periods = season_years.astype('Int64').astype('string') + np.where(
-            months.isin(ICE_SUMMER_MONTHS), '-Summer', '-Winter'
-        )
-        data['period'] = periods.astype(object).where(periods.notna(), None)
-        return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
-
-    if grouping_mode == 'calendar':
-        data['period'] = data['contract_date'].dt.year.astype(str)
-        return data.groupby(['code', 'cob_date', 'period']).agg({'volatility': 'mean'}).reset_index()
-
-    data['period'] = data['contract_date'].dt.strftime('%m-%y')
-    return data
-
-
-def _sort_grouped_period_columns(date_cols, grouping_mode):
-    if grouping_mode == 'monthly':
-        def month_year_to_date(month_year):
-            try:
-                month, year = month_year.split('-')
-                return pd.to_datetime(f'20{year}-{month}-01')
-            except Exception:
-                return pd.to_datetime('2100-01-01')
-
-        return sorted(date_cols, key=month_year_to_date)
-
-    if grouping_mode == 'quarterly':
-        def quarter_key(value):
-            try:
-                year, quarter = value.split('-')
-                return int(year), int(quarter[1])
-            except Exception:
-                return 9999, 0
-
-        return sorted(date_cols, key=quarter_key)
-
-    if grouping_mode == 'season':
-        def season_key(value):
-            try:
-                year, season = value.split('-')
-                return int(year), 0 if season == 'Summer' else 1
-            except Exception:
-                return 9999, 0
-
-        return sorted(date_cols, key=season_key)
-
-    if grouping_mode == 'calendar':
-        return sorted(date_cols, key=lambda value: int(value) if str(value).isdigit() else 9999)
-
-    return list(date_cols)
-
-
-def _build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode):
-    if selected_date is None or not selected_products or atm_dataset.empty:
-        return pd.DataFrame(columns=['product']), pd.DataFrame(columns=['product']), []
-
-    selected_date = pd.to_datetime(selected_date)
-    prev_date = pd.to_datetime(prev_selected_date) if prev_selected_date else None
-
-    atm_df = atm_dataset.copy()
-    atm_df['cob_date'] = pd.to_datetime(atm_df['cob_date'], errors='coerce')
-    atm_df['contract_date'] = pd.to_datetime(atm_df['contract_date'], errors='coerce')
-
-    product_df = atm_df[atm_df['code'].isin(selected_products)].copy()
-    if product_df.empty:
-        return pd.DataFrame(columns=['product']), pd.DataFrame(columns=['product']), []
-
-    current_data = product_df[product_df['cob_date'].dt.normalize() == selected_date.normalize()].copy()
-    current_pivot = pd.DataFrame(columns=['product'])
-    sorted_date_cols = []
-
-    if not current_data.empty:
-        current_grouped = group_data_by_period(current_data, grouping_mode)
-        current_grouped['product'] = current_grouped['code']
-        current_pivot = current_grouped.pivot_table(
-            values='volatility',
-            index='product',
-            columns='period',
-            aggfunc='first'
-        ).reset_index()
-
-        date_cols = [column for column in current_pivot.columns if column != 'product']
-        sorted_date_cols = _sort_grouped_period_columns(date_cols, grouping_mode)
-        current_pivot = current_pivot[['product'] + sorted_date_cols]
-
-    changes_pivot = pd.DataFrame(columns=['product'])
-    if prev_date is not None and not current_data.empty:
-        prev_data = product_df[product_df['cob_date'].dt.normalize() == prev_date.normalize()].copy()
-        if not prev_data.empty:
-            prev_grouped = group_data_by_period(prev_data, grouping_mode)
-            prev_grouped['product'] = prev_grouped['code']
-            prev_pivot = prev_grouped.pivot_table(
-                values='volatility',
-                index='product',
-                columns='period',
-                aggfunc='first'
-            )
-
-            current_indexed = current_pivot.set_index('product') if not current_pivot.empty else pd.DataFrame()
-            all_products = sorted(set(current_indexed.index.tolist()) | set(prev_pivot.index.tolist()))
-            if all_products:
-                current_aligned = current_indexed.reindex(all_products)
-                prev_aligned = prev_pivot.reindex(all_products).reindex(columns=sorted_date_cols)
-                changes_pivot = (current_aligned[sorted_date_cols] - prev_aligned).reset_index().rename(columns={'index': 'product'})
-
-    return current_pivot, changes_pivot, sorted_date_cols
-
-
 def _build_atm_status_line(selected_date, selected_products, grouping_mode):
-    atm_error = DATA_CACHE_STATE['atm']['error']
-    surface_error = DATA_CACHE_STATE['surface']['error']
-    surface_source = DATA_CACHE_STATE['surface']['source']
+    atm_error = surface_data.DATA_CACHE_STATE['atm']['error']
+    surface_error = surface_data.DATA_CACHE_STATE['surface']['error']
+    surface_source = surface_data.DATA_CACHE_STATE['surface']['source']
     selected_products = selected_products or []
 
-    if atm_dataset.empty and (atm_error or surface_error):
+    if surface_data.atm_dataset.empty and (atm_error or surface_error):
         return _build_message_span(f'ATM source unavailable: {atm_error or surface_error}', tone='error')
 
-    current_pivot, _, sorted_date_cols = _build_atm_table_frames(selected_date, None, selected_products, grouping_mode)
+    current_pivot, _, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, None, selected_products, grouping_mode)
     visible_products = int(current_pivot['product'].nunique()) if not current_pivot.empty else 0
     period_count = len(sorted_date_cols)
     missing_cells = int(current_pivot[sorted_date_cols].isna().sum().sum()) if sorted_date_cols and not current_pivot.empty else 0
@@ -2556,9 +1587,9 @@ def _build_surface_status_line(
     current_surface=None,
     previous_surface=None,
 ):
-    surface_error = DATA_CACHE_STATE['surface']['error']
-    surface_source = DATA_CACHE_STATE['surface']['source']
-    if surface_error and surface_dataset.empty:
+    surface_error = surface_data.DATA_CACHE_STATE['surface']['error']
+    surface_source = surface_data.DATA_CACHE_STATE['surface']['source']
+    if surface_error and surface_data.surface_dataset.empty:
         return _build_message_span(f'Surface source unavailable: {surface_error}', tone='error')
 
     if not active_product or selected_date is None:
@@ -2568,9 +1599,9 @@ def _build_surface_status_line(
         )
 
     if current_surface is None:
-        current_surface = _get_surface_snapshot(active_product, selected_date)
+        current_surface = surface_data._get_surface_snapshot(active_product, selected_date)
     if previous_surface is None:
-        previous_surface = _get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else _empty_surface_df()
+        previous_surface = surface_data._get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else surface_data._empty_surface_df()
 
     if current_surface.empty:
         selected_date_text = pd.to_datetime(selected_date).strftime('%Y-%m-%d')
@@ -2579,7 +1610,7 @@ def _build_surface_status_line(
             tone='warning'
         )
 
-    pivot_df, delta_columns = _build_surface_pivot(current_surface)
+    pivot_df, delta_columns = surface_data._build_surface_pivot(current_surface)
     expiry_count = int(len(pivot_df.index))
     bucket_count = len(delta_columns)
     filled_cells = int(pivot_df.notna().sum().sum()) if not pivot_df.empty else 0
@@ -2624,53 +1655,20 @@ def _build_surface_status_line(
 
 def refresh_data_feedback(n_clicks):
     refresh_token = n_clicks or 0
-    _ensure_cached_data(refresh_token)
+    surface_data._ensure_cached_data(refresh_token)
 
     if n_clicks is None:
         return ''
 
-    errors = [status['error'] for status in DATA_CACHE_STATE.values() if isinstance(status, dict) and status.get('error')]
+    errors = [status['error'] for status in surface_data.DATA_CACHE_STATE.values() if isinstance(status, dict) and status.get('error')]
     if errors:
         return _build_message_span(f'Data refresh completed with warnings: {" | ".join(errors)}', tone='warning')
 
-    surface_source = DATA_CACHE_STATE['surface']['source']
+    surface_source = surface_data.DATA_CACHE_STATE['surface']['source']
     return _build_message_span(
         f'Data refreshed from {surface_source}.',
         tone='success'
     )
-
-
-def init_date_pickers(n_clicks):
-    _ensure_cached_data(n_clicks or 0)
-    all_dates = _get_all_available_dates()
-    if not all_dates:
-        return None, None
-
-    latest_date = pd.Timestamp(all_dates[-1])
-    prev_date = pd.Timestamp(all_dates[-2]) if len(all_dates) > 1 else latest_date
-    return latest_date.strftime('%Y-%m-%d'), prev_date.strftime('%Y-%m-%d')
-
-
-def set_prev_date(n_clicks, current_date):
-    if current_date is None:
-        raise dash.exceptions.PreventUpdate
-
-    _ensure_cached_data(n_clicks or 0)
-    current_date_dt = pd.to_datetime(current_date)
-    all_dates = _get_all_available_dates()
-
-    for date in reversed(all_dates):
-        if pd.Timestamp(date) < current_date_dt:
-            return pd.Timestamp(date).strftime('%Y-%m-%d')
-
-    return current_date
-
-
-def init_products(n_clicks):
-    _ensure_cached_data(n_clicks or 0)
-    product_codes = sorted(atm_dataset['code'].unique()) if not atm_dataset.empty else []
-    dropdown_options = [{'label': code, 'value': code} for code in product_codes]
-    return dropdown_options, product_codes
 
 
 @callback(
@@ -2707,18 +1705,18 @@ def initialize_vol_surface_page(
     reference = None
     if not force and isinstance(current_reference, dict):
         try:
-            reference = _activate_surface_snapshot(current_reference)
+            reference = surface_data._activate_surface_snapshot(current_reference)
         except SnapshotReferenceError:
             reference = None
     if reference is None:
-        reference = prepare_vol_surface_snapshot(
+        reference = surface_data.prepare_vol_surface_snapshot(
             force=force,
             refresh_token=refresh_count,
         )
 
     browser_reference = dict(reference)
     browser_reference['refresh_count'] = refresh_count
-    all_dates = _get_all_available_dates()
+    all_dates = surface_data._get_all_available_dates()
     date_values = [pd.Timestamp(value).strftime('%Y-%m-%d') for value in all_dates]
     resolved_date = current_date if current_date in date_values else (
         date_values[-1] if date_values else None
@@ -2728,7 +1726,7 @@ def initialize_vol_surface_page(
         earlier_dates = [value for value in date_values if value < resolved_date]
         resolved_previous = earlier_dates[-1] if earlier_dates else resolved_date
 
-    product_codes = sorted(atm_dataset['code'].unique()) if not atm_dataset.empty else []
+    product_codes = sorted(surface_data.atm_dataset['code'].unique()) if not surface_data.atm_dataset.empty else []
     product_options = [{'label': code, 'value': code} for code in product_codes]
     had_reference = isinstance(current_reference, dict)
     if had_reference and selected_products is not None:
@@ -2760,11 +1758,11 @@ def update_atm_status_line(n_clicks, selected_date, selected_products, grouping_
 
 
 def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
-    if selected_date is None or not selected_products or atm_dataset.empty:
+    if selected_date is None or not selected_products or surface_data.atm_dataset.empty:
         return html.Div()
 
     selected_date = pd.to_datetime(selected_date)
-    atm_df = atm_dataset.copy()
+    atm_df = surface_data.atm_dataset.copy()
     atm_df['cob_date'] = pd.to_datetime(atm_df['cob_date'], errors='coerce')
     atm_df['contract_date'] = pd.to_datetime(atm_df['contract_date'], errors='coerce')
 
@@ -2803,7 +1801,7 @@ def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
             )
 
             if grouping_mode != 'monthly':
-                grouped_data = group_data_by_period(cob_data, grouping_mode).sort_values('period')
+                grouped_data = surface_data.group_data_by_period(cob_data, grouping_mode).sort_values('period')
                 x_values = grouped_data['period'] if 'period' in grouped_data.columns else cob_data['contract_date']
                 y_values = grouped_data['volatility'] if 'period' in grouped_data.columns else cob_data['volatility']
                 mode = 'lines+markers' if 'period' in grouped_data.columns else 'lines'
@@ -2840,7 +1838,7 @@ def update_graphs(n_clicks, selected_date, selected_products, grouping_mode):
                 cob_data = code_df[code_df['cob_date'] == candidate_date].sort_values('contract_date').copy()
                 if not cob_data.empty:
                     if grouping_mode != 'monthly':
-                        grouped_data = group_data_by_period(cob_data, grouping_mode).sort_values('period')
+                        grouped_data = surface_data.group_data_by_period(cob_data, grouping_mode).sort_values('period')
                         x_values = grouped_data['period'] if 'period' in grouped_data.columns else cob_data['contract_date']
                         y_values = grouped_data['volatility'] if 'period' in grouped_data.columns else cob_data['volatility']
                         mode = 'lines+markers' if 'period' in grouped_data.columns else 'lines'
@@ -2886,7 +1884,7 @@ def update_tables(n_clicks, selected_date, prev_selected_date, selected_products
     if selected_date is None or not selected_products:
         return html.Div()
 
-    current_pivot, changes_pivot, sorted_date_cols = _build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode)
+    current_pivot, changes_pivot, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode)
 
     current_table = html.Div([
         _build_vol_table_panel_header(
@@ -2962,7 +1960,7 @@ def render_atm_section(
     selected_products,
     grouping_mode,
 ):
-    _ensure_cached_data(snapshot_reference)
+    surface_data._ensure_cached_data(snapshot_reference)
     return (
         update_atm_status_line(None, selected_date, selected_products, grouping_mode),
         update_graphs(None, selected_date, selected_products, grouping_mode),
@@ -2988,19 +1986,19 @@ def render_atm_section(
     prevent_initial_call=True
 )
 def update_surface_tabs(snapshot_reference, selected_products, selected_date, active_tab):
-    _ensure_cached_data(snapshot_reference)
-    supported_products = _get_supported_surface_products(selected_products, selected_date)
+    surface_data._ensure_cached_data(snapshot_reference)
+    supported_products = surface_data._get_supported_surface_products(selected_products, selected_date)
 
     if not supported_products:
         return [], None, {'display': 'none'}, 'Full surface data is available only for Brent, HH, TTF, JKM, and NBP.'
 
     tabs = [dcc.Tab(label=product, value=product) for product in supported_products]
     current_date_products = supported_products
-    if selected_date is not None and not surface_dataset.empty:
+    if selected_date is not None and not surface_data.surface_dataset.empty:
         selected_date_dt = pd.to_datetime(selected_date).normalize()
         available_on_date = set(
-            surface_dataset.loc[
-                surface_dataset['cob_date'].dt.normalize() == selected_date_dt,
+            surface_data.surface_dataset.loc[
+                surface_data.surface_dataset['cob_date'].dt.normalize() == selected_date_dt,
                 'code',
             ].dropna().unique()
         )
@@ -3024,14 +2022,14 @@ def update_surface_tabs(snapshot_reference, selected_products, selected_date, ac
     prevent_initial_call=True
 )
 def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_product, current_expiry):
-    _ensure_cached_data(snapshot_reference)
+    surface_data._ensure_cached_data(snapshot_reference)
     hidden_style = {'display': 'none', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}
     visible_style = {'display': 'flex', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}
 
     if selected_date is None or not active_product:
         return [], None, hidden_style
 
-    current_surface = _get_surface_snapshot(active_product, selected_date)
+    current_surface = surface_data._get_surface_snapshot(active_product, selected_date)
     if current_surface.empty:
         return [], None, hidden_style
 
@@ -3040,7 +2038,7 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
         return [], None, hidden_style
 
     valid_expiries = {option['value'] for option in expiry_options}
-    normalized_current_expiry = _normalize_surface_expiry_selection(current_expiry)
+    normalized_current_expiry = surface_data._normalize_surface_expiry_selection(current_expiry)
     selected_expiry = (
         normalized_current_expiry
         if normalized_current_expiry in valid_expiries
@@ -3074,15 +2072,15 @@ def update_vol_trades_link(active_product):
     prevent_initial_call=True
 )
 def update_surface_delta_dropdown(snapshot_reference, selected_date, active_product, selected_expiry, current_history_buckets):
-    _ensure_cached_data(snapshot_reference)
+    surface_data._ensure_cached_data(snapshot_reference)
     if selected_date is None or not active_product or not selected_expiry:
         return [], []
 
-    current_surface = _get_surface_snapshot(active_product, selected_date)
+    current_surface = surface_data._get_surface_snapshot(active_product, selected_date)
     if current_surface.empty:
         return [], []
 
-    expiry_surface = _filter_surface_by_expiry_selection(current_surface, selected_expiry)
+    expiry_surface = surface_data._filter_surface_by_expiry_selection(current_surface, selected_expiry)
     delta_options = _get_delta_bucket_options(expiry_surface)
     valid_deltas = {option['value'] for option in delta_options}
     history_buckets = [bucket for bucket in (current_history_buckets or []) if bucket in valid_deltas]
@@ -3122,7 +2120,7 @@ def update_surface_section(
     heatmap_mode,
     history_mode
 ):
-    _ensure_cached_data(snapshot_reference)
+    surface_data._ensure_cached_data(snapshot_reference)
 
     if selected_date is None or not active_product:
         status_line = _build_surface_status_line(selected_date, prev_selected_date, active_product)
@@ -3131,8 +2129,8 @@ def update_surface_section(
         empty_history = _empty_figure('Select a supported product, expiry, and delta bucket to view history.', 'Delta Vol History')
         return empty_heatmap, empty_smile, empty_history, html.Div(), status_line
 
-    current_surface = _get_surface_snapshot(active_product, selected_date)
-    previous_surface = _get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else _empty_surface_df()
+    current_surface = surface_data._get_surface_snapshot(active_product, selected_date)
+    previous_surface = surface_data._get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else surface_data._empty_surface_df()
     status_line = _build_surface_status_line(
         selected_date,
         prev_selected_date,
@@ -3155,12 +2153,12 @@ def update_surface_section(
         )
 
     if selected_expiry is None:
-        selected_expiry = _surface_expiry_value(
-            SURFACE_EXPIRY_MONTH,
+        selected_expiry = surface_data._surface_expiry_value(
+            surface_data.SURFACE_EXPIRY_MONTH,
             pd.to_datetime(current_surface['contract_date'].min()),
         )
 
-    expiry_surface = _filter_surface_by_expiry_selection(current_surface, selected_expiry)
+    expiry_surface = surface_data._filter_surface_by_expiry_selection(current_surface, selected_expiry)
     delta_options = _get_delta_bucket_options(expiry_surface)
     valid_deltas = {option['value'] for option in delta_options}
     selected_history_buckets = [bucket for bucket in (selected_history_buckets or []) if bucket in valid_deltas]
@@ -3228,7 +2226,7 @@ def update_ttf_source_comparison(
     active_product,
     selected_expiry,
 ):
-    _ensure_cached_data(snapshot_reference)
+    surface_data._ensure_cached_data(snapshot_reference)
     if str(active_product or '').upper() != 'TTF':
         return (
             {'display': 'none'},
@@ -3250,8 +2248,8 @@ def update_ttf_source_comparison(
             ),
             [],
         )
-    expiry_type, expiry_key = _parse_surface_expiry_selection(selected_expiry)
-    if expiry_type != SURFACE_EXPIRY_MONTH:
+    expiry_type, expiry_key = surface_data._parse_surface_expiry_selection(selected_expiry)
+    if expiry_type != surface_data.SURFACE_EXPIRY_MONTH:
         message = 'TTF ICAP–ICE comparison is available for monthly expiries only.'
         return (
             visible,
@@ -3260,7 +2258,7 @@ def update_ttf_source_comparison(
             [],
         )
     try:
-        curves, trades = _load_ttf_source_comparison(
+        curves, trades = surface_data._load_ttf_source_comparison(
             selected_date,
             expiry_key,
         )
@@ -3293,10 +2291,6 @@ def update_ttf_source_comparison(
     )
 
 
-def reset_grouping(n_clicks):
-    return 'monthly'
-
-
 @callback(
     Output("download-volatility-table", "data"),
     Input("export-volatility-table-btn", "n_clicks"),
@@ -3317,9 +2311,9 @@ def export_volatility_table(
         return None
 
     try:
-        _ensure_cached_data(snapshot_reference)
+        surface_data._ensure_cached_data(snapshot_reference)
 
-        current_pivot, _, sorted_date_cols = _build_atm_table_frames(selected_date, None, selected_products, grouping_mode)
+        current_pivot, _, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, None, selected_products, grouping_mode)
         if current_pivot.empty:
             return None
 
@@ -3357,10 +2351,10 @@ def export_surface_table(
         return None
 
     try:
-        _ensure_cached_data(snapshot_reference)
+        surface_data._ensure_cached_data(snapshot_reference)
 
-        current_surface = _get_surface_snapshot(active_product, selected_date)
-        previous_surface = _get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else _empty_surface_df()
+        current_surface = surface_data._get_surface_snapshot(active_product, selected_date)
+        previous_surface = surface_data._get_surface_snapshot(active_product, prev_selected_date) if prev_selected_date else surface_data._empty_surface_df()
         if current_surface.empty:
             return None
 
@@ -3373,7 +2367,7 @@ def export_surface_table(
             if str(active_product).upper() == 'TTF' and selected_expiry:
                 try:
                     comparison_curves, comparison_trades = (
-                        _load_ttf_source_comparison(
+                        surface_data._load_ttf_source_comparison(
                             selected_date,
                             selected_expiry,
                         )

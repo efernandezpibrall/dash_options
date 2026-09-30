@@ -4,7 +4,9 @@ import pandas as pd
 from options.calibration_engine.io import loaders
 
 from pages import brent_vol_history as history
+import vol_trades_data as market_data
 from vol_calibration import inline_workspace
+from vol_calibration import ttf_publication as publication_data
 from vol_calibration.ttf_publication import input_manifest_fingerprint
 
 
@@ -163,7 +165,7 @@ def test_jkm_loader_is_exact_cob_and_never_requests_synthetic_fallback(monkeypat
 
     monkeypatch.setattr(loaders, "load_market_data_with_metadata", fake_loader)
 
-    loaded, metadata = history.load_jkm_official_market("2026-08-28")
+    loaded, metadata = market_data.load_jkm_official_market("2026-08-28")
 
     assert len(loaded) == 1
     assert metadata["source"] == "postgres"
@@ -180,9 +182,9 @@ def test_same_day_publication_concurrency_excludes_older_point_in_time_base():
         "publication_date": "2026-08-28",
     }
 
-    assert inline_workspace._same_day_publication_id(older, "2026-08-28") is None
+    assert publication_data.same_day_publication_reference(older, "2026-08-28") is None
     assert (
-        inline_workspace._same_day_publication_id(same_day, "2026-08-28")
+        publication_data.same_day_publication_reference(same_day, "2026-08-28")
         == "same-day-revision"
     )
 

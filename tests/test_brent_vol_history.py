@@ -7,7 +7,10 @@ import pytest
 from dash import html
 
 import index_options
+from vol_trades_workspace import chart_data, grids, history_cards, history_charts, overlays, trade_tape as tape_views
+from options.hh_single_surface import HH_SINGLE_SURFACE_POLICY_VERSION
 from pages import brent_vol_history as history
+import vol_trades_data as market_data
 
 
 def _walk(component):
@@ -80,7 +83,7 @@ def _chain_frame():
                 "snapshot_metadata": {},
             }
         )
-    return history._normalize_chain_frame(pd.DataFrame(rows))
+    return market_data._normalize_chain_frame(pd.DataFrame(rows))
 
 
 def _published_frame(source_name="published"):
@@ -156,7 +159,7 @@ def _intraday_missing_quote_frame():
     frame["executable_iv_mid"] = None
     frame["executable_iv_status"] = "unavailable"
     frame["executable_iv_exclusion_reason"] = "missing_two_sided_quote"
-    return history._normalize_chain_frame(frame)
+    return market_data._normalize_chain_frame(frame)
 
 
 def _tfo_apr27_intraday_frame():
@@ -207,7 +210,7 @@ def _tfo_apr27_intraday_frame():
                     "snapshot_metadata": {"snapshot_kind": "INTRADAY"},
                 }
             )
-    return history._normalize_chain_frame(pd.DataFrame(rows))
+    return market_data._normalize_chain_frame(pd.DataFrame(rows))
 
 
 def _tfo_apr27_prior_settlement_frame():
@@ -220,7 +223,7 @@ def _tfo_apr27_prior_settlement_frame():
         {48.0: 0.633951, 49.0: 0.638026, 50.0: 0.641815}
     )
     frame["iv_status"] = "resolved"
-    return history._normalize_chain_frame(frame)
+    return market_data._normalize_chain_frame(frame)
 
 
 def test_layout_has_one_semantic_h1_and_auditable_components():
@@ -241,7 +244,6 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
             "brent-vol-history-trade-4h",
             "brent-vol-history-trade-1h",
             "brent-vol-history-trade-15m",
-            "brent-vol-history-trade-latest",
         }
     ]
     worker_poll = next(
@@ -253,7 +255,7 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
     assert headings[0].children == "Vol trades"
     assert headings[0].className == "brent-vol-history-visually-hidden-heading"
     assert trade_slider.allow_direct_input is False
-    assert len(trade_presets) == 5
+    assert len(trade_presets) == 4
     assert all(button.disabled for button in trade_presets)
     assert worker_poll.interval == 10_000
     assert worker_poll.disabled is False
@@ -325,13 +327,13 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
         if getattr(item, "id", None) == "brent-vol-history-grid"
     )
 
-    assert [group["headerName"] for group in history.TRADE_TAPE_COLUMN_DEFS] == [
+    assert [group["headerName"] for group in grids.TRADE_TAPE_COLUMN_DEFS] == [
         "Trade",
         "Print",
         "Matched future",
         "Trade volatility",
     ]
-    assert [group["headerName"] for group in history.DETAIL_COLUMN_DEFS] == [
+    assert [group["headerName"] for group in grids.DETAIL_COLUMN_DEFS] == [
         "Contract",
         "Option premium",
         "Volatility (%)",
@@ -340,15 +342,15 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
         "Last exact trade",
         "Quality & source",
     ]
-    assert all(group["marryChildren"] for group in history.DETAIL_COLUMN_DEFS)
+    assert all(group["marryChildren"] for group in grids.DETAIL_COLUMN_DEFS)
 
-    detail_leaves = _column_leaves(history.DETAIL_COLUMN_DEFS)
+    detail_leaves = _column_leaves(grids.DETAIL_COLUMN_DEFS)
     detail_by_field = {column["field"]: column for column in detail_leaves}
     trade_by_field = {
         column["field"]: column
-        for column in _column_leaves(history.TRADE_TAPE_COLUMN_DEFS)
+        for column in _column_leaves(grids.TRADE_TAPE_COLUMN_DEFS)
     }
-    detail_row_fields = set(history._detail_rows(_chain_frame(), "2026-12-01")[0])
+    detail_row_fields = set(grids._detail_rows(_chain_frame(), "2026-12-01")[0])
     assert set(detail_by_field) == detail_row_fields
     assert len(detail_leaves) == 59
     assert detail_by_field["option_security"]["pinned"] == "left"
@@ -358,13 +360,13 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
     assert detail_by_field["executable_iv_mid_pct"]["valueFormatter"][
         "function"
     ].endswith("toFixed(2)")
-    assert detail_by_field["volume"]["valueFormatter"] == history._GRID_INTEGER
+    assert detail_by_field["volume"]["valueFormatter"] == grids._GRID_INTEGER
     assert trade_by_field["future_match_source"]["headerName"] == "Method"
     assert trade_by_field["future_quote_ages"]["headerName"] == "Bid / ask age"
     assert detail_by_field["last_trade_underlying_source"]["headerName"] == (
         "Match method"
     )
-    assert history._trade_match_source_label("TRADE") == "Future trade"
+    assert chart_data._trade_match_source_label("TRADE") == "Future trade"
 
     assert trade_grid.dashGridOptions["groupHeaderHeight"] == 28
     assert chain_grid.dashGridOptions["groupHeaderHeight"] == 28
@@ -442,8 +444,8 @@ def test_intraday_universe_is_policy_filtered_while_settlement_stays_complete():
         "2028-06-01", "2028-12-01",
     }
 
-    intraday, legacy_info = history.select_history_universe(frame, "INTRADAY")
-    settlement, settlement_info = history.select_history_universe(
+    intraday, legacy_info = market_data.select_history_universe(frame, "INTRADAY")
+    settlement, settlement_info = market_data.select_history_universe(
         frame, "SETTLEMENT"
     )
     assert set(
@@ -466,7 +468,7 @@ def test_intraday_universe_is_policy_filtered_while_settlement_stays_complete():
         }
         for _ in months
     ]
-    selected, governed_info = history.select_history_universe(
+    selected, governed_info = market_data.select_history_universe(
         governed, "INTRADAY"
     )
     assert set(
@@ -487,7 +489,7 @@ def test_tfo_intraday_universe_is_front_twelve_plus_quarters_to_year_two():
             "snapshot_metadata": [{} for _ in months],
         }
     )
-    selected, info = history.select_history_universe(
+    selected, info = market_data.select_history_universe(
         frame, "INTRADAY", product="TFO"
     )
     selected_months = set(
@@ -512,7 +514,7 @@ def test_trade_tape_loader_is_snapshot_and_product_scoped(monkeypatch):
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    history.load_trade_tape("00000000-0000-0000-0000-000000000001", engine=object())
+    market_data.load_trade_tape("00000000-0000-0000-0000-000000000001", engine=object())
     assert "e.snapshot_id = CAST(:snapshot_id AS uuid)" in captured["sql"]
     assert "e.product = :product" in captured["sql"]
     assert "metadata ->> 'snapshot_kind'" in captured["sql"]
@@ -549,13 +551,13 @@ def test_trade_tape_exposes_individual_future_quote_ages():
         ]
     )
 
-    payload = history.trade_trace_payloads(
+    payload = tape_views.trade_trace_payloads(
         trade_tape, pd.Timestamp("2026-12-01"), "strike"
     )["C"]
-    rows = history._trade_tape_rows(trade_tape, "2026-12-01", 0)
+    rows = tape_views._trade_tape_rows(trade_tape, "2026-12-01", 0)
     chain = _chain_frame()
     chain["snapshot_kind"] = "INTRADAY"
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         pd.DataFrame(),
         pd.DataFrame(),
@@ -584,7 +586,7 @@ def test_available_snapshot_query_is_product_scoped_and_latest_per_date(monkeypa
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    history.load_available_snapshots(engine=object(), limit=20)
+    market_data.load_available_snapshots(engine=object(), limit=20)
     assert "PARTITION BY s.business_date" in captured["sql"]
     assert "c.product = :product" in captured["sql"]
     assert captured["params"] == {
@@ -597,7 +599,7 @@ def test_available_snapshot_query_is_product_scoped_and_latest_per_date(monkeypa
 
 def test_snapshot_selector_fails_closed_when_database_is_unavailable(monkeypatch):
     monkeypatch.setattr(
-        history, "load_available_snapshots",
+        market_data, "load_available_snapshots",
         lambda _product: (_ for _ in ()).throw(RuntimeError("database unavailable")),
     )
     assert history.update_history_dates(0, None, "BRENT", None) == ([], None)
@@ -612,7 +614,7 @@ def test_published_surface_query_requires_exact_cob(monkeypatch):
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    history.load_published_surface("2026-08-10", engine=object())
+    market_data.load_published_surface("2026-08-10", engine=object())
     assert "cob_date = :cob_date" in captured["sql"]
     assert "<=" not in captured["sql"]
     assert captured["params"]["cob_date"] == date(2026, 8, 10)
@@ -627,12 +629,12 @@ def test_tfo_published_overlay_queries_ttf_without_merging_products(monkeypatch)
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    history.load_published_surface(
+    market_data.load_published_surface(
         "2026-08-10", engine=object(), product="TFO", snapshot_kind="SETTLEMENT"
     )
     assert captured[0][1]["product"] == "TTF"
     assert captured[0][1]["snapshot_kind"] == "SETTLEMENT"
-    assert history.load_published_surface(
+    assert market_data.load_published_surface(
         "2026-08-10", engine=object(), product="TFO", snapshot_kind="INTRADAY"
     ).empty
     assert len(captured) == 1
@@ -660,7 +662,7 @@ def test_icap_settlement_loader_reuses_prior_vol_calibration_snapshot():
             "date_fallback_used": True,
         }
 
-    surface = history.load_icap_settlement_surface(
+    surface = market_data.load_icap_settlement_surface(
         "2026-08-26",
         snapshot_loader=snapshot_loader,
     )
@@ -684,7 +686,7 @@ def test_henry_hub_published_overlay_queries_hh_without_merging_products(
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    history.load_published_surface(
+    market_data.load_published_surface(
         "2026-08-10", engine=object(), product=product, snapshot_kind="SETTLEMENT"
     )
     assert captured[0][1]["product"] == "HH"
@@ -693,12 +695,12 @@ def test_henry_hub_published_overlay_queries_hh_without_merging_products(
 
 def test_henry_hub_products_use_ng_units_and_governed_pipeline_iv():
     for product in ("ON", "LNE"):
-        spec = history.PRODUCT_SPECS[product]
+        spec = market_data.PRODUCT_SPECS[product]
         assert spec["price_unit"] == "USD/MMBtu"
         assert spec["underlying_label"] == "NG"
         chain = _chain_frame()
         chain["product"] = product
-        assert history.prepare_market_observations(chain, product=product).empty
+        assert market_data.prepare_market_observations(chain, product=product).empty
 
 
 def test_latest_calibrated_surface_uses_latest_active_publication(
@@ -731,7 +733,7 @@ def test_latest_calibrated_surface_uses_latest_active_publication(
         )
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    surface = history.load_latest_calibrated_surface(
+    surface = market_data.load_latest_calibrated_surface(
         "2026-08-26",
         ["2026-12-01"],
         engine=object(),
@@ -745,7 +747,7 @@ def test_latest_calibrated_surface_uses_latest_active_publication(
     assert "s.contract_date IN" in captured[1][0]
     assert captured[1][1]["contract_dates"] == (date(2026, 12, 1),)
     assert surface.attrs["publication_status"] == "available"
-    assert history.calibrated_publication_metadata(surface)["publication_id"] == (
+    assert market_data.calibrated_publication_metadata(surface)["publication_id"] == (
         "9572ae7f-90ca-4c8f-aecd-fbaff1ed081d"
     )
 
@@ -757,20 +759,20 @@ def test_missing_calibrated_publication_is_explicit(monkeypatch, product):
         "read_sql",
         lambda query, engine, params: pd.DataFrame(),
     )
-    surface = history.load_latest_calibrated_surface(
+    surface = market_data.load_latest_calibrated_surface(
         "2026-08-26",
         ["2026-12-01"],
         engine=object(),
         product=product,
     )
     assert surface.attrs["publication_status"] == "no_publication"
-    cards = history.build_plot_cards(
+    cards = history_cards.build_plot_cards(
         _chain_frame(),
         pd.DataFrame(),
         product=product,
         calibrated=surface,
     )
-    contract = history._expiry_legend_contract(cards)
+    contract = history_charts._expiry_legend_contract(cards)
     assert "calibrated" not in contract["available_layers"]
     if product in {"LNE", "ON"}:
         assert "No HH surface published for this settlement date" in str(cards[0].children)
@@ -786,7 +788,7 @@ def test_single_surface_chart_queries_only_selected_cob(monkeypatch, product, se
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", read_sql)
-    history.load_latest_calibrated_surface(
+    market_data.load_latest_calibrated_surface(
         selected_date, ["2026-12-01"], engine=object(), product=product,
     )
     sql, params = captured[0]
@@ -806,11 +808,11 @@ def test_hh_views_draw_one_shared_surface_with_separate_market_context(product, 
     chain["implied_volatility"] += 0.10 if product == "ON" else 0.0
     surface = _calibrated_frame().assign(
         commodity="HH", calibration_policy_version=(
-            "legacy" if legacy else history.HH_SINGLE_SURFACE_POLICY_VERSION
+            "legacy" if legacy else HH_SINGLE_SURFACE_POLICY_VERSION
         ),
     )
     surface.attrs["publication_metadata"]["commodity"] = "HH"
-    cards = history.build_plot_cards(chain, _published_frame(), x_axis=axis, product=product, calibrated=surface)
+    cards = history_cards.build_plot_cards(chain, _published_frame(), x_axis=axis, product=product, calibrated=surface)
     figures = [c.figure for card in cards for c in _walk(card) if hasattr(c, "figure")]
     assert len(figures) == 1
     traces = figures[0].data
@@ -834,7 +836,7 @@ def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
         return pd.DataFrame()
 
     monkeypatch.setattr(history.pd, "read_sql", fake_read_sql)
-    history.load_chain_snapshot(
+    market_data.load_chain_snapshot(
         "00000000-0000-0000-0000-000000000001",
         engine=object(),
         product="TFO",
@@ -849,7 +851,7 @@ def test_chain_query_requires_product_and_snapshot_kind(monkeypatch):
 
 
 def test_published_delta_nodes_convert_to_strike():
-    nodes = history.published_strike_nodes(
+    nodes = market_data.published_strike_nodes(
         _published_frame(),
         {pd.Timestamp("2026-12-01"): 80.0},
         pd.Timestamp("2026-08-10"),
@@ -863,13 +865,13 @@ def test_published_delta_nodes_convert_to_strike():
 
 def test_expiry_figure_overlays_smile_volume_and_open_interest():
     chain = _chain_frame()
-    prepared = history.prepare_market_observations(chain)
-    published = history.published_strike_nodes(
+    prepared = market_data.prepare_market_observations(chain)
+    published = market_data.published_strike_nodes(
         _published_frame(),
         {pd.Timestamp("2026-12-01"): 80.0},
         pd.Timestamp("2026-08-10"),
     )
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         prepared,
         published,
@@ -955,14 +957,14 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
     chain["option_style"] = "EUROPEAN"
     chain["currency"] = "EUR"
     chain["price_unit"] = "EUR/MWH"
-    published = history.published_strike_nodes(
+    published = market_data.published_strike_nodes(
         _published_frame(),
         {pd.Timestamp("2026-12-01"): 80.0},
         pd.Timestamp("2026-08-10"),
     )
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
-        history.prepare_market_observations(chain, product="TFO"),
+        market_data.prepare_market_observations(chain, product="TFO"),
         published,
         pd.Timestamp("2026-12-01"),
         product="TFO",
@@ -987,7 +989,7 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
         "Premium <b>%{customdata[2]:.4f} EUR/MWh</b>"
         in traces["Bloomberg settlement IV"].hovertemplate
     )
-    detail = history._detail_rows(chain, "2026-12-01")
+    detail = grids._detail_rows(chain, "2026-12-01")
     assert {row["native_option_underlier"] for row in detail} == {"FJSZ6 Comdty"}
     assert {row["pricing_future"] for row in detail} == {"TZTZ6 Comdty"}
 
@@ -996,15 +998,15 @@ def test_tfo_figure_separates_direct_icap_settlement_from_published_surface():
     chain = _chain_frame().copy()
     chain["product"] = "TFO"
     chain["pricing_underlying_security"] = "TZTZ6 Comdty"
-    published = history.published_strike_nodes(
+    published = market_data.published_strike_nodes(
         _published_frame(source_name="ICAP settlement · COB 2026-08-08"),
         {pd.Timestamp("2026-12-01"): 80.0},
         pd.Timestamp("2026-08-10"),
     )
 
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
-        history.prepare_market_observations(chain, product="TFO"),
+        market_data.prepare_market_observations(chain, product="TFO"),
         published,
         pd.Timestamp("2026-12-01"),
         product="TFO",
@@ -1051,9 +1053,9 @@ def test_tfo_settlement_axis_uses_exchange_range_not_calibrated_tail_extremes():
 
     calibrated = _calibrated_frame()
     calibrated.loc[calibrated.index[-1], "strike"] = 500.0
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
-        history.prepare_market_observations(chain, product="TFO"),
+        market_data.prepare_market_observations(chain, product="TFO"),
         pd.DataFrame(),
         pd.Timestamp("2026-12-01"),
         product="TFO",
@@ -1097,9 +1099,9 @@ def test_settlement_smile_never_substitutes_intrinsic_itm_option_for_unresolved_
     chain["option_style"] = "EUROPEAN"
     chain["currency"] = "EUR"
     chain["price_unit"] = "EUR/MWH"
-    chain = history._normalize_chain_frame(chain)
+    chain = market_data._normalize_chain_frame(chain)
 
-    selected, excluded = history._settlement_reference_selection(chain, "strike")
+    selected, excluded = chart_data._settlement_reference_selection(chain, "strike")
 
     assert 200.0 not in set(selected["strike"])
     exclusion = excluded.loc[excluded["strike"].eq(200.0)].iloc[0]
@@ -1108,7 +1110,7 @@ def test_settlement_smile_never_substitutes_intrinsic_itm_option_for_unresolved_
     assert exclusion["settlement_price"] == pytest.approx(0.001)
     assert exclusion["reason_code"] == "otm_iv_outside_supported_range"
 
-    cards = history.build_plot_cards(
+    cards = history_cards.build_plot_cards(
         chain,
         pd.DataFrame(),
         product="TFO",
@@ -1156,7 +1158,7 @@ def test_expiry_section_uses_one_shared_chart_legend():
     assert checklist.value == []
     assert reset.children == "Reset"
     assert legend.role == "group"
-    options = history._expiry_legend_options(
+    options = history_charts._expiry_legend_options(
         [
             "call-mid",
             "put-mid",
@@ -1195,12 +1197,12 @@ def test_expiry_section_uses_one_shared_chart_legend():
 
 
 def test_expiry_legend_contract_only_exposes_plotted_layers():
-    cards = history.build_plot_cards(
+    cards = history_cards.build_plot_cards(
         _chain_frame(),
         pd.DataFrame(),
         product="BRENT",
     )
-    contract = history._expiry_legend_contract(cards)
+    contract = history_charts._expiry_legend_contract(cards)
 
     assert contract["available_layers"] == [
         "ice-bid",
@@ -1221,7 +1223,7 @@ def test_expiry_legend_contract_only_exposes_plotted_layers():
         {"index": 0, "layer": "pricing-reference"}
     ]
     assert all(
-        entry["layer"] in history.EXPIRY_LEGEND_LAYER_SPECS
+        entry["layer"] in history_charts.EXPIRY_LEGEND_LAYER_SPECS
         for entry in contract["graphs"]["2026-12-01"]["traces"]
     )
 
@@ -1241,7 +1243,7 @@ def test_ice_quotes_match_snapshot_day_expiry_and_axes():
         "offer": 5.4, "offer_implied_volatility": 0.62,
         "single_price": None, "sender_handle": "broker",
     }
-    strike_points, omitted = history.ice_quote_overlay_points(
+    strike_points, omitted = overlays.ice_quote_overlay_points(
         [row], snapshot, "2026-12-01", "strike"
     )
     assert omitted == 0
@@ -1249,25 +1251,25 @@ def test_ice_quotes_match_snapshot_day_expiry_and_axes():
     assert strike_points["ice-bid"]["y"] == [59.0]
     assert strike_points["ice-offer"]["y"] == [62.0]
     assert strike_points["ice-single"]["x"] == []
-    delta_points, omitted = history.ice_quote_overlay_points(
+    delta_points, omitted = overlays.ice_quote_overlay_points(
         [row], snapshot, "2026-12-01", "delta"
     )
     assert omitted == 0
     assert 0 < delta_points["ice-bid"]["x"][0] < 1
-    assert history.ice_quote_overlay_points(
+    assert overlays.ice_quote_overlay_points(
         [row], snapshot, "2027-01-01", "strike"
     )[0]["ice-bid"]["x"] == []
-    assert history.ice_quote_overlay_points(
+    assert overlays.ice_quote_overlay_points(
         [row], snapshot, "2026-12-01", "strike", "2026-10-26"
     )[0]["ice-bid"]["x"] == []
-    assert history.ice_quote_overlay_points(
+    assert overlays.ice_quote_overlay_points(
         [row], {**snapshot, "product": "TFO"}, "2026-12-01", "strike"
     )[0]["ice-bid"]["x"] == []
-    assert history.ice_quote_overlay_points(
+    assert overlays.ice_quote_overlay_points(
         [{**row, "observed_at": "2026-08-17T10:00:00Z"}],
         snapshot, "2026-12-01", "strike"
     )[0]["ice-bid"]["x"] == []
-    missing_delta, omitted = history.ice_quote_overlay_points(
+    missing_delta, omitted = overlays.ice_quote_overlay_points(
         [{**row, "forward": None}], snapshot, "2026-12-01", "delta"
     )
     assert omitted == 2
@@ -1275,8 +1277,8 @@ def test_ice_quotes_match_snapshot_day_expiry_and_axes():
 
 
 def test_ice_overlay_patches_only_quote_traces():
-    cards = history.build_plot_cards(_chain_frame(), pd.DataFrame(), product="BRENT")
-    manifest = history._expiry_legend_contract(cards)
+    cards = history_cards.build_plot_cards(_chain_frame(), pd.DataFrame(), product="BRENT")
+    manifest = history_charts._expiry_legend_contract(cards)
     row = {
         "product_code": "B", "contract_month": "2026-12-01",
         "option_type": "C", "observed_at": "2026-08-17T08:00:00Z",
@@ -1284,7 +1286,7 @@ def test_ice_overlay_patches_only_quote_traces():
         "strike": 90.0, "bid": 5.1, "bid_implied_volatility": 0.59,
         "offer": None, "single_price": None,
     }
-    patches, status = history.update_ice_quote_overlays(
+    patches, status = overlays.update_ice_quote_overlays(
         {"rows": [row, {**row, "event_id": "put-quote", "option_type": "P",
                          "bid_implied_volatility": 0.41}]},
         None, "C", None, None, None, None, [],
@@ -1304,7 +1306,7 @@ def test_ice_overlay_patches_only_quote_traces():
 
 
 def test_expiry_quality_summary_is_inside_the_contract_header():
-    cards = history.build_plot_cards(
+    cards = history_cards.build_plot_cards(
         _tfo_apr27_intraday_frame(),
         pd.DataFrame(),
         x_axis="delta",
@@ -1333,35 +1335,35 @@ def test_expiry_legend_tracks_new_volume_edge_by_option_side():
     chain["volume_delta"] = 0.0
     chain.loc[chain["put_call"].eq("P"), "volume_delta"] = 5.0
 
-    contract = history._expiry_legend_contract(
-        history.build_plot_cards(chain, pd.DataFrame(), product="BRENT")
+    contract = history_charts._expiry_legend_contract(
+        history_cards.build_plot_cards(chain, pd.DataFrame(), product="BRENT")
     )
 
     assert contract["new_volume_layers"] == ["volume-puts"]
 
 
 def test_bloomberg_settlement_legend_uses_plain_label_and_source_tooltip():
-    option = history._expiry_legend_options(["bloomberg-settlement"])[0]
+    option = history_charts._expiry_legend_options(["bloomberg-settlement"])[0]
 
     assert option["label"].children[1].children == "Settlement"
     assert option["label"].title == "Settlement from Bloomberg"
 
 
 def test_icap_settlement_legend_is_a_distinct_default_visible_layer():
-    option = history._expiry_legend_options(["icap-settlement"])[0]
+    option = history_charts._expiry_legend_options(["icap-settlement"])[0]
 
     assert option["label"].children[1].children == "ICAP settlement"
     assert option["label"].title == (
         "Show or hide the latest ICAP settlement surface on or before "
         "the selected date"
     )
-    assert history._default_expiry_layers(["icap-settlement"]) == [
+    assert history_charts._default_expiry_layers(["icap-settlement"]) == [
         "icap-settlement"
     ]
 
 
 def test_expiry_layer_selection_preserves_existing_and_enables_new_layers():
-    selected = history._selected_expiry_layers(
+    selected = history_charts._selected_expiry_layers(
         ["call-mid", "trades", "volume-calls"],
         [{"value": "call-mid"}, {"value": "volume-calls"}],
         ["call-mid"],
@@ -1372,16 +1374,16 @@ def test_expiry_layer_selection_preserves_existing_and_enables_new_layers():
 def test_expiry_layer_defaults_hide_mids_but_preserve_manual_selection():
     available = ["call-mid", "put-mid", "trades", "volume-calls"]
 
-    assert history._selected_expiry_layers(available, [], []) == [
+    assert history_charts._selected_expiry_layers(available, [], []) == [
         "trades",
         "volume-calls",
     ]
-    assert history._selected_expiry_layers(
+    assert history_charts._selected_expiry_layers(
         available,
         [{"value": layer} for layer in available],
         ["call-mid", "trades", "volume-calls"],
     ) == ["call-mid", "trades", "volume-calls"]
-    assert history._selected_expiry_layers(
+    assert history_charts._selected_expiry_layers(
         available,
         [{"value": "trades"}, {"value": "volume-calls"}],
         ["trades", "volume-calls"],
@@ -1461,8 +1463,8 @@ def test_settlement_iv_remains_visible_without_volume_or_open_interest():
         "settlement_open_interest",
     ):
         chain[column] = None
-    prepared = history.prepare_market_observations(chain)
-    figure = history.build_expiry_figure(
+    prepared = market_data.prepare_market_observations(chain)
+    figure = history_charts.build_expiry_figure(
         chain,
         prepared,
         pd.DataFrame(),
@@ -1488,7 +1490,7 @@ def test_settlement_iv_remains_visible_without_volume_or_open_interest():
 
 def test_missing_bid_ask_never_turns_last_price_into_a_current_iv_curve():
     chain = _intraday_missing_quote_frame()
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         pd.DataFrame(),
         pd.DataFrame(),
@@ -1508,7 +1510,7 @@ def test_missing_bid_ask_never_turns_last_price_into_a_current_iv_curve():
 def test_apr27_last_prices_are_audit_only_and_prior_settlement_drives_delta():
     chain = _tfo_apr27_intraday_frame()
     prior = _tfo_apr27_prior_settlement_frame()
-    quality = history._last_price_parity_quality(chain)
+    quality = chart_data._last_price_parity_quality(chain)
 
     assert quality["status"] == "coherent_historical"
     assert quality["pair_count"] == 3
@@ -1517,7 +1519,7 @@ def test_apr27_last_prices_are_audit_only_and_prior_settlement_drives_delta():
     assert quality["live_forward"] == pytest.approx(49.7925)
     assert quality["gap"] == pytest.approx(1.4595)
 
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         pd.DataFrame(),
         pd.DataFrame(),
@@ -1545,7 +1547,7 @@ def test_apr27_last_prices_are_audit_only_and_prior_settlement_drives_delta():
     assert "48.333" in figure_quality["detail"]
     assert "49.7925" in figure_quality["detail"]
 
-    cards = history.build_plot_cards(
+    cards = history_cards.build_plot_cards(
         chain,
         pd.DataFrame(),
         x_axis="delta",
@@ -1569,13 +1571,13 @@ def test_expiry_figure_keeps_extreme_activity_but_focuses_on_smile():
     chain.loc[extreme_mask, "implied_volatility"] = None
     chain.loc[extreme_mask, "iv_status"] = "excluded"
     chain.loc[extreme_mask, "iv_exclusion_reason"] = "outside governed display band"
-    prepared = history.prepare_market_observations(chain)
-    published = history.published_strike_nodes(
+    prepared = market_data.prepare_market_observations(chain)
+    published = market_data.published_strike_nodes(
         _published_frame(),
         {pd.Timestamp("2026-12-01"): 80.0},
         pd.Timestamp("2026-08-10"),
     )
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         prepared,
         published,
@@ -1590,13 +1592,13 @@ def test_expiry_figure_keeps_extreme_activity_but_focuses_on_smile():
 
 def test_delta_axis_uses_put_atm_call_convention_and_keeps_activity_only_strikes():
     chain = _chain_frame()
-    prepared = history.prepare_market_observations(chain)
-    published = history.published_strike_nodes(
+    prepared = market_data.prepare_market_observations(chain)
+    published = market_data.published_strike_nodes(
         _published_frame(),
         {pd.Timestamp("2026-12-01"): 80.0},
         pd.Timestamp("2026-08-10"),
     )
-    figure = history.build_expiry_figure(
+    figure = history_charts.build_expiry_figure(
         chain,
         prepared,
         published,
@@ -1635,7 +1637,7 @@ def test_delta_axis_uses_put_atm_call_convention_and_keeps_activity_only_strikes
 
 
 def test_detail_rows_distinguish_zero_from_missing_and_keep_status():
-    rows = history._detail_rows(_chain_frame(), "2026-12-01")
+    rows = grids._detail_rows(_chain_frame(), "2026-12-01")
     by_security = {row["option_security"]: row for row in rows}
     assert by_security["COZ6C 90 Comdty"]["volume"] == 0
     assert by_security["COZ6P 50 Comdty"]["volume"] is None
@@ -1656,7 +1658,7 @@ def test_intraday_activity_excludes_prior_volume_but_labels_stale_realtime_oi():
         ["2026-08-12", "2026-08-11", None]
     )
 
-    normalized = history._normalize_chain_frame(frame)
+    normalized = market_data._normalize_chain_frame(frame)
     by_security = normalized.set_index("option_security")
 
     same_day = by_security.loc["COZ6P 70 Comdty"]
@@ -1693,7 +1695,7 @@ def test_intraday_open_interest_never_falls_back_to_settlement_column():
     frame["settlement_open_interest_date"] = pd.Timestamp("2026-08-11")
     frame["intraday_open_interest"] = None
     frame["intraday_open_interest_date"] = None
-    normalized = history._normalize_chain_frame(frame).iloc[0]
+    normalized = market_data._normalize_chain_frame(frame).iloc[0]
     assert normalized["settlement_open_interest"] == 9_999
     assert pd.isna(normalized["source_open_interest"])
     assert pd.isna(normalized["open_interest"])
@@ -1716,7 +1718,7 @@ def test_publication_coverage_ignores_non_chain_maturities():
         ],
         ignore_index=True,
     )
-    assert history.publication_coverage(_chain_frame(), published) == (1, 1)
+    assert market_data.publication_coverage(_chain_frame(), published) == (1, 1)
 
 
 @pytest.mark.parametrize("product", ["LNE", "ON", "BRENT"])
@@ -1735,17 +1737,17 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     surface.attrs["publication_metadata"].update(publication_id="new-revision", commodity=commodity)
     calls = []
     monkeypatch.setattr(history, "ctx", SimpleNamespace(triggered_id="vol-trades-publication-revision"))
-    monkeypatch.setattr(history, "load_available_snapshots", lambda _product: snapshots)
-    monkeypatch.setattr(history, "load_chain_snapshot", lambda *_args, **_kwargs: chain)
+    monkeypatch.setattr(market_data, "load_available_snapshots", lambda _product: snapshots)
+    monkeypatch.setattr(market_data, "load_chain_snapshot", lambda *_args, **_kwargs: chain)
 
     def load(cob, dates, *, product):
         calls.append((cob, product))
         return surface
 
-    monkeypatch.setattr(history, "load_latest_calibrated_surface", load)
-    monkeypatch.setattr(history, "load_published_surface", lambda *_a, **_kw: pytest.fail("duplicate operational overlay queried"))
+    monkeypatch.setattr(market_data, "load_latest_calibrated_surface", load)
+    monkeypatch.setattr(market_data, "load_published_surface", lambda *_a, **_kw: pytest.fail("duplicate operational overlay queried"))
     event = {"commodity": commodity, "cob_date": "2026-08-10", "publication_id": "new-revision"}
-    options = [{"value": v} for v in history.EXPIRY_LEGEND_LAYER_ORDER]
+    options = [{"value": v} for v in history_charts.EXPIRY_LEGEND_LAYER_ORDER]
     result = history.render_history(
         snapshot_id, "delta", product, event, "2026-12-01", None, options, ["calibrated"],
     )
@@ -1753,7 +1755,7 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     assert result[0]["publication_id"] == "new-revision"
     assert result[0]["snapshot_id"] == snapshot_id
     assert result[3] == "2026-12-01"
-    controls = [c for child in result[14] for c in _walk(child)]
+    controls = [c for child in result[13] for c in _walk(child)]
     selector = next(c for c in controls if getattr(c, "id", None) == "brent-vol-history-expiry-layers")
     assert selector.value == ["calibrated"]
     figures = [c.figure for card in result[1] for c in _walk(card) if hasattr(c, "figure")]

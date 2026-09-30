@@ -323,3 +323,12 @@ def authorize(
         and hmac.compare_digest(identity.subject, resource_creator)
     ):
         raise AuthorizationError("A calibrator cannot approve or publish their own run.")
+
+
+def current_request_identity():
+    """Resolve identity from Flask context, preserving no-context policy."""
+    from flask import has_request_context, request
+
+    headers = request.headers if has_request_context() else {}
+    remote_addr = request.remote_addr if has_request_context() else None
+    return resolve_request_identity(headers, remote_addr=remote_addr)

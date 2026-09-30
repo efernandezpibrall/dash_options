@@ -2,12 +2,15 @@ import pandas as pd
 import pytest
 
 from pages import vol_surface
+import surface_data
 from pages.vol_surface import (
     _build_surface_expiry_options,
     _create_smile_evolution_figure,
-    _filter_surface_by_expiry_selection,
     _format_vol_period_header,
     _format_surface_expiry_selection_label,
+)
+from surface_data import (
+    _filter_surface_by_expiry_selection,
     _normalize_surface_data,
     _sort_grouped_period_columns,
     group_data_by_period,
@@ -220,7 +223,7 @@ def test_season_smile_averages_monthly_vols_by_delta_bucket():
 def test_atm_render_resolves_shared_snapshot_once(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        vol_surface,
+        surface_data,
         '_ensure_cached_data',
         lambda reference=None: calls.append(reference),
     )

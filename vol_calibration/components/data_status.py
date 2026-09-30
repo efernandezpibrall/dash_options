@@ -156,3 +156,14 @@ def format_data_status(
     tooltip_text = " | ".join(tooltip_lines)
 
     return badge, tooltip_text
+
+
+def calibration_blocked_status(message):
+    return dbc.Alert(
+        [
+            html.Strong("Calibration blocked: "),
+            str(message),
+        ],
+        color="danger",
+        className="mb-0 py-1 px-2",
+    )

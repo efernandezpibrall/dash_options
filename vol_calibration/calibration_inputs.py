@@ -270,3 +270,15 @@ def calibration_readiness(
         errors.append(error)
     reason = errors[0] if errors else f"No eligible {product} expiry is available."
     return False, reason
+
+
+def select_hybrid_expiry_inputs(market_data, expiry):
+    """Return the complete observed or extrapolated batch-calibration smile.
+
+    Retain the historical shared selector policy used by both TTF and JKM.
+    """
+    return select_expiry_observations(
+        market_data,
+        expiry,
+        include_extrapolated=True,
+    )

@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
+from dataframe_utils import date_string
+
 from copy import deepcopy
 
-import pandas as pd
-
-
-def _normalized_cob_date(value) -> str | None:
-    parsed = pd.to_datetime(value, errors="coerce")
-    if pd.isna(parsed):
-        return None
-    return parsed.date().isoformat()
 
 
 def persist_product_table(state, product: str, cob_date, table_data):
@@ -19,7 +13,7 @@ def persist_product_table(state, product: str, cob_date, table_data):
     if table_data is None:
         return next_state
     next_state[product.lower()] = {
-        "cob_date": _normalized_cob_date(cob_date),
+        "cob_date": date_string(cob_date),
         "table_data": deepcopy(table_data),
     }
     return next_state
@@ -31,7 +25,7 @@ def restore_product_table(state, product: str, cob_date):
     product_state = state.get(product.lower())
     if not isinstance(product_state, dict):
         return None
-    if product_state.get("cob_date") != _normalized_cob_date(cob_date):
+    if product_state.get("cob_date") != date_string(cob_date):
         return None
     table_data = product_state.get("table_data")
     return deepcopy(table_data) if isinstance(table_data, list) else None

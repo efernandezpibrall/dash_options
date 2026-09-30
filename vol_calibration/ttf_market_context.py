@@ -37,7 +37,7 @@ def load_ttf_trading_context(
     """Load the latest official TTF settlement available to a trading date."""
     requested = _date(trading_date, field="TTF trading date")
     if snapshot_loader is None:
-        from pages.vol_surface import get_operational_surface_snapshot
+        from surface_data import get_operational_surface_snapshot
 
         snapshot_loader = get_operational_surface_snapshot
 

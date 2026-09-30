@@ -7,6 +7,14 @@ Implements Framework Section 4.1:
 - Smile plot grid (3xN)
 - Three-way comparison modal for calibration
 """
+
+from vol_calibration.components.data_status import calibration_blocked_status
+
+from vol_calibration import auth as calibration_auth
+
+from vol_calibration import ttf_publication as publication_data
+
+from vol_calibration import batch_results, calibration_inputs
 from datetime import date
 import getpass
 import hashlib
@@ -21,10 +29,12 @@ from dash import html, dcc, dash_table, callback, clientside_callback, Input, Ou
 from dash.exceptions import PreventUpdate
 from flask import has_request_context, request
 
+from vol_calibration import ttf_batch
+from vol_calibration.batch_results import parse_table_data
+
 from vol_calibration.components.parameter_table import (
     create_parameter_table,
     format_params_for_table,
-    parse_table_data,
 )
 from vol_calibration.components.smile_grid import create_smile_grid, create_smile_grid_figure
 from vol_calibration.components.comparison_modal import (
@@ -38,7 +48,6 @@ from vol_calibration.data_cache import cached_workspace_callback
 from vol_calibration.components.batch_calibration_modal import (
     create_batch_calibration_confirm_modal,
     create_batch_calibration_progress_modal,
-    format_batch_result_row,
     create_batch_summary,
     create_batch_results_table,
 )
@@ -51,21 +60,16 @@ from vol_calibration.calibration_inputs import (
     calibration_eligibility_error,
     calibration_readiness,
     expiry_month,
-    select_expiry_observations,
 )
 from vol_calibration.model_version import (
     DEFAULT_CALIBRATION_MODEL_VERSION,
 )
 from vol_calibration.ttf_hybrid_surface import (
-    HybridFitNoCandidate,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
-    evaluate_ttf_hybrid_candidate,
-    fit_ttf_hybrid_candidate,
     hybrid_iv,
     operational_surface_frame as ttf_hybrid_operational_surface_frame,
 )
-from vol_calibration.observed_fit_pool import prefit_observed_expiries
 from vol_calibration.batch_job_runner import (
     background_jobs_enabled,
     build_payload as build_background_payload,
@@ -78,9 +82,6 @@ from vol_calibration.batch_job_runner import (
 from vol_calibration.jobs import JobStatus
 from vol_calibration.batch_checkpoints import (
     digest as checkpoint_digest,
-    expiry_input_fingerprint,
-    make_checkpoint,
-    verified_checkpoint,
 )
 from vol_calibration.operational_surface import (
     create_operational_surface_status,
@@ -122,9 +123,6 @@ from options.calibration_engine.io.loaders import (
     load_market_data_with_metadata,
 )
 from options.calibration_engine.config.defaults import get_defaults
-from options.calibration_engine.config.calibration_policies import (
-    TTF_WING_V2_OPTIMIZER_OPTIONS,
-)
 from options.calibration_engine.io.storage import (
     get_database_engine,
     load_latest_surface_from_db,
@@ -136,8 +134,6 @@ COMMODITY_LOWER = COMMODITY.lower()
 # Retained for shared legacy-save tests/callers; TTF publication uses its
 # separately scoped feature flag and never routes through this switch.
 writes_enabled = _legacy_writes_enabled
-TTF_EXTRAPOLATED_STARTS = 3
-TTF_EXTRAPOLATED_RETRY_STARTS = 9
 TTF_BATCH_STATE_VERSION = 2
 TTF_BATCH_CALIBRATION_TARGET = 'settlement_nodes'
 TTF_INTRADAY_CALIBRATION_TARGET = 'latest_published_smile'
@@ -147,50 +143,6 @@ TTF_ADVANCED_PARAMS = [
     'left_blend_width',
     'right_blend_width',
 ]
-
-
-def _select_ttf_expiry_inputs(market_data, expiry):
-    """Return a complete governed observed or extrapolated TTF smile."""
-    return select_expiry_observations(
-        market_data,
-        expiry,
-        include_extrapolated=True,
-    )
-
-
-def _calibration_basis(observations):
-    if observations is None or observations.empty:
-        raise ValueError("TTF calibration inputs are unavailable.")
-    values = {
-        value
-        for value in observations['calibration_basis']
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        if value
-    }
-    if values not in ({'observed'}, {'extrapolated'}):
-        raise ValueError("TTF calibration inputs have an invalid basis.")
-    return next(iter(values))
-
-
-def _model_params(values):
-    """Extract only Wing parameters from an editable table/store mapping."""
-    return {
-        name: float(values[name])
-        for name in PARAM_COLUMNS
-        if name in values and pd.notna(values[name])
-    }
-
-
-def _candidate_params(result):
-    """Return editable tail parameters plus the selected join widths."""
-    return {
-        **_model_params(result.get('params', {})),
-        'left_blend_width': float(result['left_blend_width']),
-        'right_blend_width': float(result['right_blend_width']),
-    }
 
 
 def _changed_ttf_tail_overrides(tail_row, initial_row):
@@ -222,80 +174,6 @@ def _changed_ttf_tail_overrides(tail_row, initial_row):
         ):
             overrides[name] = float(value)
     return overrides
-
-
-def _evaluate_existing_hybrid(observations, values):
-    left_width = pd.to_numeric(
-        pd.Series([values.get('left_blend_width')]), errors='coerce'
-    ).iloc[0]
-    right_width = pd.to_numeric(
-        pd.Series([values.get('right_blend_width')]), errors='coerce'
-    ).iloc[0]
-    if not np.isfinite(left_width) or not np.isfinite(right_width):
-        raise ValueError("No accepted PCHIP/Wing join is available for this row.")
-    return evaluate_ttf_hybrid_candidate(
-        observations,
-        _model_params(values),
-        left_blend_width=float(left_width),
-        right_blend_width=float(right_width),
-    )
-
-
-def _format_tv_rmse(value):
-    numeric = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
-    return f"{float(numeric):.6f}" if np.isfinite(numeric) else "Unavailable"
-
-
-def _expiry_store_key(value):
-    return str(expiry_month(value))
-
-
-def _apply_node_edits(market_data, node_store, expiry=None):
-    """Apply validated in-session node vols to a copy of the market frame."""
-    edited = market_data.copy()
-    payload = node_store or {}
-    target_key = _expiry_store_key(expiry) if expiry is not None else None
-    for key, values in payload.items():
-        if target_key is not None and key != target_key:
-            continue
-        if not isinstance(values, dict):
-            continue
-        entry = values
-        values = entry.get('nodes', entry)
-        if not isinstance(values, dict):
-            continue
-        periods = pd.to_datetime(edited['expiry'], errors='coerce').dt.to_period('M')
-        mask = periods.astype(str) == key
-        forward = pd.to_numeric(
-            pd.Series([entry.get('forward')]), errors='coerce'
-        ).iloc[0]
-        dte = pd.to_numeric(pd.Series([entry.get('dte')]), errors='coerce').iloc[0]
-        if np.isfinite(forward) and float(forward) > 0:
-            edited.loc[mask, 'forward'] = float(forward)
-        if np.isfinite(dte) and float(dte) > 0:
-            edited.loc[mask, 'dte'] = float(dte)
-        for delta_key, iv_value in values.items():
-            delta = pd.to_numeric(pd.Series([delta_key]), errors='coerce').iloc[0]
-            iv = pd.to_numeric(pd.Series([iv_value]), errors='coerce').iloc[0]
-            if not np.isfinite(delta) or not np.isfinite(iv) or iv <= 0:
-                continue
-            delta_values = pd.to_numeric(edited['delta'], errors='coerce')
-            edited.loc[mask & np.isclose(delta_values, delta, atol=1e-10), 'iv'] = iv
-        strikes = entry.get('strikes', {})
-        if isinstance(strikes, dict):
-            for delta_key, strike_value in strikes.items():
-                delta = pd.to_numeric(pd.Series([delta_key]), errors='coerce').iloc[0]
-                strike = pd.to_numeric(
-                    pd.Series([strike_value]), errors='coerce'
-                ).iloc[0]
-                if not np.isfinite(delta) or not np.isfinite(strike) or strike <= 0:
-                    continue
-                delta_values = pd.to_numeric(edited['delta'], errors='coerce')
-                edited.loc[
-                    mask & np.isclose(delta_values, delta, atol=1e-10),
-                    'strike',
-                ] = float(strike)
-    return edited
 
 
 def _published_node_values(publication_payload, observations):
@@ -339,26 +217,9 @@ def _published_node_values(publication_payload, observations):
     }
 
 
-def _settlement_ttf_observations(market_data, expiry):
-    """Return the selected COB nodes on the governed working forward and DTE."""
-    observations = _select_ttf_expiry_inputs(market_data, expiry).copy()
-    forward = float(observations['forward'].iloc[0])
-    dte = float(observations['dte'].iloc[0])
-    observations['strike'] = [
-        delta_node_to_strike(
-            forward,
-            dte / 365.25,
-            float(delta),
-            float(iv),
-        )
-        for delta, iv in zip(observations['delta'], observations['iv'])
-    ]
-    return observations
-
-
 def _base_ttf_observations(market_data, expiry, publication_payload=None):
     """Return the manual intraday base, preferring the latest published smile."""
-    observations = _settlement_ttf_observations(market_data, expiry)
+    observations = ttf_batch._settlement_ttf_observations(market_data, expiry)
     published = _published_node_values(publication_payload, observations)
     if published is not None:
         observations['iv'] = published['ivs']
@@ -376,22 +237,6 @@ def _base_ttf_observations(market_data, expiry, publication_payload=None):
     return observations
 
 
-def _published_expiry_result(publication_payload, observations):
-    """Return the saved tail parameters for one governed option expiry."""
-    target = pd.to_datetime(
-        observations['option_expiration_date'].iloc[0], errors='coerce'
-    )
-    if pd.isna(target):
-        return None
-    for item in (publication_payload or {}).get('expiry_results') or []:
-        item_expiry = pd.to_datetime(
-            item.get('option_expiration_date'), errors='coerce'
-        )
-        if not pd.isna(item_expiry) and item_expiry.date() == target.date():
-            return item
-    return None
-
-
 def _apply_published_parameters(table_rows, market_data, publication_payload):
     """Overlay the latest saved tail fit on the editable parameter rows."""
     updated = [dict(row) for row in (table_rows or [])]
@@ -404,10 +249,10 @@ def _apply_published_parameters(table_rows, market_data, publication_payload):
     }
     for expiry in sorted(market_data['expiry'].dropna().unique()):
         try:
-            observations = _select_ttf_expiry_inputs(market_data, expiry)
+            observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
         except ValueError:
             continue
-        saved = _published_expiry_result(publication_payload, observations)
+        saved = publication_data.published_expiry_result(publication_payload, observations)
         if not saved:
             continue
         target = rows_by_period.get(expiry_month(expiry))
@@ -430,27 +275,10 @@ def _apply_published_parameters(table_rows, market_data, publication_payload):
         validation = saved.get('validation') or {}
         if validation.get('is_valid', False):
             target['arb_status'] = 'Pass'
-        target['rmse'] = _format_tv_rmse(target.get('core_tv_rmse', 0.0))
+        target['rmse'] = batch_results.format_tv_rmse(target.get('core_tv_rmse', 0.0))
         target['calibration_method'] = TTF_HYBRID_METHOD
         target['calibration_policy_version'] = TTF_HYBRID_POLICY_VERSION
     return updated
-
-
-def _same_day_publication_id(publication_payload, trading_date):
-    """Return the optimistic-concurrency ID only for the selected working date."""
-    publication_id = (publication_payload or {}).get('publication_id')
-    publication_date = pd.to_datetime(
-        (publication_payload or {}).get('publication_date'), errors='coerce'
-    )
-    selected = pd.to_datetime(trading_date, errors='coerce')
-    if (
-        publication_id
-        and not pd.isna(publication_date)
-        and not pd.isna(selected)
-        and publication_date.date() == selected.date()
-    ):
-        return str(publication_id)
-    return None
 
 
 def _published_surface_for_market(publication_payload, market_data):
@@ -464,7 +292,7 @@ def _published_surface_for_market(publication_payload, market_data):
     ).dt.to_period('M')
     for expiry in sorted(market_data['expiry'].dropna().unique()):
         try:
-            observations = _select_ttf_expiry_inputs(market_data, expiry)
+            observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
         except ValueError:
             continue
         rows = published[published_periods == expiry_month(expiry)].copy()
@@ -603,13 +431,13 @@ def _ttf_node_editor_rows(
     publication_payload=None,
 ):
     """Return normalized editor rows from original nodes plus accepted edits."""
-    settlement_observations = _select_ttf_expiry_inputs(market_data, expiry)
+    settlement_observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
     observations = _base_ttf_observations(
         market_data,
         expiry,
         publication_payload,
     )
-    stored_entry = (node_store or {}).get(_expiry_store_key(expiry), {})
+    stored_entry = (node_store or {}).get(ttf_batch._expiry_store_key(expiry), {})
     stored = stored_entry.get('nodes', stored_entry)
     published = _published_node_values(publication_payload, settlement_observations)
     published_by_delta = {}
@@ -651,103 +479,6 @@ def _ttf_node_editor_rows(
             }
         )
     return rows
-
-
-def _accepted_calibration_result(result):
-    """Apply the finite-parameter and complete hybrid validation gate."""
-    if not isinstance(result, dict):
-        return False
-    rmse = pd.to_numeric(
-        pd.Series([result.get('tail_fit_tv_rmse')]), errors='coerce'
-    ).iloc[0]
-    params = result.get('params')
-    validation = result.get('validation')
-    if not np.isfinite(rmse) or not isinstance(params, dict):
-        return False
-    if not isinstance(validation, dict) or not validation.get('is_valid', False):
-        return False
-    try:
-        values = np.asarray([params[name] for name in PARAM_COLUMNS], dtype=float)
-    except (KeyError, TypeError, ValueError):
-        return False
-    return bool(np.all(np.isfinite(values)))
-
-
-def _run_ttf_candidate(
-    observations,
-    initial_params,
-    *,
-    basis,
-    selected_expiry=False,
-):
-    """Build one governed PCHIP-core / Wing-tail hybrid candidate."""
-    if basis not in {'observed', 'extrapolated'}:
-        raise ValueError(f"Unsupported TTF calibration basis: {basis}.")
-
-    attempts = []
-    first_error = None
-    starts = TTF_EXTRAPOLATED_STARTS if basis == 'extrapolated' else 1
-    try:
-        attempts.append(
-            fit_ttf_hybrid_candidate(
-                observations,
-                _model_params(initial_params),
-                n_starts=starts,
-                seed=int(TTF_WING_V2_OPTIMIZER_OPTIONS.get('seed', 42)),
-            )
-        )
-    except Exception as exc:
-        first_error = exc
-
-    accepted_first = [result for result in attempts if _accepted_calibration_result(result)]
-    # The PCHIP core is the operational smile inside the governed quote range;
-    # tail-fit TV RMSE is only a Wing approximation diagnostic.  Retry the
-    # extrapolated tail only when the first fit fails the complete hybrid gate,
-    # rather than repeatedly chasing a diagnostic threshold that does not
-    # improve the operational core.
-    needs_retry = basis == 'extrapolated' and not accepted_first
-    if needs_retry:
-        try:
-            resume = (
-                {
-                    'resume_start_count': starts,
-                    'resume_attempts': first_error.attempts,
-                }
-                if isinstance(first_error, HybridFitNoCandidate)
-                else {}
-            )
-            attempts.append(
-                fit_ttf_hybrid_candidate(
-                    observations,
-                    _model_params(initial_params),
-                    n_starts=TTF_EXTRAPOLATED_RETRY_STARTS,
-                    seed=int(TTF_WING_V2_OPTIMIZER_OPTIONS.get('seed', 42)),
-                    **resume,
-                )
-            )
-        except Exception:
-            pass
-
-    accepted = [result for result in attempts if _accepted_calibration_result(result)]
-    if not accepted:
-        if first_error is not None:
-            raise first_error
-        raise ValueError("TTF calibration produced no butterfly-valid candidate.")
-    return min(
-        accepted,
-        key=lambda result: float(result['tail_fit_tv_rmse']),
-    )
-
-
-def _calibration_blocked_status(message):
-    return dbc.Alert(
-        [
-            html.Strong("Calibration blocked: "),
-            str(message),
-        ],
-        color="danger",
-        className="mb-0 py-1 px-2",
-    )
 
 
 def get_default_date():
@@ -808,7 +539,7 @@ def create_header():
                     color="primary",
                     outline=True,
                     size="sm",
-                    title="Refit the selected Wing tail to its PCHIP core",
+                    title="Refit the selected Wing tail to its quote-preserving core",
                 ),
                 dbc.Button(
                     [html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"],
@@ -1032,8 +763,8 @@ def load_data(trade_date, reload_clicks):
 
     for expiry in sorted(expiries):
         try:
-            exp_data = _select_ttf_expiry_inputs(market_data, expiry)
-            basis = _calibration_basis(exp_data)
+            exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+            basis = ttf_batch._calibration_basis(exp_data)
         except ValueError:
             exp_data = pd.DataFrame()
             basis = None
@@ -1125,12 +856,6 @@ def load_data(trade_date, reload_clicks):
         readiness_message,
         serialize_ttf_trading_context(context),
     )
-
-
-def _current_identity():
-    headers = request.headers if has_request_context() else {}
-    remote_addr = request.remote_addr if has_request_context() else None
-    return resolve_request_identity(headers, remote_addr=remote_addr)
 
 
 def _manual_trade_table_rows(trades):
@@ -1337,7 +1062,7 @@ def prefill_ttf_working_forward(expiry, market_data_json):
         return None
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     try:
-        observations = _select_ttf_expiry_inputs(market_data, expiry)
+        observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
     except ValueError:
         return None
     return round(float(observations['forward'].iloc[0]), 4)
@@ -1413,9 +1138,9 @@ def manage_ttf_intraday_trades(
         )
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     try:
-        observations = _select_ttf_expiry_inputs(market_data, expiry)
+        observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
         option_expiration_date = observations['option_expiration_date'].iloc[0]
-        identity = _current_identity()
+        identity = calibration_auth.current_request_identity()
         entered_by = identity.subject or 'session-trader'
         trade = normalize_ttf_intraday_trade(
             {
@@ -1554,7 +1279,7 @@ def populate_ttf_node_editor(
     expiry = workspace_expiry or table_data[row_index].get('expiry')
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     try:
-        observations = _select_ttf_expiry_inputs(market_data, expiry)
+        observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
     except ValueError as exc:
         return [], str(exc)
     rows = _ttf_node_editor_rows(
@@ -1563,7 +1288,7 @@ def populate_ttf_node_editor(
         node_store,
         publication_payload,
     )
-    basis = _calibration_basis(observations).title()
+    basis = ttf_batch._calibration_basis(observations).title()
     return rows, f"{expiry} · {basis}"
 
 
@@ -1630,8 +1355,8 @@ def render_ttf_adjustment_basis(expiry, market_data_json, publication_payload):
         return 'No expiry selected'
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     try:
-        observations = _select_ttf_expiry_inputs(market_data, expiry)
-        basis = _calibration_basis(observations).title()
+        observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+        basis = ttf_batch._calibration_basis(observations).title()
         published = _published_node_values(publication_payload, observations)
     except ValueError as exc:
         return str(exc)
@@ -1707,7 +1432,7 @@ def build_ttf_intraday_candidate(
     if not expiry or not market_data_json or not table_data:
         raise PreventUpdate
     row_index = _find_table_row(table_data, expiry)
-    key = _expiry_store_key(expiry)
+    key = ttf_batch._expiry_store_key(expiry)
 
     if ctx.triggered_id == 'ttf-reset-adjustment-btn':
         updated_nodes = dict(node_store or {})
@@ -1797,23 +1522,23 @@ def build_ttf_intraday_candidate(
             )
             for delta, iv in zip(adjusted['delta'], adjusted['iv'])
         ]
-        basis = _calibration_basis(adjusted)
+        basis = ttf_batch._calibration_basis(adjusted)
         initial = table_data[row_index]
-        fitted = _run_ttf_candidate(
+        fitted = ttf_batch._run_ttf_candidate(
             adjusted,
             initial,
             basis=basis,
             selected_expiry=True,
         )
-        final_params = _candidate_params(fitted)
+        final_params = batch_results.candidate_params(fitted)
         tail_row = (tail_rows or [{}])[0]
         final_params.update(_changed_ttf_tail_overrides(tail_row, initial))
-        final_result = _evaluate_existing_hybrid(adjusted, final_params)
+        final_result = ttf_batch._evaluate_existing_hybrid(adjusted, final_params)
     except Exception as exc:
         return (
             no_update,
             no_update,
-            _calibration_blocked_status(str(exc)),
+            calibration_blocked_status(str(exc)),
             no_update,
             no_update,
             no_update,
@@ -1844,18 +1569,18 @@ def build_ttf_intraday_candidate(
 
     updated_table = [dict(row) for row in table_data]
     target_row = updated_table[row_index]
-    for name, value in _candidate_params(final_result).items():
+    for name, value in batch_results.candidate_params(final_result).items():
         target_row[name] = float(value)
     target_row['core_tv_rmse'] = 0.0
     target_row['tail_fit_tv_rmse'] = float(final_result['tail_fit_tv_rmse'])
     target_row['iv_rmse'] = float(final_result['iv_rmse'])
-    target_row['rmse'] = _format_tv_rmse(0.0)
+    target_row['rmse'] = batch_results.format_tv_rmse(0.0)
     target_row['arb_status'] = 'Pass'
     target_row['calibration_basis'] = basis.title()
     target_row['calibration_method'] = TTF_HYBRID_METHOD
     target_row['calibration_policy_version'] = TTF_HYBRID_POLICY_VERSION
 
-    identity = _current_identity()
+    identity = calibration_auth.current_request_identity()
     updated_adjustments = dict(adjustment_store or {})
     updated_adjustments[key] = {
         **diagnostics,
@@ -1932,7 +1657,7 @@ def validate_ttf_node_edits(
         if not np.isfinite(delta) or not np.isfinite(iv_pct) or iv_pct <= 0:
             return (
                 no_update,
-                _calibration_blocked_status(
+                calibration_blocked_status(
                     "All 11 node vols must be finite and strictly positive."
                 ),
                 no_update,
@@ -1941,17 +1666,17 @@ def validate_ttf_node_edits(
         values[f"{float(delta):.10f}"] = float(iv_pct) / 100.0
 
     candidate_store = dict(node_store or {})
-    store_key = _expiry_store_key(expiry)
+    store_key = ttf_batch._expiry_store_key(expiry)
     existing_entry = candidate_store.get(store_key, {})
     if isinstance(existing_entry, dict) and 'nodes' in existing_entry:
         candidate_store[store_key] = {**existing_entry, 'nodes': values}
     else:
         candidate_store[store_key] = values
-    edited_market = _apply_node_edits(market_data, candidate_store, expiry)
+    edited_market = ttf_batch._apply_node_edits(market_data, candidate_store, expiry)
     try:
-        observations = _select_ttf_expiry_inputs(edited_market, expiry)
-        basis = _calibration_basis(observations)
-        result = _run_ttf_candidate(
+        observations = calibration_inputs.select_hybrid_expiry_inputs(edited_market, expiry)
+        basis = ttf_batch._calibration_basis(observations)
+        result = ttf_batch._run_ttf_candidate(
             observations,
             table_data[row_index],
             basis=basis,
@@ -1960,19 +1685,19 @@ def validate_ttf_node_edits(
     except Exception as exc:
         return (
             no_update,
-            _calibration_blocked_status(str(exc)),
+            calibration_blocked_status(str(exc)),
             no_update,
             restored_rows,
         )
 
     updated_table_data = [dict(row) for row in table_data]
     session_row = updated_table_data[row_index]
-    for param_key, param_val in _candidate_params(result).items():
+    for param_key, param_val in batch_results.candidate_params(result).items():
         session_row[param_key] = float(param_val)
     session_row['core_tv_rmse'] = float(result['core_tv_rmse'])
     session_row['tail_fit_tv_rmse'] = float(result['tail_fit_tv_rmse'])
     session_row['iv_rmse'] = float(result['iv_rmse'])
-    session_row['rmse'] = _format_tv_rmse(result['core_tv_rmse'])
+    session_row['rmse'] = batch_results.format_tv_rmse(result['core_tv_rmse'])
     session_row['arb_status'] = 'Pass'
     session_row['calibration_basis'] = basis.title()
     session_row['calibration_method'] = TTF_HYBRID_METHOD
@@ -2019,7 +1744,7 @@ def render_hybrid_comparison_metrics(comparison_data):
     data = comparison_data or {}
 
     def tv_value(name):
-        return _format_tv_rmse(data.get(name))
+        return batch_results.format_tv_rmse(data.get(name))
 
     def iv_value(name):
         value = pd.to_numeric(
@@ -2072,7 +1797,17 @@ def update_smile_grid(
         if market_data_json
         else pd.DataFrame()
     )
-    market_data = _apply_node_edits(market_data, node_store)
+    # Use the same settlement strike coordinates as calibration before applying
+    # any explicit intraday node/forward overrides.
+    if not market_data.empty:
+        market_data = pd.concat(
+            [
+                ttf_batch._settlement_ttf_observations(market_data, expiry)
+                for expiry in sorted(market_data['expiry'].dropna().unique())
+            ],
+            ignore_index=True,
+        )
+    market_data = ttf_batch._apply_node_edits(market_data, node_store)
     params_df = parse_table_data(table_data or [])
     selected_row = selected_rows[0] if selected_rows else None
     selected_axis = x_axis or 'delta'
@@ -2157,7 +1892,7 @@ def handle_calibration(
         raise PreventUpdate
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    market_data = _apply_node_edits(market_data, node_store)
+    market_data = ttf_batch._apply_node_edits(market_data, node_store)
     params_df = parse_table_data(table_data)
 
     if triggered_id == f'{COMMODITY_LOWER}-calibrate-all-btn':
@@ -2168,8 +1903,8 @@ def handle_calibration(
 
         expiry = params_df.iloc[row_idx]['expiry']
         try:
-            exp_data = _select_ttf_expiry_inputs(market_data, expiry)
-            basis = _calibration_basis(exp_data)
+            exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
+            basis = ttf_batch._calibration_basis(exp_data)
             eligibility_error = calibration_eligibility_error(exp_data)
         except Exception as exc:
             eligibility_error = str(exc)
@@ -2186,24 +1921,24 @@ def handle_calibration(
                 "",
                 "",
                 "",
-                _calibration_blocked_status(eligibility_error),
+                calibration_blocked_status(eligibility_error),
                 no_update,
             )
 
         forward = float(exp_data['forward'].iloc[0])
 
         # Get current params
-        current_params = _model_params(params_df.iloc[row_idx].to_dict())
+        current_params = batch_results.model_params(params_df.iloc[row_idx].to_dict())
 
         # Run calibration
         try:
-            result = _run_ttf_candidate(
+            result = ttf_batch._run_ttf_candidate(
                 exp_data,
                 current_params,
                 basis=basis,
                 selected_expiry=True,
             )
-            candidate_params = _candidate_params(result)
+            candidate_params = batch_results.candidate_params(result)
             candidate_rmse = float(result['core_tv_rmse'])
         except Exception as exc:
             return (
@@ -2216,7 +1951,7 @@ def handle_calibration(
                 "",
                 "",
                 "",
-                _calibration_blocked_status(str(exc)),
+                calibration_blocked_status(str(exc)),
                 no_update,
             )
 
@@ -2225,7 +1960,7 @@ def handle_calibration(
         # instead of manufacturing a legacy IV RMSE.
         try:
             current_values = params_df.iloc[row_idx].to_dict()
-            current_result = _evaluate_existing_hybrid(exp_data, current_values)
+            current_result = ttf_batch._evaluate_existing_hybrid(exp_data, current_values)
             current_params = {
                 **current_params,
                 'left_blend_width': float(current_result['left_blend_width']),
@@ -2309,9 +2044,9 @@ def handle_calibration(
             f"€{forward:.2f}/MWh",
             comparison_table,
             fig,
-            _format_tv_rmse(current_rmse),
-            _format_tv_rmse(candidate_rmse),
-            _format_tv_rmse(current_rmse),
+            batch_results.format_tv_rmse(current_rmse),
+            batch_results.format_tv_rmse(candidate_rmse),
+            batch_results.format_tv_rmse(current_rmse),
             no_update,
             no_update,
         )
@@ -2335,11 +2070,11 @@ def handle_calibration(
         final_params = extract_final_params(comparison_table_data)
 
     # Get market data for this expiry
-    exp_data = _select_ttf_expiry_inputs(market_data, expiry)
+    exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
 
     # Rebuild and validate the complete hybrid after every Advanced tail edit.
     try:
-        final_result = _evaluate_existing_hybrid(exp_data, final_params)
+        final_result = ttf_batch._evaluate_existing_hybrid(exp_data, final_params)
         final_rmse = float(final_result['core_tv_rmse'])
     except Exception as exc:
         return (
@@ -2352,7 +2087,7 @@ def handle_calibration(
             "",
             "",
             "",
-            _calibration_blocked_status(str(exc)),
+            calibration_blocked_status(str(exc)),
             no_update,
         )
 
@@ -2388,7 +2123,7 @@ def handle_calibration(
     session_row['core_tv_rmse'] = final_rmse
     session_row['tail_fit_tv_rmse'] = float(final_result['tail_fit_tv_rmse'])
     session_row['iv_rmse'] = float(final_result['iv_rmse'])
-    session_row['rmse'] = _format_tv_rmse(final_rmse)
+    session_row['rmse'] = batch_results.format_tv_rmse(final_rmse)
     session_row['arb_status'] = 'Pass'
     session_row['calibration_method'] = TTF_HYBRID_METHOD
     session_row['calibration_policy_version'] = TTF_HYBRID_POLICY_VERSION
@@ -2422,9 +2157,9 @@ def handle_calibration(
         f"€{forward:.2f}/MWh",
         comparison_table,
         fig,
-        _format_tv_rmse(comparison_store.get('current_rmse')),
-        _format_tv_rmse(comparison_store.get('candidate_rmse')),
-        _format_tv_rmse(final_rmse),
+        batch_results.format_tv_rmse(comparison_store.get('current_rmse')),
+        batch_results.format_tv_rmse(comparison_store.get('candidate_rmse')),
+        batch_results.format_tv_rmse(final_rmse),
         no_update,
         updated_table_data,
     )
@@ -2441,7 +2176,7 @@ def _publication_candidate_for_expiry(
     calibration_target=TTF_INTRADAY_CALIBRATION_TARGET,
 ):
     if calibration_target == TTF_BATCH_CALIBRATION_TARGET:
-        base_observations = _settlement_ttf_observations(market_data, expiry)
+        base_observations = ttf_batch._settlement_ttf_observations(market_data, expiry)
     elif calibration_target == TTF_INTRADAY_CALIBRATION_TARGET:
         base_observations = _base_ttf_observations(
             market_data,
@@ -2450,9 +2185,9 @@ def _publication_candidate_for_expiry(
         )
     else:
         raise ValueError(f"Unsupported TTF calibration target: {calibration_target}")
-    edited_market = _apply_node_edits(base_observations, node_store, expiry)
-    observations = _select_ttf_expiry_inputs(edited_market, expiry)
-    result = _evaluate_existing_hybrid(observations, table_row)
+    edited_market = ttf_batch._apply_node_edits(base_observations, node_store, expiry)
+    observations = calibration_inputs.select_hybrid_expiry_inputs(edited_market, expiry)
+    result = ttf_batch._evaluate_existing_hybrid(observations, table_row)
     reproduced_ivs = hybrid_iv(
         result['core'].strike_nodes,
         result['core'],
@@ -2469,7 +2204,7 @@ def _publication_candidate_for_expiry(
         )
     surface = ttf_hybrid_operational_surface_frame(
         observations,
-        _model_params(table_row),
+        batch_results.model_params(table_row),
         left_blend_width=float(result['left_blend_width']),
         right_blend_width=float(result['right_blend_width']),
         n_points=401,
@@ -2479,14 +2214,14 @@ def _publication_candidate_for_expiry(
         observations['option_expiration_date'].iloc[0]
     )
     surface['working_forward'] = float(observations['forward'].iloc[0])
-    key = _expiry_store_key(expiry)
+    key = ttf_batch._expiry_store_key(expiry)
     diagnostics = dict((adjustment_store or {}).get(key) or {})
     return surface, {
         'option_expiration_date': pd.Timestamp(
             observations['option_expiration_date'].iloc[0]
         ).date().isoformat(),
         'parameters': {
-            **_model_params(table_row),
+            **batch_results.model_params(table_row),
             'left_blend_width': float(result['left_blend_width']),
             'right_blend_width': float(result['right_blend_width']),
         },
@@ -2497,6 +2232,8 @@ def _publication_candidate_for_expiry(
             'core_tv_rmse': float(result['core_tv_rmse']),
             'tail_fit_tv_rmse': float(result['tail_fit_tv_rmse']),
             'iv_rmse': float(result['iv_rmse']),
+            'core_interpolation': result['core'].core_interpolation,
+            'core_diagnostics': result['core'].core_diagnostics,
         },
         'validation': result['validation'],
         'weighted_rmse': float(result['tail_fit_tv_rmse']),
@@ -2840,11 +2577,11 @@ def export_to_excel(
             not market_data.empty
             and {'quote_class', 'source_name'}.issubset(market_data.columns)
         ):
-            observations = _select_ttf_expiry_inputs(
+            observations = calibration_inputs.select_hybrid_expiry_inputs(
                 market_data,
                 row.get('expiry'),
             )
-            basis = _calibration_basis(observations)
+            basis = ttf_batch._calibration_basis(observations)
             source_name = str(observations['source_name'].iloc[0])
         canonical_bases.append(basis)
         source_names.append(source_name)
@@ -2853,7 +2590,7 @@ def export_to_excel(
     params_df['calibration_method'] = TTF_HYBRID_METHOD
     params_df['calibration_policy_version'] = TTF_HYBRID_POLICY_VERSION
 
-    edited_market = _apply_node_edits(market_data, node_store)
+    edited_market = ttf_batch._apply_node_edits(market_data, node_store)
     operational_frames = []
     for row in params_df.to_dict('records'):
         left_width = pd.to_numeric(
@@ -2864,11 +2601,11 @@ def export_to_excel(
         ).iloc[0]
         if not np.isfinite(left_width) or not np.isfinite(right_width):
             continue
-        observations = _select_ttf_expiry_inputs(
+        observations = calibration_inputs.select_hybrid_expiry_inputs(
             edited_market,
             row.get('expiry'),
         )
-        validation = _evaluate_existing_hybrid(observations, row)
+        validation = ttf_batch._evaluate_existing_hybrid(observations, row)
         params_df.loc[
             params_df['expiry'] == row.get('expiry'),
             'tail_fit_tv_rmse',
@@ -2880,7 +2617,7 @@ def export_to_excel(
         operational_frames.append(
             ttf_hybrid_operational_surface_frame(
                 observations,
-                _model_params(row),
+                batch_results.model_params(row),
                 left_blend_width=float(left_width),
                 right_blend_width=float(right_width),
                 n_points=401,
@@ -2934,7 +2671,7 @@ def export_to_excel(
             candidate_nodes['node_state'] = [
                 (
                     'adjusted'
-                    if _expiry_store_key(expiry) in (node_store or {})
+                    if ttf_batch._expiry_store_key(expiry) in (node_store or {})
                     else 'base'
                 )
                 for expiry in candidate_nodes['expiry']
@@ -3168,281 +2905,6 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
     return is_open, no_update
 
 
-def _fit_ttf_observed_task(task):
-    key, observations, initial_params = task
-    try:
-        return key, (True, _run_ttf_candidate(
-            observations, initial_params, basis='observed',
-            selected_expiry=False,
-        ))
-    except Exception as exc:
-        return key, (False, str(exc))
-
-
-def calibrate_ttf_batch(
-    market_data, table_data, *, skip_good=False, node_store=None,
-    checkpoints=None, checkpoint_callback=None, cancellation_check=None,
-):
-    """Calibrate the settlement batch independently of the Dash callback."""
-    params_df = parse_table_data(table_data)
-
-    expiries = sorted(market_data['expiry'].dropna().unique())
-    checkpoints = checkpoints or {}
-    results = []
-    updated_table_data = table_data.copy()
-    row_index_by_expiry = {}
-    for row_index, row in enumerate(table_data):
-        try:
-            row_index_by_expiry[expiry_month(row.get('expiry'))] = row_index
-        except ValueError:
-            continue
-
-    observed_tasks = []
-    if not skip_good and len(expiries) >= 8:
-        for expiry in expiries:
-            if pd.Timestamp(expiry).strftime('%Y-%m-%d') in checkpoints:
-                continue
-            try:
-                row_index = row_index_by_expiry[expiry_month(expiry)]
-                observations = _settlement_ttf_observations(market_data, expiry)
-                observations = _apply_node_edits(observations, node_store, expiry)
-                observations = _select_ttf_expiry_inputs(observations, expiry)
-                if (
-                    _calibration_basis(observations) == 'observed'
-                    and not calibration_eligibility_error(observations)
-                ):
-                    initial = _model_params(params_df.iloc[row_index].to_dict())
-                    observed_tasks.append(
-                        (pd.Timestamp(expiry).isoformat(), observations, initial)
-                    )
-            except (KeyError, IndexError, ValueError, TypeError):
-                # The chronological loop reports the original per-expiry error.
-                continue
-    prefitted = prefit_observed_expiries(
-        observed_tasks,
-        _fit_ttf_observed_task,
-        environment_variable='TTF_OBSERVED_FIT_WORKERS',
-    )
-
-    success_count = 0
-    skip_count = 0
-    fail_count = 0
-    last_successful_params = None
-
-    for expiry in expiries:
-        expiry_str = pd.to_datetime(expiry).strftime('%Y-%m-%d')
-        row_index = row_index_by_expiry.get(expiry_month(expiry))
-        if cancellation_check is not None:
-            cancellation_check()
-        input_fingerprint = expiry_input_fingerprint(
-            market_data, expiry,
-            table_data[row_index] if row_index is not None else None,
-            policy=TTF_HYBRID_POLICY_VERSION,
-            skip_good=skip_good,
-            node_edits=(node_store or {}).get(str(expiry_month(expiry))),
-        )
-        dependency_fingerprint = checkpoint_digest(last_successful_params)
-        if expiry_str in checkpoints:
-            saved = verified_checkpoint(
-                checkpoints[expiry_str],
-                expiry=expiry_str,
-                input_fingerprint=input_fingerprint,
-                dependency_fingerprint=dependency_fingerprint,
-            )
-            updated_table_data[row_index] = dict(saved['updated_row'])
-            last_successful_params = dict(saved['warm_start_after'])
-            results.append(dict(saved['result_row']))
-            if saved['result_row']['status'] == 'Skipped':
-                skip_count += 1
-            else:
-                success_count += 1
-            continue
-        basis = None
-        old_rmse = None
-        result_count_before = len(results)
-
-        try:
-            if row_index is None or row_index >= len(params_df):
-                raise ValueError("No editable parameter row exists for this expiry.")
-            # Calibrate All establishes the selected settlement surface.  The
-            # previous publication remains the manual intraday adjustment base,
-            # but it must never replace the settlement IV target here.
-            exp_data = _settlement_ttf_observations(market_data, expiry)
-            exp_data = _apply_node_edits(exp_data, node_store, expiry)
-            exp_data = _select_ttf_expiry_inputs(exp_data, expiry)
-            basis = _calibration_basis(exp_data)
-            eligibility_error = calibration_eligibility_error(exp_data)
-            if eligibility_error:
-                raise ValueError(eligibility_error)
-            current_values = params_df.iloc[row_index].to_dict()
-            current_params = _model_params(current_values)
-
-            try:
-                current_result = _evaluate_existing_hybrid(
-                    exp_data,
-                    current_values,
-                )
-                old_rmse = float(current_result['core_tv_rmse'])
-            except Exception:
-                current_result = None
-                old_rmse = None
-
-            if (
-                basis == 'observed'
-                and skip_good
-                and old_rmse is not None
-                and current_result is not None
-                and current_result['validation']['is_valid']
-            ):
-                results.append(
-                    format_batch_result_row(
-                        expiry_str,
-                        'Skipped',
-                        old_rmse,
-                        old_rmse,
-                        basis=basis,
-                    )
-                )
-                # A governed, already-good observed row remains a valid warm
-                # start.  Without retaining it, Skip good fits could sever the
-                # sequential chain before the extrapolated tail.
-                updated_table_data[row_index]['left_blend_width'] = float(
-                    current_result['left_blend_width']
-                )
-                updated_table_data[row_index]['right_blend_width'] = float(
-                    current_result['right_blend_width']
-                )
-                updated_table_data[row_index]['core_tv_rmse'] = old_rmse
-                updated_table_data[row_index]['tail_fit_tv_rmse'] = float(
-                    current_result['tail_fit_tv_rmse']
-                )
-                updated_table_data[row_index]['iv_rmse'] = float(
-                    current_result['iv_rmse']
-                )
-                updated_table_data[row_index]['rmse'] = _format_tv_rmse(old_rmse)
-                updated_table_data[row_index]['arb_status'] = 'Pass'
-                updated_table_data[row_index]['calibration_basis'] = basis.title()
-                updated_table_data[row_index]['calibration_method'] = (
-                    TTF_HYBRID_METHOD
-                )
-                updated_table_data[row_index]['calibration_policy_version'] = (
-                    TTF_HYBRID_POLICY_VERSION
-                )
-                last_successful_params = current_params.copy()
-                skip_count += 1
-                continue
-
-            initial_params = (
-                last_successful_params
-                if basis == 'extrapolated'
-                else current_params
-            )
-            if initial_params is None:
-                raise ValueError(
-                    "No successful observed TTF calibration is available to "
-                    "seed the extrapolated tail."
-                )
-            prefitted_result = (
-                prefitted.get(pd.Timestamp(expiry).isoformat())
-                if basis == 'observed' else None
-            )
-            if prefitted_result is None:
-                result = _run_ttf_candidate(
-                    exp_data, initial_params, basis=basis,
-                    selected_expiry=False,
-                )
-            else:
-                succeeded, payload = prefitted_result
-                if not succeeded:
-                    raise ValueError(payload)
-                result = payload
-            new_params = _model_params(result['params'])
-            new_rmse = float(result['core_tv_rmse'])
-
-            for param_key, param_val in new_params.items():
-                if param_key in updated_table_data[row_index]:
-                    updated_table_data[row_index][param_key] = param_val
-            updated_table_data[row_index]['left_blend_width'] = float(
-                result['left_blend_width']
-            )
-            updated_table_data[row_index]['right_blend_width'] = float(
-                result['right_blend_width']
-            )
-            updated_table_data[row_index]['core_tv_rmse'] = new_rmse
-            updated_table_data[row_index]['tail_fit_tv_rmse'] = float(
-                result['tail_fit_tv_rmse']
-            )
-            updated_table_data[row_index]['iv_rmse'] = float(result['iv_rmse'])
-            updated_table_data[row_index]['rmse'] = _format_tv_rmse(new_rmse)
-            updated_table_data[row_index]['arb_status'] = 'Pass'
-            updated_table_data[row_index]['calibration_basis'] = basis.title()
-            updated_table_data[row_index]['calibration_method'] = TTF_HYBRID_METHOD
-            updated_table_data[row_index]['calibration_policy_version'] = (
-                TTF_HYBRID_POLICY_VERSION
-            )
-            last_successful_params = new_params.copy()
-
-            results.append(
-                {
-                    **format_batch_result_row(
-                    expiry_str,
-                    'Success',
-                    old_rmse,
-                    new_rmse,
-                    basis=basis,
-                    ),
-                    'old_rmse': _format_tv_rmse(old_rmse),
-                    'new_rmse': _format_tv_rmse(new_rmse),
-                    'improvement': '-',
-                    'core_tv_rmse': _format_tv_rmse(new_rmse),
-                    'tail_fit_tv_rmse': _format_tv_rmse(
-                        result['tail_fit_tv_rmse']
-                    ),
-                    'iv_rmse': f"{float(result['iv_rmse']) * 100:.2f}%",
-                    'blend_width': f"{float(result['left_blend_width']):.2f}",
-                    'min_g': f"{float(result['validation']['min_g']):.6f}",
-                    'method': TTF_HYBRID_METHOD,
-                }
-            )
-            success_count += 1
-        except Exception:
-            if basis is None and row_index is not None:
-                basis = str(
-                    table_data[row_index].get('calibration_basis', '')
-                ).strip().lower() or None
-            results.append(
-                format_batch_result_row(
-                    expiry_str,
-                    'Failed',
-                    old_rmse,
-                    None,
-                    basis=basis,
-                )
-            )
-            fail_count += 1
-        finally:
-            if checkpoint_callback is not None and len(results) > result_count_before:
-                checkpoint_callback(make_checkpoint(
-                    expiry=expiry_str,
-                    result_row=results[-1],
-                    updated_row=(
-                        updated_table_data[row_index]
-                        if row_index is not None else None
-                    ),
-                    warm_start_after=last_successful_params,
-                    input_fingerprint=input_fingerprint,
-                    dependency_fingerprint=dependency_fingerprint,
-                ))
-
-    return {
-        'results': results,
-        'table_data': updated_table_data,
-        'success_count': success_count,
-        'skip_count': skip_count,
-        'fail_count': fail_count,
-    }
-
-
 @callback(
     [Output(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
      Output(f'{COMMODITY_LOWER}-batch-progress-bar', 'value'),
@@ -3521,7 +2983,7 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
             )
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    outcome = calibrate_ttf_batch(
+    outcome = ttf_batch.calibrate_ttf_batch(
         market_data, table_data, skip_good=skip_good, node_store=node_store,
     )
     results = outcome['results']

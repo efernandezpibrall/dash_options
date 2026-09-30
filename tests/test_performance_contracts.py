@@ -2,7 +2,9 @@ import json
 
 import pandas as pd
 
-from pages import greeks, prices, vol_surface
+import market_data
+import surface_data
+from pages import greeks, prices
 
 
 def test_prices_query_transfers_only_the_five_cobs_the_chart_can_render(monkeypatch):
@@ -14,8 +16,8 @@ def test_prices_query_transfers_only_the_five_cobs_the_chart_can_render(monkeypa
         captured['params'] = kwargs['postgres_params']
         return pd.DataFrame(columns=['code', 'COB', 'currency', 'units', 'expiry', 'contract', 'value'])
 
-    monkeypatch.setattr(prices, 'read_with_fallback', fake_read)
-    result = prices.get_enverus_underlying_prices('20260601', '20260713')
+    monkeypatch.setattr(market_data, 'read_with_fallback', fake_read)
+    result = market_data.load_recent_underlying_prices('20260601', '20260713')
     assert result.empty
     assert 'LIMIT 5' in captured['trino']
     assert 'LIMIT 5' in captured['postgres']
@@ -67,8 +69,8 @@ def test_vol_surface_queries_only_columns_used_by_normalization():
         'value',
     }
 
-    assert set(vol_surface.SURFACE_SOURCE_COLUMNS) == expected_columns
-    for _, query in vol_surface.SURFACE_POSTGRES_SOURCES:
+    assert set(surface_data.SURFACE_SOURCE_COLUMNS) == expected_columns
+    for _, query in surface_data.SURFACE_POSTGRES_SOURCES:
         normalized_query = ' '.join(query.lower().split())
         assert 'select *' not in normalized_query
         assert all(column in normalized_query for column in expected_columns)

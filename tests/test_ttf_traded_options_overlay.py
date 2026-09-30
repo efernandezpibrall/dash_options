@@ -4,7 +4,7 @@ from io import BytesIO
 import pandas as pd
 import pytest
 
-from pages import vol_surface
+import surface_data
 from vol_calibration import ttf_traded_options
 from vol_calibration.components.smile_grid import create_smile_grid_figure
 from vol_calibration.pages import ttf
@@ -104,7 +104,7 @@ def _surface_rows():
             'value': [70.0, 84.0, 102.0],
         }
     )
-    return vol_surface._normalize_surface_data(raw)
+    return surface_data._normalize_surface_data(raw)
 
 
 def _surface_metadata():
@@ -112,7 +112,7 @@ def _surface_metadata():
         'product': 'TTF',
         'requested_cob': COB,
         'actual_cob': COB,
-        'source': vol_surface.SURFACE_POSTGRES_SOURCE_LABEL,
+        'source': surface_data.SURFACE_POSTGRES_SOURCE_LABEL,
     }
 
 

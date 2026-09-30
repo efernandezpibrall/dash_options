@@ -88,17 +88,6 @@ def parameter_columns_for_commodity(commodity: Optional[str] = None) -> List[Dic
             columns.insert(arb_index + offset, dict(column))
     return columns
 
-# Column definitions for DataTable
-COLUMN_DEFS = [
-    {
-        'id': col['id'],
-        'name': col['name'],
-        'type': col['type'],
-        'editable': col['editable'],
-        'format': {'specifier': '.4f'} if col['type'] == 'numeric' else None,
-    }
-    for col in PARAM_COLUMNS
-]
 
 
 def create_parameter_table(
@@ -490,36 +479,3 @@ def format_params_for_table(
     return params_df[
         ['expiry'] + [c['id'] for c in product_columns if c['id'] != 'expiry']
     ].to_dict('records')
-
-
-def parse_table_data(data: List[Dict]) -> pd.DataFrame:
-    """
-    Parse DataTable data back to DataFrame.
-
-    Parameters
-    ----------
-    data : list of dict
-        Data from dash_table.DataTable
-
-    Returns
-    -------
-    DataFrame
-        Parameters DataFrame
-    """
-    if not data:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(data)
-
-    # Parse RMSE from percentage string back to decimal
-    if 'rmse' in df.columns:
-        df['rmse'] = df['rmse'].apply(
-            lambda x: float(x.replace('%', '')) / 100 if isinstance(x, str) and '%' in x else x
-        )
-
-    if 'calibration_basis' in df.columns:
-        df['calibration_basis'] = (
-            df['calibration_basis'].astype(str).str.strip().str.lower()
-        )
-
-    return df

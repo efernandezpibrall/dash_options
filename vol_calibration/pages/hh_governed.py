@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from vol_calibration import auth as calibration_auth
+
+from vol_calibration import ttf_publication as publication_data
+
 from datetime import date, timedelta
 from io import BytesIO
 import hashlib
@@ -17,7 +21,6 @@ import plotly.graph_objects as go
 import scipy
 from dash import Input, Output, State, callback, dash_table, dcc, html, no_update
 from dash.exceptions import PreventUpdate
-from flask import has_request_context, request
 
 from snapshot_cache import publish_snapshot, resolve_snapshot
 from options import hh_lne_calibration as hh_calibration_module
@@ -35,7 +38,7 @@ from options.hh_lne_calibration import (
     resolve_hh_lne_snapshot_reference,
 )
 from runtime_config import get_database_engine
-from vol_calibration.auth import Permission, authorize, resolve_request_identity
+from vol_calibration.auth import Permission, authorize
 from vol_calibration.feature_flags import hh_publication_enabled
 from vol_calibration.ttf_publication import (
     input_manifest_fingerprint,
@@ -55,27 +58,6 @@ def get_default_date():
     while value.weekday() >= 5:
         value -= timedelta(days=1)
     return value
-
-
-def _identity():
-    headers = request.headers if has_request_context() else {}
-    remote_addr = request.remote_addr if has_request_context() else None
-    return resolve_request_identity(headers, remote_addr=remote_addr)
-
-
-def _same_day_publication_id(publication, cob_date):
-    if not publication or not publication.get("publication_id"):
-        return None
-    publication_date = pd.to_datetime(
-        publication.get("publication_date"), errors="coerce"
-    )
-    if pd.isna(publication_date):
-        return None
-    return (
-        publication.get("publication_id")
-        if publication_date.date() == pd.Timestamp(cob_date).date()
-        else None
-    )
 
 
 def _candidate_namespace(identity):
@@ -555,7 +537,7 @@ def calibrate_hh_governed(_clicks, trade_date, requested_snapshot_id, published)
                     ),
                 }
             )
-        identity = _identity()
+        identity = calibration_auth.current_request_identity()
         reference = publish_snapshot(
             _candidate_namespace(identity),
             f"{candidate['input_fingerprint']}:{candidate['code_fingerprint']}",
@@ -603,7 +585,7 @@ def render_hh_candidate_comparison(candidate, published, selected_expiry):
     if not candidate or not selected_expiry:
         return _empty_figure("Run complete calibration to build a candidate.")
     try:
-        frame = _resolve_candidate(candidate, _identity())["surface"]
+        frame = _resolve_candidate(candidate, calibration_auth.current_request_identity())["surface"]
     except Exception:
         return _empty_figure("HH candidate unavailable or expired; recalibrate.")
     month = pd.Period(selected_expiry, freq="M")
@@ -676,7 +658,7 @@ def publish_hh_governed(_clicks, candidate, current, confirmation):
             raise PermissionError("HH governed publication is disabled.")
         if "confirmed" not in (confirmation or []):
             raise PermissionError("Explicit publication confirmation is required.")
-        identity = _identity()
+        identity = calibration_auth.current_request_identity()
         authorize(identity, Permission.PUBLISH)
         rebuilt = _resolve_candidate(candidate, identity)
         if rebuilt["input_manifest"].get("base_publication_id") != (
@@ -697,7 +679,7 @@ def publish_hh_governed(_clicks, candidate, current, confirmation):
             identity=identity,
             created_by=str(identity.subject),
             base_publication_id=(current or {}).get("publication_id"),
-            expected_current_publication_id=_same_day_publication_id(
+            expected_current_publication_id=publication_data.same_day_publication_reference(
                 current, rebuilt["cob_date"]
             ),
             idempotency_key=candidate["idempotency_key"],
@@ -730,7 +712,7 @@ def export_hh_governed(_clicks, candidate, published, trade_date):
     if not _clicks or not candidate:
         raise PreventUpdate
     output = BytesIO()
-    candidate = _resolve_candidate(candidate, _identity())
+    candidate = _resolve_candidate(candidate, calibration_auth.current_request_identity())
     surface = candidate["surface"]
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         surface.to_excel(writer, sheet_name="Candidate Surface", index=False)

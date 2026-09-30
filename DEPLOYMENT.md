@@ -53,6 +53,34 @@ gunicorn -w 1 -k gthread --threads 8 -b 127.0.0.1:8071 --timeout 180 wsgi:server
 
 ## Configuration
 
+Shared read-only data access lives outside the Dash pages:
+
+- `surface_data.py` owns operational surface loading, COB resolution and shared snapshots.
+- `vol_trades_data.py` owns pinned market snapshots, product mappings and market preparation.
+- `ice_quote_data.py` owns quote and reply-audit reads and persisted quote normalization.
+- `market_data.py` owns forward history and recent underlying prices, with separate selection rules and caches.
+- `source_identity.py` owns the same source-configuration fingerprint for web caches and workers.
+
+The page registry in `index_options.py` defines route titles, navigation groups
+and validation layouts together. `/pricer_old` is removed without a redirect.
+Pricer composition lives in `pages/pricer.py`; `pricer_workspace/` separates
+state and pricing from controls, grids, charts and the four callback groups.
+Vol Trades and ICE Quotes retain their callbacks in the page modules and use
+`vol_trades_workspace/` for presentation and chart projections. These helper
+modules do not register callbacks.
+
+`workspace_cache.py` owns the shared LRU/TTL cache without importing Dash;
+`vol_calibration/data_cache.py` adapts it to calibration callback reloads.
+Calibration input selection and result helpers are shared by web and worker
+callers while their distinct publication-ID and date-error policies remain
+explicit in their respective helpers.
+
+TTF and JKM batch calculations live in `vol_calibration/ttf_batch.py` and
+`vol_calibration/jkm_batch.py`; pages and detached workers call those same
+implementations. Ship these modules with the web and worker code. Calculation
+fingerprints include the service files, so earlier-code checkpoints remain
+incompatible with a changed calculation build rather than being silently reused.
+
 Set database and Trino values through environment variables or point
 `OPTIONS_CONFIG_PATH` at a mounted configuration file. Do not put credentials
 in the image.

@@ -7,6 +7,7 @@ import pytest
 from dash.exceptions import PreventUpdate
 import numpy as np
 
+from vol_calibration import jkm_batch, ttf_batch
 from vol_calibration.components import comparison_modal, smile_grid
 from vol_calibration.components.parameter_table import create_parameter_table
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
@@ -170,7 +171,7 @@ def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch)
         raising=False,
     )
     monkeypatch.setattr(
-        ttf,
+        ttf_batch,
         "fit_ttf_hybrid_candidate",
         lambda observations, initial_params, **kwargs: {
             "params": initial_params,
@@ -240,7 +241,7 @@ def test_jkm_batch_auto_save_option_never_uses_legacy_parameter_store(monkeypatc
         lambda: pytest.fail("legacy database save must not be requested"),
     )
     monkeypatch.setattr(
-        jkm,
+        jkm_batch,
         "calibrate_jkm_batch",
         lambda market, table, **kwargs: {
             "results": [{"expiry": "2026-09-01", "status": "Success"}],

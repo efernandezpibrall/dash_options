@@ -9,6 +9,7 @@ import pytest
 
 from dash import no_update
 from snapshot_cache import SnapshotStore
+from vol_calibration import auth as calibration_auth
 from vol_calibration.pages import hh_governed as page
 
 
@@ -63,7 +64,7 @@ def test_hh_publish_reuses_server_candidate_and_rejects_tampered_browser_state(
     def verify_source(_engine, _candidate):
         calls["source"] += 1
 
-    monkeypatch.setattr(page, "_identity", lambda: identity)
+    monkeypatch.setattr(calibration_auth, "current_request_identity", lambda: identity)
     monkeypatch.setattr(page, "build_hh_lne_candidate_surface", build)
     monkeypatch.setattr(page, "get_database_engine", lambda: object())
     monkeypatch.setattr(page, "publish_snapshot", store.publish)

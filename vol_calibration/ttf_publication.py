@@ -21,6 +21,7 @@ from sqlalchemy import inspect, text
 from vol_calibration.auth import Identity, Permission, authorize
 from vol_calibration.calibration_inputs import TTF_CALL_DELTA_NODES
 from vol_calibration.ttf_hybrid_surface import (
+    GAS_HYBRID_METHOD,
     GAS_HYBRID_POLICY_VERSIONS,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
@@ -35,7 +36,7 @@ RUN_TABLE = "at_lng.vol_calibration_runs"
 RESULT_TABLE = "at_lng.vol_calibration_expiry_results"
 AUDIT_TABLE = "at_lng.vol_calibration_audit_events"
 RUN_TRADE_TABLE = "at_lng.vol_calibration_run_trade_inputs"
-PUBLICATION_ENGINE_VERSION = "ttf-intraday-pchip-wing-v1"
+PUBLICATION_ENGINE_VERSION = "ttf-quote-preserving-core-wing-v2"
 JKM_HYBRID_POLICY_VERSION = "jkm_pchip_core_wing_tail_hybrid_v1"
 _HYBRID_PUBLICATION_POLICIES = {
     "BRENT": {
@@ -49,12 +50,12 @@ _HYBRID_PUBLICATION_POLICIES = {
         "engine_version": PUBLICATION_ENGINE_VERSION,
     },
     "JKM": {
-        "method": TTF_HYBRID_METHOD,
+        "method": GAS_HYBRID_METHOD,
         "policy_version": GAS_HYBRID_POLICY_VERSIONS["JKM"],
         "engine_version": "jkm-pchip-wing-v1",
     },
     "NBP": {
-        "method": TTF_HYBRID_METHOD,
+        "method": GAS_HYBRID_METHOD,
         "policy_version": GAS_HYBRID_POLICY_VERSIONS["NBP"],
         "engine_version": "nbp-pchip-wing-v1",
     },
@@ -1167,4 +1168,57 @@ def publish_hybrid_surface(
         expiry_results,
         commodity=commodity,
         **kwargs,
+    )
+
+
+def published_expiry_result(publication_payload, observations):
+    """Return the saved tail parameters for one governed option expiry."""
+    target = pd.to_datetime(
+        observations['option_expiration_date'].iloc[0], errors='coerce'
+    )
+    if pd.isna(target):
+        return None
+    for item in (publication_payload or {}).get('expiry_results') or []:
+        item_expiry = pd.to_datetime(
+            item.get('option_expiration_date'), errors='coerce'
+        )
+        if not pd.isna(item_expiry) and item_expiry.date() == target.date():
+            return item
+    return None
+
+
+def same_day_publication_id(publication_payload, trading_date):
+    """Return the optimistic-concurrency ID only for the selected working date."""
+    publication_id = (publication_payload or {}).get('publication_id')
+    publication_date = pd.to_datetime(
+        (publication_payload or {}).get('publication_date'), errors='coerce'
+    )
+    selected = pd.to_datetime(trading_date, errors='coerce')
+    if (
+        publication_id
+        and not pd.isna(publication_date)
+        and not pd.isna(selected)
+        and publication_date.date() == selected.date()
+    ):
+        return str(publication_id)
+    return None
+
+
+def same_day_publication_reference(publication, cob_date):
+    """Match a valid working COB while retaining the publication ID type.
+
+    HH callers validate the selected COB before this lookup. Unlike the
+    tolerant text-ID helper, an invalid working date remains an error.
+    """
+    if not publication or not publication.get("publication_id"):
+        return None
+    publication_date = pd.to_datetime(
+        publication.get("publication_date"), errors="coerce"
+    )
+    if pd.isna(publication_date):
+        return None
+    return (
+        publication.get("publication_id")
+        if publication_date.date() == pd.Timestamp(cob_date).date()
+        else None
     )

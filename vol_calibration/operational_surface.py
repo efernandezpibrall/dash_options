@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataframe_utils import date_string, display_date
+
 from io import StringIO
 from typing import Callable
 
@@ -51,7 +53,7 @@ def load_operational_surface_payload(
     refresh: bool = False,
 ) -> dict:
     """Resolve and serialize the shared ``/vol_surface`` snapshot contract."""
-    from pages.vol_surface import get_operational_surface_snapshot
+    from surface_data import get_operational_surface_snapshot
 
     snapshot = get_operational_surface_snapshot(
         product,
@@ -65,8 +67,8 @@ def load_operational_surface_payload(
     return {
         'data': data.to_json(date_format='iso', orient='split'),
         'product': snapshot.get('product', product),
-        'requested_cob': _date_string(snapshot.get('requested_cob')),
-        'actual_cob': _date_string(snapshot.get('actual_cob')),
+        'requested_cob': date_string(snapshot.get('requested_cob')),
+        'actual_cob': date_string(snapshot.get('actual_cob')),
         'date_fallback_used': bool(snapshot.get('date_fallback_used', False)),
         'source': snapshot.get('source') or 'unknown',
         'source_fallback_used': bool(
@@ -97,8 +99,8 @@ def operational_surface_status_text(
 ) -> tuple[str, str]:
     """Return status copy and Bootstrap color for the surface reference."""
     payload = payload or {}
-    requested = _display_date(payload.get('requested_cob'))
-    actual = _display_date(payload.get('actual_cob'))
+    requested = display_date(payload.get('requested_cob'))
+    actual = display_date(payload.get('actual_cob'))
     source = payload.get('source') or 'unknown'
     error = payload.get('error')
     row_count = int(payload.get('row_count') or 0)
@@ -185,17 +187,3 @@ def register_operational_surface_callback(
         return render_operational_surface_status(payload, x_axis or 'delta')
 
     return update_operational_surface, update_operational_surface_status
-
-
-def _date_string(value):
-    parsed = pd.to_datetime(value, errors='coerce')
-    if pd.isna(parsed):
-        return None
-    return parsed.date().isoformat()
-
-
-def _display_date(value):
-    parsed = pd.to_datetime(value, errors='coerce')
-    if pd.isna(parsed):
-        return 'unknown'
-    return parsed.strftime('%d-%b-%Y')

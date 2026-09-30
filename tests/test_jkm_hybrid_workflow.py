@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+
 from datetime import date
 
 import pandas as pd
 import pytest
 
+from vol_calibration import calibration_inputs
+from vol_calibration import jkm_batch
 from options.calibration_engine.config.defaults import get_defaults
 from vol_calibration.pages import jkm
 from vol_calibration.ttf_publication import normalize_ttf_publication_surface
@@ -83,9 +86,9 @@ def test_jkm_selected_start_policy_uses_three_then_tail_retry(monkeypatch):
         calls.append(n_starts)
         return _candidate(initial, valid=n_starts == 9)
 
-    monkeypatch.setattr(jkm, "fit_jkm_hybrid_candidate", fake_fit)
-    result = jkm._run_jkm_candidate(
-        jkm._select_jkm_expiry_inputs(observations, "Oct-26"),
+    monkeypatch.setattr(jkm_batch, "fit_jkm_hybrid_candidate", fake_fit)
+    result = jkm_batch._run_jkm_candidate(
+        calibration_inputs.select_hybrid_expiry_inputs(observations, "Oct-26"),
         get_defaults("JKM"),
         basis="extrapolated",
     )
@@ -114,14 +117,14 @@ def test_jkm_batch_fits_observed_independently_then_chains_tail(monkeypatch):
         ]
         return _candidate(get_defaults("JKM"), vr=target)
 
-    monkeypatch.setattr(jkm, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", fake_run)
     monkeypatch.setattr(
-        jkm,
+        jkm_batch,
         "_evaluate_existing_hybrid",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("uncalibrated")),
     )
 
-    result = jkm.calibrate_jkm_batch(market, table)
+    result = jkm_batch.calibrate_jkm_batch(market, table)
 
     assert seeds == [
         ("observed", 0.21),
@@ -155,20 +158,20 @@ def test_jkm_batch_resumes_verified_prefix_without_refitting(monkeypatch):
             get_defaults("JKM"), vr=0.14 + float(observations["forward"].iloc[0]) / 100
         )
 
-    monkeypatch.setattr(jkm, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", fake_run)
     monkeypatch.setattr(
-        jkm, "_evaluate_existing_hybrid",
+        jkm_batch, "_evaluate_existing_hybrid",
         lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
     )
     saved = {}
-    full = jkm.calibrate_jkm_batch(
+    full = jkm_batch.calibrate_jkm_batch(
         market, table, checkpoint_callback=lambda row: saved.update({row["expiry"]: row}),
     )
     assert full["fail_count"] == 0
     assert len(calls) == 3
 
     calls.clear()
-    resumed = jkm.calibrate_jkm_batch(
+    resumed = jkm_batch.calibrate_jkm_batch(
         market, table, checkpoints={key: saved[key] for key in list(saved)[:2]},
     )
     assert resumed == full
@@ -178,7 +181,7 @@ def test_jkm_batch_resumes_verified_prefix_without_refitting(monkeypatch):
     edited = [dict(row) for row in table]
     edited[0]["vr"] += 0.01
     with pytest.raises(StaleCalibrationCheckpoint, match="2026-09-01"):
-        jkm.calibrate_jkm_batch(market, edited, checkpoints=saved)
+        jkm_batch.calibrate_jkm_batch(market, edited, checkpoints=saved)
 
 
 def test_jkm_interrupted_expiry_never_checkpoints_previous_result_as_current(monkeypatch):
@@ -194,13 +197,13 @@ def test_jkm_interrupted_expiry_never_checkpoints_previous_result_as_current(mon
             raise KeyboardInterrupt
         return _candidate(get_defaults("JKM"), vr=0.31)
 
-    monkeypatch.setattr(jkm, "_run_jkm_candidate", interrupt_on_second)
+    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", interrupt_on_second)
     monkeypatch.setattr(
-        jkm, "_evaluate_existing_hybrid",
+        jkm_batch, "_evaluate_existing_hybrid",
         lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
     )
     with pytest.raises(KeyboardInterrupt):
-        jkm.calibrate_jkm_batch(
+        jkm_batch.calibrate_jkm_batch(
             market, _table(expiries), checkpoint_callback=saved.append,
         )
     assert [row["expiry"] for row in saved] == ["2026-09-01"]
@@ -228,14 +231,14 @@ def test_jkm_batch_consumes_parallel_observed_results_in_expiry_order(monkeypatc
         assert basis == "extrapolated"
         return _candidate(get_defaults("JKM"), vr=0.40)
 
-    monkeypatch.setattr(jkm, "prefit_observed_expiries", fake_prefit)
-    monkeypatch.setattr(jkm, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(jkm_batch, "prefit_observed_expiries", fake_prefit)
+    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", fake_run)
     monkeypatch.setattr(
-        jkm, "_evaluate_existing_hybrid",
+        jkm_batch, "_evaluate_existing_hybrid",
         lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
     )
 
-    result = jkm.calibrate_jkm_batch(market, table)
+    result = jkm_batch.calibrate_jkm_batch(market, table)
 
     assert result["success_count"] == 9
     assert result["fail_count"] == 0
@@ -249,7 +252,7 @@ def test_jkm_batch_state_rejects_table_or_market_changes():
     expiries = [("2026-09-01", "observed")]
     table = _table(expiries)
     candidate = _candidate(get_defaults("JKM"))
-    jkm._update_hybrid_row(table[0], candidate, "observed")
+    jkm_batch._update_hybrid_row(table[0], candidate, "observed")
     results = [{"expiry": "2026-09-01", "status": "Success"}]
     state = jkm._build_batch_state(
         "2026-08-21",

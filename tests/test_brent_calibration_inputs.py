@@ -5,7 +5,7 @@ import pandas as pd
 
 from vol_calibration.data_cache import clear_workspace_load_cache
 from vol_calibration.pages import brent
-from pages import brent_vol_history
+import vol_trades_data
 
 
 def test_brent_workspace_uses_pinned_vol_trades_snapshot(monkeypatch):
@@ -41,9 +41,9 @@ def test_brent_workspace_uses_pinned_vol_trades_snapshot(monkeypatch):
         calls.append((snapshot_id, kwargs))
         return pd.DataFrame()
 
-    monkeypatch.setattr(brent_vol_history, "load_chain_snapshot", fake_snapshot)
+    monkeypatch.setattr(vol_trades_data, "load_chain_snapshot", fake_snapshot)
     monkeypatch.setattr(
-        brent_vol_history,
+        vol_trades_data,
         "prepare_market_observations",
         lambda chain, *, product: market_data,
     )

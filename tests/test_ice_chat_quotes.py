@@ -6,7 +6,9 @@ from dash import dcc, html
 from dash._no_update import NoUpdate
 
 import index_options
+from vol_trades_workspace import quote_charts, quote_components
 from pages import ice_chat_quotes as quotes
+import ice_quote_data as quote_data
 
 
 def _walk(component):
@@ -98,10 +100,26 @@ def _rows():
                 "outbound_acknowledged_at": "2026-08-17T08:00:03Z",
                 "outbound_error_code": None,
                 "outbound_error_message": None,
+                # Persisted net-edge assessment is the authoritative signal.
+                "edge_assessment": {
+                    "tick_size": 0.01,
+                    "check_2_net_edge": {
+                        "net": {"SELL": 0.10, "BUY": -0.40},
+                        "gross": {"SELL": 0.10, "BUY": -0.40},
+                    },
+                    "check_3_confidence": {
+                        "best_side": "SELL",
+                        "status": "qualified",
+                        "qualified": True,
+                        "reasons": [],
+                        "quote_timestamp": "2026-08-17T08:00:00Z",
+                        "max_quote_age_seconds": 3600,
+                    },
+                },
             }
         ]
     )
-    return quotes._serialize_frame(frame)
+    return quote_data._serialize_frame(frame)
 
 
 def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_grid():
@@ -118,7 +136,11 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert "Executable option edge against our saved volatility marks" not in {
         item for item in items if isinstance(item, str)
     }
-    assert not any(isinstance(item, html.Details) for item in items)
+    details = [item for item in items if isinstance(item, html.Details)]
+    assert len(details) == 1
+    assert details[0].id == "ice-chat-reply-audit-details"
+    assert details[0].open is False
+    assert details[0].children[0].children == "Edge assessment & reply delivery"
     assert "More filters" not in {
         item for item in items if isinstance(item, str)
     }
@@ -130,7 +152,7 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert "Current signal" not in {
         item for item in items if isinstance(item, str)
     }
-    assert "Broker quotes executable edge" in {
+    assert "Broker quotes vs our mark" in {
         item for item in items if isinstance(item, str)
     }
     assert "Executable edge" not in {
@@ -176,7 +198,7 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
         "product_label",
         "contract_label",
         "option_label",
-        "strike",
+        "strike_label",
         "observed_display",
         "price_unit_label",
         "bid_size",
@@ -184,11 +206,11 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
         "offer",
         "offer_size",
     ]
-    by_field = _columns_by_field(quotes.QUOTE_COLUMN_DEFS)
+    by_field = _columns_by_field(quote_components.QUOTE_COLUMN_DEFS)
     assert by_field["product_label"]["pinned"] == "left"
     assert by_field["contract_label"]["pinned"] == "left"
     assert by_field["option_label"]["pinned"] == "left"
-    assert by_field["strike"]["pinned"] == "left"
+    assert by_field["strike_label"]["pinned"] == "left"
     assert all(
         "pinned" not in by_field[field]
         for field in ("observed_display", "price_unit_label")
@@ -197,26 +219,27 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert fields.index("offer") < fields.index("offer_size") < fields.index("single_price")
     assert fields.index("offer") < fields.index("bid_iv_pct")
     assert "surface_business_day_age" not in fields
-    assert {"source_channel", "processing_status", "display_error"}.isdisjoint(fields)
+    assert {"source_channel", "processing_status"}.isdisjoint(fields)
+    assert "display_error" in fields
     market = next(
-        definition for definition in quotes.QUOTE_COLUMN_DEFS
+        definition for definition in quote_components.QUOTE_COLUMN_DEFS
         if definition.get("headerName") == "Market"
     )
-    assert all("USD/bbl" not in definition.get("headerName", "") for definition in quotes.QUOTE_COLUMN_DEFS)
+    assert all("USD/bbl" not in definition.get("headerName", "") for definition in quote_components.QUOTE_COLUMN_DEFS)
     assert by_field["product_label"]["width"] == 72
-    assert by_field["contract_label"]["width"] == 66
+    assert by_field["contract_label"]["width"] == 94
     assert by_field["observed_display"]["width"] == 112
     assert by_field["sender_handle"]["width"] == 110
     assert by_field["product_label"].get("pinned") == "left"
     assert by_field["contract_label"].get("pinned") == "left"
     assert by_field["option_label"].get("pinned") == "left"
-    assert by_field["strike"].get("pinned") == "left"
+    assert by_field["strike_label"].get("pinned") == "left"
     assert all(
         by_field[field].get("width")
         for field in ("bid", "bid_size", "offer", "offer_size", "single_price", "single_size")
     )
-    assert {"product_label", "contract_label", "option_label", "strike", "price_unit_label", "signal_price_edge"}.issubset(fields)
-    assert [definition["headerName"] for definition in quotes.QUOTE_COLUMN_DEFS] == [
+    assert {"product_label", "contract_label", "option_label", "strike_label", "price_unit_label", "signal_price_edge"}.issubset(fields)
+    assert [definition["headerName"] for definition in quote_components.QUOTE_COLUMN_DEFS] == [
         "Instrument",
         "Context",
         "Market",
@@ -233,15 +256,17 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
         "Offer qty",
         "Single",
         "Qty",
+        "Indication*",
     ]
     assert "ice-chat-row-blocked" in grid.dashGridOptions["rowClassRules"]
     signal_group = next(
-        definition for definition in quotes.QUOTE_COLUMN_DEFS
+        definition for definition in quote_components.QUOTE_COLUMN_DEFS
         if definition.get("headerName") == "Edge"
     )
     assert [definition["headerName"] for definition in signal_group["children"]] == [
         "Action",
-        "Margin",
+        "Gross",
+        "Net",
         "Vol pts",
     ]
     assert "signal_edge_ticks" not in fields
@@ -283,10 +308,10 @@ def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
     assert rows[0]["signal_edge_ticks"] == 10.0
     assert rows[0]["signal_price_edge"] == 0.1
     assert rows[0]["signal_iv_edge_pp"] == 1.0
-    frame = quotes.filter_quote_rows(rows, positive_only=True)
+    frame = quote_charts.filter_quote_rows(rows, positive_only=True)
     assert len(frame) == 1
     assert frame.iloc[0]["best_action"] == "SELL"
-    figure = quotes.build_all_quotes_figure(frame)
+    figure = quote_charts.build_all_quotes_figure(frame)
     names = [trace.name for trace in figure.data]
     assert "Sell to bid" in names
     assert "Buy at offer" in names
@@ -322,19 +347,23 @@ def test_explicit_quote_convention_controls_single_quote_ticks():
     frame.loc[0, ["bid", "offer", "bid_edge_ticks", "offer_edge_ticks"]] = None
     frame.loc[0, ["single_price", "single_deviation"]] = [1.25, 0.015]
     frame.loc[0, "best_action"] = None
-    row = quotes._serialize_frame(frame)[0]
+    # This historical single indication has no persisted executable assessment.
+    frame.at[0, "edge_assessment"] = None
+    row = quote_data._serialize_frame(frame)[0]
     assert row["product_label"] == "TTF Gas"
     assert row["price_unit_label"] == "EUR/MWh"
     assert row["price_decimals"] == 3
     assert row["signal_label"] == "SINGLE"
     assert row["single_edge_ticks"] == 3.0
-    assert row["signal_price_edge"] == 0.015
+    assert row["signal_price_edge"] is None
+    assert row["signal_gross_edge"] == 0.015
+    assert row["edge_confidence"] is None
 
 
 def test_database_uuid_row_ids_are_serialized_for_dash_json():
     frame = pd.DataFrame(_rows())
     frame["event_id"] = [uuid.UUID("00000000-0000-4000-8000-000000000001")]
-    assert quotes._serialize_frame(frame)[0]["event_id"] == (
+    assert quote_data._serialize_frame(frame)[0]["event_id"] == (
         "00000000-0000-4000-8000-000000000001"
     )
 
@@ -349,6 +378,8 @@ def test_filter_options_are_sorted_deduplicated_and_keep_display_labels():
         contract_month="2026-12-01",
         contract_label="Dec-26",
         strike=95.0,
+        strike_filter_key="95",
+        strike_label="95",
     )
 
     options = quotes.update_quote_filter_options(
@@ -356,12 +387,12 @@ def test_filter_options_are_sorted_deduplicated_and_keep_display_labels():
     )
 
     assert options[0] == [
-        {"value": "2026-10-01", "label": "Oct-26"},
-        {"value": "2026-12-01", "label": "Dec-26"},
+        {"value": "Dec-26", "label": "Dec-26"},
+        {"value": "Oct-26", "label": "Oct-26"},
     ]
     assert options[2] == [
-        {"value": 90.0, "label": 90.0},
-        {"value": 95.0, "label": 95.0},
+        {"value": "90", "label": "90"},
+        {"value": "95", "label": "95"},
     ]
 
 
@@ -371,10 +402,12 @@ def test_section_follows_selected_product_without_showing_brent_rows():
         "rows": [row], "error": None,
         "loaded_at": "2026-08-17T08:00:00+00:00", "truncated": False,
     }
-    for product, label in quotes.PRODUCT_LABELS.items():
+    for product, label in quote_data.PRODUCT_LABELS.items():
         title, *reset = quotes.select_quote_product(product)
         assert title == f"ICE quotes · {label}"
-        assert reset == [None, None, None, None, None, None, []]
+        edge_label = "Fresh qualified edge" if product == "TFO" else "Positive price edge"
+        assert reset == [None, None, None, None, None, None, [],
+                         [{"label": edge_label, "value": "positive"}]]
         result = quotes.render_quote_dashboard(
             snapshot, {}, None, None, None, None, None, None,
             [], [row], product,
@@ -384,9 +417,13 @@ def test_section_follows_selected_product_without_showing_brent_rows():
             assert result[5] == "Instrument quote history"
         else:
             assert result[2] == []
-            assert result[4] == f"ICE quote feed is unavailable for {label}"
-            assert label in result[1].layout.annotations[0].text
-            assert result[5] == "Broker quotes executable edge"
+            if product in quote_data.QUOTE_FEED_PRODUCTS:
+                assert result[4] == "No quotes match the selected filters"
+                assert result[1].layout.annotations[0].text == "No ICE Chat quotes in the selected window"
+            else:
+                assert result[4] == f"ICE quote feed is unavailable for {label}"
+                assert label in result[1].layout.annotations[0].text
+            assert result[5] == "Broker quotes vs our mark"
             assert quotes.update_quote_filter_options(snapshot, product) == (
                 [], [], [], [], [], []
             )
@@ -395,7 +432,7 @@ def test_section_follows_selected_product_without_showing_brent_rows():
 def test_selected_instrument_shows_premium_and_iv_history():
     rows = _rows()
     frame = pd.DataFrame(rows)
-    figure = quotes.build_instrument_figure(frame, rows[0])
+    figure = quote_charts.build_instrument_figure(frame, rows[0])
     names = [trace.name for trace in figure.data]
     assert {"Bid", "Offer", "Our theo", "Bid IV", "Offer IV", "Our IV"}.issubset(names)
     assert figure.layout.yaxis.title.text == "Premium (USD/bbl)"
@@ -409,24 +446,24 @@ def test_selected_instrument_shows_premium_and_iv_history():
         price_unit="MWh",
         price_unit_label="EUR/MWh",
     )
-    separated = quotes.build_instrument_figure(
+    separated = quote_charts.build_instrument_figure(
         pd.DataFrame([rows[0], other_product]), rows[0]
     )
     bid_trace = next(trace for trace in separated.data if trace.name == "Bid")
     assert len(bid_trace.x) == 1
-    empty = quotes.build_instrument_figure(pd.DataFrame(), rows[0])
+    empty = quote_charts.build_instrument_figure(pd.DataFrame(), rows[0])
     assert empty.layout.annotations[0].text == "Selected instrument has no visible history"
 
 
 def test_empty_and_error_states_are_explicit():
-    strip = quotes.build_service_strip(
+    strip = quote_components.build_service_strip(
         {},
         error="Database unavailable",
         loaded_at="2026-08-17T08:00:00+00:00",
     )
     assert "ice-chat-service-strip-danger" in strip.className
     assert len(strip.children) == 4
-    figure = quotes.build_all_quotes_figure(pd.DataFrame())
+    figure = quote_charts.build_all_quotes_figure(pd.DataFrame())
     assert figure.layout.annotations[0].text == "No ICE Chat quotes in the selected window"
 
 
@@ -442,14 +479,14 @@ def test_grid_height_is_compact_for_short_tapes_and_bounded_for_long_tapes():
         snapshot, {}, None, None, None, None, None, None, [], []
     )
     assert result[3] == {"height": "180px"}
-    assert result[5] == "Broker quotes executable edge"
-    assert result[6] == "Above 0 favors us on bid/offer · single quotes are neutral"
+    assert result[5] == "Broker quotes vs our mark"
+    assert result[6] == "Vol differences compare marks · premium edge and confidence are shown in the tape"
 
     selected_result = quotes.render_quote_dashboard(
         snapshot, {}, None, None, None, None, None, None, [], [rows[0]]
     )
     assert selected_result[5] == "Instrument quote history"
-    assert selected_result[6] == "Oct-26 · 90 Call · broker premium and IV vs our marks"
+    assert selected_result[6] == "Oct-26 · 90 Call · SELL · Convention verified; net edge checked against buffer"
 
     snapshot["rows"] = [dict(rows[0], event_id=f"event-{index}") for index in range(20)]
     result = quotes.render_quote_dashboard(
@@ -480,7 +517,7 @@ def test_grid_selection_does_not_resend_unchanged_tape_or_status(monkeypatch):
 
 
 def test_live_empty_database_contract_loads_without_recalculation():
-    result = quotes.load_quote_snapshot(
+    result = quote_data.load_quote_snapshot(
         "today",
         now=datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc),
     )

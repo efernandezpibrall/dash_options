@@ -12,8 +12,8 @@ from dash.exceptions import PreventUpdate
 from flask import has_request_context, request
 
 from vol_calibration.auth import resolve_request_identity
+from vol_trades_data import active_brent_publication
 from vol_calibration.brent_single_candidate import (
-    active_brent_publication,
     build_brent_candidate,
 )
 from vol_calibration.feature_flags import brent_publication_enabled

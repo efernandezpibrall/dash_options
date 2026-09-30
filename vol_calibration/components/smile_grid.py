@@ -18,6 +18,10 @@ from typing import Dict, Optional, Literal
 from options.calibration_engine.converters.delta import strike_to_delta
 
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
+from vol_calibration.ttf_hybrid_surface import (
+    GAS_HYBRID_POLICY_VERSIONS,
+    TTF_HYBRID_METHOD,
+)
 
 
 # X-axis options
@@ -975,8 +979,9 @@ def create_smile_grid_figure(
             is_ttf_hybrid = bool(
                 np.isfinite(left_blend_width)
                 and np.isfinite(right_blend_width)
-                and str(params.get('calibration_method', '')).startswith(
-                    'PCHIP-core/'
+                and (
+                    str(params.get('calibration_method', '')).startswith('PCHIP-core/')
+                    or params.get('calibration_method') == TTF_HYBRID_METHOD
                 )
             )
 
@@ -989,10 +994,21 @@ def create_smile_grid_figure(
                         operational_surface_frame as ttf_operational_surface_frame,
                     )
 
+                    hybrid_product = (
+                        reference_product
+                        if reference_product in {'TTF', 'JKM', 'NBP'} else 'TTF'
+                    )
+                    # An unavailable reference surface must not change a JKM
+                    # candidate into a TTF candidate or enable its repair policy.
+                    for product, policy in GAS_HYBRID_POLICY_VERSIONS.items():
+                        if params.get('calibration_policy_version') == policy:
+                            hybrid_product = product
+                            break
                     governed_inputs = select_expiry_observations(
                         exp_data,
                         expiry,
                         include_extrapolated=True,
+                        commodity=hybrid_product,
                     )
                     hybrid_frame = ttf_operational_surface_frame(
                         governed_inputs,
@@ -1000,6 +1016,7 @@ def create_smile_grid_figure(
                         left_blend_width=float(left_blend_width),
                         right_blend_width=float(right_blend_width),
                         n_points=401,
+                        commodity=hybrid_product,
                     )
                     if x_axis == 'log_moneyness':
                         hybrid_frame['plot_x'] = hybrid_frame['log_moneyness']
@@ -1008,7 +1025,11 @@ def create_smile_grid_figure(
                     else:
                         hybrid_frame['plot_x'] = 1.0 - hybrid_frame['delta']
                     hybrid_frame = hybrid_frame.sort_values('plot_x')
-                    hybrid_name = 'Operational surface (PCHIP core / Wing tails)'
+                    hybrid_name = (
+                        'Operational surface (convex call-price core / Wing tails)'
+                        if hybrid_frame['blend_classification'].eq('convex_call_core').any()
+                        else 'Operational surface (PCHIP core / Wing tails)'
+                    )
                     fig.add_trace(
                         go.Scatter(
                             x=hybrid_frame['plot_x'],
@@ -1057,7 +1078,7 @@ def create_smile_grid_figure(
                                     row=row,
                                     col=col,
                                 )
-                        for boundary in ('left_blend', 'pchip_core', 'right_blend'):
+                        for boundary in ('left_blend', 'pchip_core', 'convex_call_core', 'right_blend'):
                             region = hybrid_frame[
                                 hybrid_frame['blend_classification'] == boundary
                             ]
