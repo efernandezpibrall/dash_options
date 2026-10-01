@@ -934,7 +934,7 @@ def build_expiry_figure(
     )
     if x_axis == chart_data.X_AXIS_DELTA:
         figure.update_xaxes(
-            title_text="",
+            title=None,
             range=[0.0, 1.0],
             tickmode="array",
             tickvals=[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
@@ -949,7 +949,7 @@ def build_expiry_figure(
             ],
         )
     else:
-        figure.update_xaxes(title_text="")
+        figure.update_xaxes(title=None)
     expiry_trade_tape = (
         trade_tape.loc[
             chart_data._expiry_mask(trade_tape, expiry, "underlying_contract_month")
@@ -983,7 +983,7 @@ def build_expiry_figure(
     figure.update_layout(
         template="plotly_white",
         height=308,
-        margin={"l": 58, "r": 44, "t": 18, "b": 48},
+        margin={"l": 58, "r": 44, "t": 18, "b": 4},
         barmode="overlay",
         hovermode="closest",
         hoverdistance=36,
