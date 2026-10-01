@@ -123,7 +123,7 @@ PRODUCT_LABELS = {
 
 
 # Only products with an ICE Chat quote valuation path belong in the feed.
-QUOTE_FEED_PRODUCTS = frozenset({"BRENT", "TFO"})
+QUOTE_FEED_PRODUCTS = frozenset({"BRENT", "TFO", "JKM"})
 
 
 def _selected_product(value: Any) -> str:
@@ -285,9 +285,9 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     fence = normalized["structure_code"].eq("CLLR")
     spread = normalized["structure_code"].isin(["CALLSPR", "PUTSPR"])
     cso = normalized["structure_code"].isin(["CSO3", "CSO4"])
-    package = normalized["structure_code"].isin(["CFLY", "STNGL"])
+    package = normalized["structure_code"].isin(["CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"])
     structure = fence | spread | cso | package
-    normalized.loc[package, "option_label"] = normalized.loc[package, "structure_code"].map({"CFLY": "Butterfly", "STNGL": "Strangle"})
+    normalized.loc[package, "option_label"] = normalized.loc[package, "structure_code"].map({"CFLY": "Butterfly", "STNGL": "Strangle", "STRDL": "Straddle", "DIAGONAL_CALL_SPREAD": "Diagonal call spread", "PUT_SPREAD_VS_CALL": "Put spread vs call", "CALL_SPREAD_VS_PUT_SPREAD": "Call spread vs put spread"})
     normalized.loc[fence, "option_label"] = "Fence"
     normalized.loc[spread, "option_label"] = normalized.loc[spread, "structure_code"].map(
         {"CALLSPR": "Call spread", "PUTSPR": "Put spread"}
@@ -299,7 +299,7 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     ).str.replace(" put spread", "", regex=False)
     normalized.loc[package, "strike_label"] = normalized.loc[package, "structure_label"].str.replace(
         " butterfly", "", regex=False
-    ).str.replace(" strangle", "", regex=False)
+    ).str.replace(" strangle", "", regex=False).str.replace(" straddle", "", regex=False).str.replace(" diagonal", "", regex=False)
     normalized["option_filter_key"] = normalized["option_type"]
     normalized.loc[structure, "option_filter_key"] = normalized.loc[structure, "structure_code"]
     normalized.loc[cso, "option_filter_key"] = (
@@ -338,13 +338,13 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
         value = row["theoretical_cash_premium"]
         if pd.isna(value):
             return "—"
-        tick = Decimal(str(row["tick_size"]))
-        rounded = (Decimal(str(abs(value))) / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
-        amount = f"{rounded:.{int(row['price_decimals'])}f}"
+        valuation_decimals = int(row["price_decimals"]) + 1
+        rounded = Decimal(str(abs(value))).quantize(Decimal(1).scaleb(-valuation_decimals), rounding=ROUND_HALF_UP)
+        amount = f"{rounded:.{valuation_decimals}f}"
         if row["structure_code"] == "CLLR":
             side = {"to_put": "to put", "to_call": "to call"}.get(row["fence_premium_orientation"], "side?")
             return f"{amount} {side}*"
-        if row["structure_code"] in {"CALLSPR", "PUTSPR", "CFLY", "STNGL"}:
+        if row["structure_code"] in {"CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"}:
             return f"{amount} {'debit' if value >= 0 else 'credit'}"
         return amount
     normalized["theoretical_display"] = normalized.apply(display_theoretical, axis=1)
@@ -395,7 +395,7 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     normalized.loc[structure, "signal_label"] = "UNVERIFIED"
     normalized.loc[cso, "signal_label"] = "BLOCKED"
     single_only = edge_candidates.isna().all(axis=1) & normalized["single_price"].notna() & ~structure
-    normalized.loc[single_only, "signal_label"] = "SINGLE"
+    normalized.loc[single_only, "signal_label"] = "TRADE"
     normalized.loc[single_only, "signal_edge_ticks"] = normalized.loc[
         single_only, "single_edge_ticks"
     ]
@@ -446,7 +446,7 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
         gross = net_check["gross"].get(side)
         amount = net if net is not None else gross
         positive = amount is not None and amount > 0
-        labels = {"side_unassigned": "SIDE?", "no_quote": "QUOTE?", "no_edge": "NO EDGE",
+        labels = {"side_unassigned": "SIDE?", "no_quote": "QUOTE?", "trade": "TRADE", "no_edge": "NO EDGE",
                   "within_buffer": "BUFFER", "qualified": side,
                   "provisional": f"{side}*" if positive else "NO EDGE*"}
         normalized.at[index, "edge_confidence"] = state
@@ -464,6 +464,13 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
         if not confidence["qualified"]:
             for field in ("best_action", "best_edge", "best_edge_ticks"):
                 normalized.at[index, field] = None
+    trade_only = (normalized["single_price"].notna() & normalized["bid"].isna()
+                  & normalized["offer"].isna() & normalized["valuation_status"].eq("valued"))
+    normalized.loc[trade_only, "signal_label"] = "TRADE"
+    normalized.loc[trade_only, "edge_confidence"] = "trade"
+    normalized.loc[trade_only, ["signal_side", "signal_price_edge", "signal_gross_edge",
+                                "signal_edge_ticks", "signal_iv_edge_pp"]] = None
+    normalized.loc[trade_only, "edge_explanation"] = "Broker-reported TRADE; comparison to model only; no actionable bid/offer"
     normalized["signal_gross_edge"] = pd.to_numeric(normalized["signal_gross_edge"], errors="coerce")
     normalized["observed_display"] = normalized["observed_at"].dt.tz_convert(
         "Asia/Dubai"
@@ -530,6 +537,14 @@ def load_quote_snapshot(
         LIMIT 1
         """
     )
+    jkm_publication_query = text(
+        """
+        SELECT cob_date FROM at_lng.vol_surface_publications
+        WHERE upper(commodity) = 'JKM' AND status = 'published' AND is_active
+          AND published_at <= :loaded_at
+        ORDER BY cob_date DESC, published_at DESC, created_at DESC LIMIT 1
+        """
+    )
     try:
         with db_engine.connect() as connection:
             frame = pd.read_sql(
@@ -545,6 +560,7 @@ def load_quote_snapshot(
             service_row = connection.execute(service_query).mappings().first()
             surface_cob = connection.execute(surface_query).scalar()
             ttf_surface_cob = connection.execute(ttf_publication_query).scalar()
+            jkm_surface_cob = connection.execute(jkm_publication_query, {"loaded_at": loaded_at}).scalar()
     except Exception as exc:
         return QuoteLoadResult(
             rows=[],
@@ -563,6 +579,7 @@ def load_quote_snapshot(
         service.get("surface_cob_date") or surface_cob
     ) if (service.get("surface_cob_date") or surface_cob) else None
     service["ttf_surface_cob_date"] = str(ttf_surface_cob) if ttf_surface_cob else None
+    service["jkm_surface_cob_date"] = str(jkm_surface_cob) if jkm_surface_cob else None
     return QuoteLoadResult(
         rows=_serialize_frame(frame),
         service=service,
@@ -589,11 +606,11 @@ def load_quote_reply(
                 SELECT outbound_status, outbound_attempted_at, outbound_acknowledged_at,
                        outbound_error_message, outbound_message_text, outbound_batch_reference,
                        edge_assessment, quote_context, surface_cob_date,
-                       surface_publication_id, pricing_model
+                       surface_publication_id, pricing_model, single_price, bid, offer
                 FROM {QUOTE_VIEW}
                 WHERE event_id = CAST(:event_id AS uuid) AND product_code = :product_code
             """), {"event_id": str(event_id),
-                     "product_code": "TFM" if _selected_product(product) == "TFO" else "B"}).mappings().first()
+                     "product_code": {"TFO": "TFM", "JKM": "JKM"}.get(_selected_product(product), "B")}).mappings().first()
     except Exception as exc:
         return None, _safe_error(exc)
     return dict(record) if record else None, None

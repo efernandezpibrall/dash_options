@@ -935,7 +935,7 @@ def update_history_dates(
             business_date = pd.Timestamp(snapshot.business_date).date().isoformat()
             options.append(
                 {
-                    "label": pd.Timestamp(snapshot.business_date).strftime("%d %b %Y"),
+                    "label": pd.Timestamp(snapshot.business_date).strftime("%d %b %Y") + " · Settlement",
                     "value": f"jkm:{business_date}",
                 }
             )
@@ -950,7 +950,7 @@ def update_history_dates(
                 else f"{date_label} · Intraday"
             )
         else:
-            label = pd.Timestamp(snapshot.business_date).strftime("%d %b %Y")
+            label = pd.Timestamp(snapshot.business_date).strftime("%d %b %Y") + " · Settlement"
         options.append({"label": label, "value": str(snapshot.snapshot_id)})
     allowed = {option["value"] for option in options}
     product_completion = (
@@ -1037,6 +1037,8 @@ def _render_jkm_history(
             "snapshot_id": None,
             "source_revision": selected_date,
             "source_identity": "ICAP_JKM+ICE_JKM_MO",
+            "calibration": market_data.calibrated_publication_metadata(calibrated),
+            "calibration_status": calibrated.attrs.get("publication_status"),
             "product": "JKM",
             "business_date": selected_date,
             "observed_at": observed_at.isoformat(),
@@ -1083,6 +1085,8 @@ def _render_jkm_history(
     Input("brent-vol-history-x-axis", "value"),
     Input("brent-vol-history-product", "value"),
     Input("vol-trades-publication-revision", "data"),
+    Input("vol-trades-source-revision", "data"),
+    Input("vol-trades-icap-prior", "value"),
     State("brent-vol-history-detail-expiry", "value"),
     State("brent-vol-history-trade-window-state", "data"),
     State("brent-vol-history-expiry-layers", "options"),
@@ -1093,6 +1097,8 @@ def render_history(
     x_axis=chart_data.X_AXIS_STRIKE,
     product=market_data.PRODUCT,
     _published_revision=None,
+    _source_revision=None,
+    allow_prior_icap=None,
     current_detail_expiry=None,
     current_trade_window=None,
     current_legend_options=None,
@@ -1237,7 +1243,10 @@ def render_history(
         if product in market_data.EXACT_COB_SURFACE_PRODUCTS or snapshot_kind == "INTRADAY":
             published = pd.DataFrame()
         elif product == "TFO":
-            published = market_data.load_icap_settlement_surface(selected_date)
+            published = market_data.load_icap_settlement_surface(selected_date, allow_prior="allow" in (allow_prior_icap or []))
+            if (_source_revision or {}).get("product") == product and (_source_revision or {}).get("cob_date") == selected_date and (_source_revision or {}).get("error"):
+                from vol_trades_provenance import prepare_icap_layer
+                published = prepare_icap_layer(None, selected_date)
         else:
             published = market_data.load_published_surface(
                 selected_date,
@@ -1287,7 +1296,8 @@ def render_history(
         )
         publication_id = market_data.calibrated_publication_metadata(calibrated).get("publication_id")
         history_charts._stamp_plot_generation(cards, snapshot_id=snapshot_id, product=product,
-                               x_axis=x_axis, publication_id=publication_id)
+                               x_axis=x_axis, publication_id=publication_id,
+                               icap_revision=published.attrs.get("icap_metadata"))
         legend_contract = history_charts._expiry_legend_contract(cards)
         legend_options = history_charts._expiry_legend_options(
             legend_contract["available_layers"],
@@ -1325,6 +1335,9 @@ def render_history(
                 "display_expiries": display_expiries,
                 "intraday_universe_policy_version": universe.get("policy_version"),
                 "publication_id": publication_id,
+                "calibration": market_data.calibrated_publication_metadata(calibrated),
+                "calibration_status": calibrated.attrs.get("publication_status"),
+                "icap": published.attrs.get("icap_metadata"),
             },
             cards,
             expiry_options,
@@ -1470,6 +1483,34 @@ def render_ice_quote_overlays(
     return updates, message, revisions if revisions != previous_revisions else no_update
 
 
+clientside_callback(
+    """
+    function(windowState, start, disabled) {
+        const presets = ['all', '4h', '1h', '15m'];
+        const value = Number(start);
+        const maximum = Number(windowState && windowState.maximum);
+        const valid = windowState && Number.isFinite(value)
+            && Number.isFinite(maximum) && maximum > 0;
+        const matching = valid && !disabled
+            && Math.abs(value - Number(windowState.start)) < 0.001;
+        const selected = matching ? windowState.preset : null;
+        const fraction = valid ? Math.min(1, Math.max(0, value / maximum)) : 0;
+        return presets.map(preset => String(preset === selected)).concat([
+            {'--brent-market-start': (fraction * 100) + '%'}
+        ]);
+    }
+    """,
+    Output("brent-vol-history-trade-all", "aria-pressed"),
+    Output("brent-vol-history-trade-4h", "aria-pressed"),
+    Output("brent-vol-history-trade-1h", "aria-pressed"),
+    Output("brent-vol-history-trade-15m", "aria-pressed"),
+    Output("brent-vol-history-trade-slider-track", "style"),
+    Input("brent-vol-history-trade-window-state", "data"),
+    Input("brent-vol-history-trade-start", "value"),
+    Input("brent-vol-history-trade-start", "disabled"),
+)
+
+
 @callback(
     Output("brent-vol-history-trade-window-state", "data"),
     Output("brent-vol-history-trade-start", "min", allow_duplicate=True),
@@ -1534,7 +1575,7 @@ def update_market_window_controls(history, quotes, manifest, start_second, _all,
     has_trades = pd.notna(first_trade) and pd.notna(last_trade) and last_trade >= utc_timestamp(context["day_start_at"]) and first_trade <= utc_timestamp(context["cutoff_at"])
     disabled = not (has_quotes or has_trades)
     maximum = max(1.0, window["maximum"])
-    mark_values = sorted({0, maximum, *(v for v in (21600, 43200, 64800) if v < maximum)})
+    mark_values = sorted({0, maximum, *(v for v in (21600, 43200, 64800) if maximum - v >= 1800)})
     marks = {value: f"{int(value) // 3600:02d}:{int(value) % 3600 // 60:02d}" for value in mark_values}
     start, cutoff = utc_timestamp(window["start_at"]).tz_convert(MARKET_TIMEZONE), utc_timestamp(window["cutoff_at"]).tz_convert(MARKET_TIMEZONE)
     label = f"{cutoff:%d %b} {start:%H:%M}–{cutoff:%H:%M} GST · {window['mode']}"
@@ -1639,3 +1680,31 @@ __all__ = [
     "update_detail_grid",
     "update_history_dates",
 ]
+
+
+@callback(
+    Output("vol-trades-source-revision", "data"),
+    Input("vol-trades-source-poll", "n_intervals"),
+    Input("brent-vol-history-product", "value"),
+    State("brent-vol-history-snapshot", "data"),
+    State("vol-trades-source-revision", "data"),
+)
+def poll_market_source_revision(_tick, product, snapshot, previous):
+    """Notify only after a complete source revision is available, or on failure."""
+    if not snapshot or snapshot.get('product') != product or product != 'TFO':
+        return no_update
+    from surface_data import refresh_operational_surface_if_changed
+    from vol_trades_provenance import source_revision_event
+    event = source_revision_event(product, snapshot['business_date'],
+                                  refresh_operational_surface_if_changed)
+    return no_update if event == previous else event
+
+
+@callback(
+    Output("vol-trades-provenance", "children"),
+    Output("vol-trades-icap-prior-control", "style"),
+    Input("brent-vol-history-snapshot", "data"),
+)
+def render_market_provenance(snapshot):
+    from vol_trades_provenance import render_provenance
+    return render_provenance(snapshot)

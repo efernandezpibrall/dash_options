@@ -12,6 +12,130 @@ from dash import (
 from vol_calibration.feature_flags import inline_calibration_enabled
 import vol_trades_data as market_data
 
+
+def _build_market_snapshot():
+    return html.Div(
+        [
+            html.Label("Market snapshot", htmlFor="brent-vol-history-date"),
+            dcc.Dropdown(
+                id="brent-vol-history-date",
+                options=[],
+                value=None,
+                clearable=False,
+                placeholder="No complete snapshots",
+            ),
+        ],
+        className="brent-vol-history-toolbar-control brent-vol-history-date-control",
+    )
+
+
+def _build_bloomberg_controls():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Span("Bloomberg", className="brent-vol-history-toolbar-label"),
+                    html.Div(
+                        id="brent-vol-history-refresh-status",
+                        className="brent-vol-history-refresh-status",
+                        role="status",
+                        **{"aria-live": "polite"},
+                    ),
+                ],
+                className="brent-vol-history-refresh-heading",
+            ),
+            html.Div(
+                [
+                    html.Button(
+                        [html.Span("↻", className="brent-vol-history-refresh-icon", **{"aria-hidden": "true"}), "Refresh Intraday"],
+                        id="brent-vol-history-refresh-button",
+                        n_clicks=0,
+                        disabled=True,
+                        className="brent-vol-history-refresh-button brent-vol-history-refresh-button-primary",
+                        title="Refresh today's Bloomberg intraday snapshot",
+                        style={"display": "none"},
+                    ),
+                    html.Button(
+                        [html.Span("↻", className="brent-vol-history-refresh-icon", **{"aria-hidden": "true"}), "Refresh settlements"],
+                        id="brent-vol-history-settlement-refresh-button",
+                        n_clicks=0,
+                        disabled=True,
+                        className="brent-vol-history-refresh-button brent-vol-history-refresh-button-secondary",
+                        title="Load missing or incomplete Bloomberg settlements",
+                        style={"display": "none"},
+                    ),
+                ],
+                className="brent-vol-history-refresh-row",
+            ),
+        ],
+        className="brent-vol-history-toolbar-control brent-vol-history-refresh-control",
+    )
+
+
+def _build_market_window(calibration_control):
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Label("Market window", htmlFor="brent-vol-history-trade-start"),
+                    html.Small(id="brent-vol-history-market-window-status", role="status"),
+                ],
+                className="brent-vol-history-window-heading",
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        dcc.Slider(
+                            id="brent-vol-history-trade-start",
+                            min=0,
+                            max=1,
+                            value=0,
+                            marks={0: "00:00", 1: "Latest"},
+                            step=60,
+                            disabled=True,
+                            updatemode="mouseup",
+                            allow_direct_input=False,
+                            persistence=True,
+                            persistence_type="session",
+                        ),
+                        id="brent-vol-history-trade-slider-track",
+                        className="brent-vol-history-trade-slider-wrap",
+                    ),
+                    html.Div(
+                        [
+                            html.Button(
+                                label,
+                                id=f"brent-vol-history-trade-{preset}",
+                                n_clicks=0,
+                                disabled=True,
+                                **{"aria-pressed": "false"},
+                            )
+                            for preset, label in (
+                                ("all", "All day"), ("4h", "4h"), ("1h", "1h"), ("15m", "15m")
+                            )
+                        ],
+                        className="brent-vol-history-trade-presets",
+                        role="group",
+                        **{"aria-label": "Market window presets"},
+                    ),
+                    html.Div(
+                        [
+                            calibration_control,
+                            html.Div(
+                                id="brent-vol-history-market-data-status",
+                                className="brent-vol-history-market-data-status",
+                            ),
+                        ],
+                        className="brent-vol-history-calibration-status",
+                    ),
+                ],
+                className="brent-vol-history-window-controls",
+            ),
+        ],
+        className="brent-vol-history-trade-slider-control",
+    )
+
+
 def build_layout(ice_quotes_layout):
     return html.Main(
         [
@@ -68,176 +192,33 @@ def build_layout(ice_quotes_layout):
                                     "brent-vol-history-axis-control"
                                 ),
                             ),
-                            html.Div(
-                                [
-                                    html.Span(
-                                        "Bloomberg",
-                                        className="brent-vol-history-toolbar-label",
-                                    ),
-                                    html.Div(
-                                        [
-                                            html.Button(
-                                                "Refresh Bloomberg",
-                                                id="brent-vol-history-refresh-button",
-                                                n_clicks=0,
-                                                disabled=True,
-                                                className=(
-                                                    "brent-vol-history-refresh-button "
-                                                    "brent-vol-history-refresh-button-primary"
-                                                ),
-                                                title="Refresh today's Bloomberg snapshot",
-                                                style={"display": "none"},
-                                            ),
-                                            html.Button(
-                                                "Refresh settlements",
-                                                id=(
-                                                    "brent-vol-history-settlement-"
-                                                    "refresh-button"
-                                                ),
-                                                n_clicks=0,
-                                                disabled=True,
-                                                className=(
-                                                    "brent-vol-history-refresh-button "
-                                                    "brent-vol-history-refresh-button-secondary"
-                                                ),
-                                                title=(
-                                                    "Load missing or incomplete Bloomberg "
-                                                    "settlements"
-                                                ),
-                                                style={"display": "none"},
-                                            ),
-                                            html.Div(
-                                                id="brent-vol-history-refresh-status",
-                                                className="brent-vol-history-refresh-status",
-                                                role="status",
-                                                **{"aria-live": "polite"},
-                                            ),
-                                        ],
-                                        className="brent-vol-history-refresh-row",
-                                    ),
-                                ],
-                                className=(
-                                    "brent-vol-history-toolbar-control "
-                                    "brent-vol-history-refresh-control"
-                                ),
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("Settlement", htmlFor="brent-vol-history-date"),
-                                    dcc.Dropdown(
-                                        id="brent-vol-history-date",
-                                        options=[],
-                                        value=None,
-                                        clearable=False,
-                                        placeholder="No complete snapshots",
-                                    ),
-                                ],
-                                className=(
-                                    "brent-vol-history-toolbar-control "
-                                    "brent-vol-history-date-control"
-                                ),
-                            ),
-                            html.Div(
-                                [
-                                    html.Label(
-                                        "Market window",
-                                        htmlFor="brent-vol-history-trade-start",
-                                    ),
-                                    html.Div(
-                                        dcc.Slider(
-                                            id="brent-vol-history-trade-start",
-                                            min=0,
-                                            max=1,
-                                            value=0,
-                                            marks={0: "00:00", 1: "Latest"},
-                                            step=60,
-                                            disabled=True,
-                                            updatemode="mouseup",
-                                            allow_direct_input=False,
-                                            persistence=True,
-                                            persistence_type="session",
+                            _build_market_snapshot(),
+                            _build_bloomberg_controls(),
+                            _build_market_window(
+                                html.Div(
+                                    html.Button(
+                                        "Calibrate surface",
+                                        id="brent-vol-history-calibration-toggle",
+                                        n_clicks=0,
+                                        disabled=not inline_calibration_enabled(),
+                                        className="brent-vol-history-calibration-toggle",
+                                        title=(
+                                            "Open the calibration controls for this immutable market context"
+                                            if inline_calibration_enabled()
+                                            else "Inline calibration is disabled by configuration"
                                         ),
-                                        className="brent-vol-history-trade-slider-wrap",
+                                        **{"aria-expanded": "false"},
                                     ),
-                                    html.Small(id="brent-vol-history-market-window-status", role="status"),
-                                ],
-                                className=(
-                                    "brent-vol-history-toolbar-control "
-                                    "brent-vol-history-trade-slider-control"
-                                ),
-                            ),
-                            html.Div(
-                                [
-                                    html.Span(
-                                        "Presets",
-                                        className="brent-vol-history-toolbar-label",
+                                    className=(
+                                        "brent-vol-history-toolbar-control "
+                                        "brent-vol-history-calibration-control"
                                     ),
-                                    html.Div(
-                                        [
-                                            html.Button(
-                                                "All day",
-                                                id="brent-vol-history-trade-all",
-                                                n_clicks=0,
-                                                disabled=True,
-                                            ),
-                                            html.Button(
-                                                "4h",
-                                                id="brent-vol-history-trade-4h",
-                                                n_clicks=0,
-                                                disabled=True,
-                                            ),
-                                            html.Button(
-                                                "1h",
-                                                id="brent-vol-history-trade-1h",
-                                                n_clicks=0,
-                                                disabled=True,
-                                            ),
-                                            html.Button(
-                                                "15m",
-                                                id="brent-vol-history-trade-15m",
-                                                n_clicks=0,
-                                                disabled=True,
-                                            ),
-                                            html.Div(
-                                                id="brent-vol-history-market-data-status",
-                                                className=(
-                                                    "brent-vol-history-market-data-status"
-                                                ),
-                                            ),
-                                        ],
-                                        className="brent-vol-history-trade-presets",
-                                        role="group",
-                                        **{"aria-label": "Market window presets"},
-                                    ),
-                                ],
-                                className=(
-                                    "brent-vol-history-toolbar-control "
-                                    "brent-vol-history-trade-preset-control"
-                                ),
-                            ),
-                            html.Div(
-                                html.Button(
-                                    "Calibrate surface",
-                                    id="brent-vol-history-calibration-toggle",
-                                    n_clicks=0,
-                                    disabled=not inline_calibration_enabled(),
-                                    className="brent-vol-history-calibration-toggle",
-                                    title=(
-                                        "Open the calibration controls for this immutable market context"
+                                    style=(
+                                        None
                                         if inline_calibration_enabled()
-                                        else "Inline calibration is disabled by configuration"
+                                        else {"display": "none"}
                                     ),
-                                    **{"aria-expanded": "false"},
-                                ),
-                                className=(
-                                    "brent-vol-history-toolbar-control "
-                                    "brent-vol-history-calibration-control"
-                                ),
-                                style=(
-                                    None
-                                    if inline_calibration_enabled()
-                                    else {"display": "none"}
-                                ),
+                                )
                             ),
                         ],
                         className="brent-vol-history-toolbar",
@@ -265,6 +246,8 @@ def build_layout(ice_quotes_layout):
                 storage_type="memory",
             ),
             dcc.Store(id="vol-trades-publication-revision", storage_type="memory"),
+            dcc.Store(id="vol-trades-source-revision"),
+            dcc.Interval(id="vol-trades-source-poll", interval=30000, n_intervals=0),
             html.Div(
                 id="brent-vol-history-calibration-panel",
                 className="brent-vol-history-calibration-panel",
@@ -304,6 +287,13 @@ def build_layout(ice_quotes_layout):
                             "greeks-monitor-section-header "
                             "brent-vol-history-expiry-section-header"
                         ),
+                    ),
+                    html.Div(id="vol-trades-provenance", role="status", **{"aria-live": "polite"}),
+                    html.Div(
+                        dcc.Checklist(id="vol-trades-icap-prior", value=[],
+                                      options=[{"label": "Compare prior ICAP date (if selected date is unavailable)",
+                                                "value": "allow"}]),
+                        id="vol-trades-icap-prior-control", style={"display": "none"},
                     ),
                     dcc.Loading(
                         type="circle",
@@ -502,4 +492,3 @@ def build_layout(ice_quotes_layout):
         ],
         className="options-dashboard-container brent-vol-history-page",
     )
-

@@ -158,7 +158,7 @@ def render_quote_dashboard(
                       f"{instrument} · correlation not assigned; CSO valuation on hold"
                       if selected.get("structure_code") in {"CSO3", "CSO4"} else
                       f"{instrument} · signed leg valuation; no single structure IV; broker edge unverified"
-                      if selected.get("structure_code") in {"CALLSPR", "PUTSPR", "CFLY", "STNGL"} else
+                      if selected.get("structure_code") in {"CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"} else
                       f"{instrument} · broker premium and IV vs our marks")
         if selected.get("edge_confidence"):
             chart_hint = f"{instrument} · {selected['signal_label']} · {selected.get('edge_explanation') or 'net edge assessed'}"

@@ -25,12 +25,15 @@ def build_service_strip(
     session = str(service.get("session_id") or "")
     session_display = f"…{session[-8:]}" if session else "—"
     age = service.get("surface_business_day_age")
-    surface_date = service.get("ttf_surface_cob_date") if product == "TFO" else service.get("surface_cob_date")
+    surface_key = {"TFO": "ttf_surface_cob_date", "JKM": "jkm_surface_cob_date"}.get(product, "surface_cob_date")
+    surface_date = service.get(surface_key)
     surface_display = "No surface"
     if surface_date:
         surface_display = pd.Timestamp(surface_date).strftime("%d %b")
         if product == "TFO":
             surface_display += " · TTF calibrated"
+        elif product == "JKM":
+            surface_display += " · JKM calibrated"
         elif age is not None:
             surface_display += " · fresh" if int(age) <= 1 else f" · {age} BD old"
     heartbeat = service.get("last_heartbeat_at") or "—"
@@ -165,7 +168,7 @@ QUOTE_COLUMN_DEFS = [
             {"headerName": "Bid", "field": "bid", "valueFormatter": PRICE_FORMATTER, "width": 56, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
             {"headerName": "Offer", "field": "offer", "valueFormatter": PRICE_FORMATTER, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
             {"headerName": "Offer qty", "field": "offer_size", "valueFormatter": SIZE_FORMATTER, "width": 64, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-size-cell"},
-            {"headerName": "Single", "field": "single_price", "valueFormatter": PRICE_FORMATTER, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
+            {"headerName": "Trade", "field": "single_price", "valueFormatter": PRICE_FORMATTER, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
             {"headerName": "Qty", "field": "single_size", "valueFormatter": SIZE_FORMATTER, "width": 48, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-size-cell"},
             {"headerName": "Indication*", "field": "broker_indication_display", "width": 106, "headerClass": "ice-chat-text-header", "cellClass": "ice-chat-text-cell ice-chat-market-price-cell"},
         ],
@@ -176,7 +179,7 @@ QUOTE_COLUMN_DEFS = [
         "children": [
             {"headerName": "Bid", "field": "bid_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 56, "type": "rightAligned", "headerClass": "ice-chat-number-header ice-chat-group-start", "cellClass": "ice-chat-number-cell ice-chat-group-start"},
             {"headerName": "Offer", "field": "offer_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
-            {"headerName": "Single", "field": "single_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
+            {"headerName": "Trade", "field": "single_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
         ],
     },
     {
@@ -204,7 +207,7 @@ QUOTE_COLUMN_DEFS = [
                     "ice-chat-cell-buy": "params.value === 'BUY' && params.data.edge_confidence === 'qualified'",
                     "ice-chat-cell-sell": "params.value === 'SELL' && params.data.edge_confidence === 'qualified'",
                     "ice-chat-edge-provisional": "params.data.edge_confidence === 'provisional' || params.data.edge_confidence === 'side_unassigned' || params.data.edge_confidence === 'within_buffer'",
-                    "ice-chat-cell-neutral": "params.value === 'NO EDGE' || params.value === 'SINGLE' || params.value === 'UNVERIFIED'",
+                    "ice-chat-cell-neutral": "params.value === 'NO EDGE' || params.value === 'TRADE' || params.value === 'UNVERIFIED'",
                 },
             },
             {"headerName": "Gross", "field": "signal_gross_edge", "valueFormatter": PRICE_FORMATTER, "width": 62, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
@@ -423,7 +426,13 @@ def _edge_audit(assessment, context, valuation=None):
     def amount(value):
         return f"{value:+.6f}" if value is not None else "unassigned"
     status = confidence["status"].replace("_", " ")
+    reported_trade = (valuation is not None and valuation.get("single_price") is not None
+                      and valuation.get("bid") is None and valuation.get("offer") is None)
+    if reported_trade:
+        status = "TRADE; no actionable bid/offer"
     tone = "qualified" if confidence["qualified"] else "provisional" if confidence["reasons"] else "neutral"
+    if reported_trade:
+        tone = "neutral"
     rows = [html.Tr([html.Td(side), html.Td(amount(costs['gross'][side])),
                     html.Td(amount(costs['total_cost'])), html.Td(amount(costs['net'][side]))])
             for side in ("BUY", "SELL")]
@@ -453,4 +462,3 @@ def _edge_audit(assessment, context, valuation=None):
             f"Original {context['original_product']} {context['original_bid']}/{context['original_offer']}; "
             f"effective TTF {context['bid']:.3f}/{context['offer']:.3f} EUR/MWh. Source payload preserved."))
     return [html.Div(children, className="ice-chat-edge-audit")]
-

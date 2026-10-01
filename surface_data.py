@@ -528,6 +528,8 @@ def prepare_vol_surface_snapshot(*, force=False, refresh_token=None):
 
         payload, source_revision = _build_surface_snapshot_payload(refresh_token)
         state = payload['data_cache_state']
+        if state['surface'].get('error'):
+            raise SnapshotReferenceError('ICAP source unavailable; refresh required')
         reference = publish_snapshot(
             VOL_SURFACE_SNAPSHOT_NAMESPACE,
             source_revision,
@@ -553,8 +555,7 @@ def _refresh_cached_data(refresh_token=None, force=False):
             force=True,
             refresh_token=refresh_token,
         )
-    if DATA_CACHE_STATE['initialized']:
-        return latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
+    # Always resolve and activate the current shared revision, including expiry recovery.
     return prepare_vol_surface_snapshot(force=False, refresh_token=refresh_token)
 
 
@@ -659,28 +660,23 @@ def get_operational_surface_snapshot(product, requested_cob, refresh=False):
         result['error'] = f'Invalid requested COB: {requested_cob}'
         return result
 
-    if refresh:
-        _refresh_cached_data(force=True)
-    else:
-        _ensure_cached_data()
-
-    surface_status = DATA_CACHE_STATE['surface']
-    result['source'] = surface_status['source']
-    result['source_fallback_used'] = bool(
-        surface_status.get('fallback_used', False)
-    )
-
-    if surface_dataset.empty:
-        result['error'] = (
-            surface_status.get('error')
-            or f'No operational surface data is available for {display_product}'
-        )
+    # Pin one immutable payload for this request. Never read mutable worker globals
+    # after resolving the reference: another thread may activate a newer revision.
+    reference = prepare_vol_surface_snapshot(force=refresh)
+    payload = resolve_snapshot(reference, expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE)
+    surface_status = payload['data_cache_state']['surface']
+    dataset = payload['surface_dataset']
+    result.update(source=surface_status['source'],
+                  source_fallback_used=bool(surface_status.get('fallback_used', False)),
+                  snapshot_id=reference['snapshot_id'], source_revision=reference['source_revision'])
+    if surface_status.get('error'):
+        raise SnapshotReferenceError('ICAP source unavailable; refresh required')
+    if dataset.empty:
+        result['error'] = f'No operational surface data is available for {display_product}'
         return result
 
     requested_timestamp = requested_timestamp.normalize()
-    product_rows = surface_dataset.loc[
-        surface_dataset['code'] == display_product
-    ]
+    product_rows = dataset.loc[dataset['code'] == display_product]
     eligible_dates = (
         pd.to_datetime(product_rows['cob_date'], errors='coerce')
         .dt.normalize()
@@ -695,7 +691,8 @@ def get_operational_surface_snapshot(product, requested_cob, refresh=False):
         return result
 
     actual_cob = eligible_dates.max()
-    snapshot = _get_surface_snapshot(display_product, actual_cob)
+    snapshot = product_rows.loc[product_rows['cob_date'].dt.normalize().eq(actual_cob)].copy()
+    snapshot = snapshot.sort_values(['contract_date', 'delta_sort_key'])
     if snapshot.empty:
         result['error'] = (
             f'Operational surface resolution returned no rows for '
@@ -1004,3 +1001,66 @@ def _build_atm_table_frames(selected_date, prev_selected_date, selected_products
                 changes_pivot = (current_aligned[sorted_date_cols] - prev_aligned).reset_index().rename(columns={'index': 'product'})
 
     return current_pivot, changes_pivot, sorted_date_cols
+
+
+def _operational_content_digest(frame):
+    columns = ['cob_date', 'code', 'contract_date', 'option_expiration_date', 'put_call', 'delta', 'volatility']
+    normalized = frame.reindex(columns=columns).copy()
+    for column in columns:
+        normalized[column] = normalized[column].map(lambda value: '' if pd.isna(value) else str(value))
+    normalized = normalized.sort_values(columns).reset_index(drop=True)
+    return hashlib.sha256(pd.util.hash_pandas_object(normalized, index=False).values.tobytes()).hexdigest()
+
+
+def refresh_operational_surface_if_changed(product, requested_cob):
+    """Check the selected source slice; publish a complete replacement before notifying tabs.
+
+    Reads the source already selected by the operational loader. No alternative
+    source or COB is chosen by the watcher. Same-date value corrections count.
+    """
+    reference = prepare_vol_surface_snapshot()
+    payload = resolve_snapshot(reference, expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE)
+    source = payload['data_cache_state']['surface']['source']
+    requested = pd.Timestamp(requested_cob).date()
+    product = str(product).upper()
+    if product not in SURFACE_SOURCE_PRODUCTS:
+        raise ValueError('Unsupported operational surface product')
+    display = SURFACE_PRODUCT_DISPLAY_MAP.get(product, product)
+    if source in dict(SURFACE_TRINO_SOURCES):
+        table = dict(SURFACE_TRINO_SOURCES)[source]
+        query = (f"SELECT {SURFACE_SOURCE_SELECT} FROM {table} WHERE product = '{product}' "
+                 f"AND cob_date = (SELECT max(cob_date) FROM {table} WHERE product = '{product}' "
+                 f"AND cob_date <= DATE '{requested}')")
+        fresh = _normalize_surface_data(read_trino_query(query, catalog='raw', schema='icap'))
+    elif source == SURFACE_POSTGRES_SOURCE_LABEL:
+        table = SURFACE_POSTGRES_SOURCE_LABEL
+        # The normalized query columns include expiry coordinates; expiry corrections
+        # also invalidate through the full source revision after the rebuild.
+        query = text(f"SELECT {SURFACE_SOURCE_SELECT} FROM {table} WHERE product = :product "
+                     f"AND cob_date = (SELECT max(cob_date) FROM {table} WHERE product = :product "
+                     "AND cob_date <= :cob)")
+        fresh = _normalize_surface_data(pd.read_sql(query, get_database_engine(),
+                                                    params={'product': product, 'cob': requested}))
+    else:
+        raise SnapshotReferenceError('ICAP source revision cannot be checked; refresh required')
+    dataset = payload['surface_dataset']
+    cached = dataset.loc[dataset['code'].eq(display) & dataset['cob_date'].le(pd.Timestamp(requested))]
+    if not cached.empty:
+        cached = cached.loc[cached['cob_date'].eq(cached['cob_date'].max())]
+    if _operational_content_digest(cached) != _operational_content_digest(fresh):
+        with snapshot_lock('operational-source-refresh', expire=300):
+            # A second tab/worker may already have published the replacement.
+            current = prepare_vol_surface_snapshot()
+            current_payload = resolve_snapshot(current, expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE)
+            current_data = current_payload['surface_dataset']
+            current_slice = current_data.loc[current_data['code'].eq(display)
+                                            & current_data['cob_date'].le(pd.Timestamp(requested))]
+            if not current_slice.empty:
+                current_slice = current_slice.loc[current_slice['cob_date'].eq(current_slice['cob_date'].max())]
+            if _operational_content_digest(current_slice) != _operational_content_digest(fresh):
+                current = prepare_vol_surface_snapshot(force=True)
+            reference = current
+        updated = get_operational_surface_snapshot(product, requested_cob)
+        if _operational_content_digest(updated['data']) != _operational_content_digest(fresh):
+            raise SnapshotReferenceError('ICAP source changed but refresh did not reconcile; refresh required')
+    return reference

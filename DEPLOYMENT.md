@@ -270,3 +270,65 @@ The `Procfile` serves `index_options:server` through Gunicorn.
 
 Rollback by disabling write/publication/job intake first, restoring the prior
 web artifact, and leaving additive audit tables intact.
+
+## 1 October calibration update
+
+Analytics 1.2.5 preserves actual LNE rate-capture timestamps and validates their
+settlement-date freshness and snapshot clock precision rather than requiring
+all row timestamps to equal snapshot completion. The dashboard ships the
+quote-preserving TTF v2 convex-call-core fallback and requires migration
+`20260930_01`; official anchors and boundary tangents remain unchanged.
+
+Gas candidates retain accepted first fits. Failed observed and extrapolated
+hybrids resume deterministic starts through bounded budgets of three and nine;
+invalid inputs fail immediately. Original errors, optimizer and blend-gate
+attempts, elapsed stages and selected recovery budgets survive worker transport,
+checkpoints, batch exports and persisted expiry diagnostics. The shared recovery
+module is included in worker code fingerprints. A completed batch remains a
+candidate; recovery never auto-publishes.
+
+Publication loaders may request `include_surface=False` for provenance and expiry
+parameters. Full published grids are cached only by source/engine and immutable
+publication UUID; every request still resolves its active/as-of pointer.
+Explicit Reload bypasses the grid cache. Keep full data for chart, node-adjustment
+and export consumers. Operational publishers use the compact committed receipt,
+one complete authoritative grid reconciliation, then a metadata-only active
+revision check rather than downloading the same dense grid twice.
+
+The local update stages calibration modules and their shared data dependencies
+over a copy of the prior web artifact, preserving its existing routes and assets.
+The isolated environment keeps prior dependency versions, with the analytics
+wheel as the only package version change. See the release manifest for exact
+file hashes, wheel hash, verification artifacts and rollback command. For this
+user-authorized deployment, verification is operational only; no tests are added
+or run, per the explicit workspace instruction.
+
+The verified local live artifact is
+`~/.local/share/brent-surface-release/1.2.5-calibration-20261001`, serving port 8071
+through its `start.sh`. `active-calibration-release.json` in the parent directory
+records the active launcher, artifact revision and prior launcher for rollback.
+The prior `1.2.4-hh-context-ice-ttf-20260929` release remains available. Preserve
+single-worker / eight-thread topology and independent feature gates on restart.
+The operational evidence is saved under the options repository in
+`outputs/calibration_release_20261001`.
+
+## Vol Trades settlement source alignment
+
+Operational ICAP consumers resolve the latest shared snapshot on each chart
+load and pin its immutable payload for the request. Expired or unavailable
+snapshots require a rebuild or an explicit refresh-required state; an initialized
+worker is not evidence that its source revision remains current.
+
+TFO settlement charts require the selected ICAP COB by default. Missing dates
+hide the ICAP diamonds. The explicit prior-date comparison control permits an
+older COB only with a visible warning. Source receipts above the expiry panels
+show Bloomberg COB, actual ICAP COB, calibrated COB and publication time; they
+are derived from the chart's inputs rather than the global source summary.
+
+A 30-second page poll checks the selected operational source slice (including
+same-COB corrections) and active calibration publication. It publishes a revision
+signal only after the shared replacement reconciles to the source. A failed
+freshness check hides the ICAP layer with an explicit refresh-required warning.
+The chart generation includes the ICAP revision so obsolete overlay callbacks
+cannot modify replacement charts. The local release stages only these safeguards
+over the existing runtime artifact, preserving routes, assets and feature flags.

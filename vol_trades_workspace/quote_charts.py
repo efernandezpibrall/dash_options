@@ -52,7 +52,7 @@ def _finish_edge_figure(figure: go.Figure) -> go.Figure:
         paper_bgcolor="#ffffff",
     )
     figure.update_yaxes(
-        title_text="Vol edge vs our mark (vol pts)",
+        title_text="Broker IV minus our mark (vol pts)",
         zeroline=False,
         gridcolor="#e4e7ec",
         gridwidth=1,
@@ -142,7 +142,7 @@ def build_all_quotes_figure(frame: pd.DataFrame) -> go.Figure:
             "triangle-up",
         ),
         (
-            "Single quote",
+            "TRADE",
             "single_iv_deviation_pp",
             "single_price",
             "single_iv_pct",
@@ -261,7 +261,7 @@ def build_instrument_figure(frame: pd.DataFrame, selected: dict) -> go.Figure:
     )
     if "structure_code" in frame:
         instrument_mask &= frame["structure_code"].fillna("").eq(selected.get("structure_code") or "")
-    if selected.get("structure_code") in {"CLLR", "CALLSPR", "PUTSPR", "CFLY", "STNGL"}:
+    if selected.get("structure_code") in {"CLLR", "CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"}:
         instrument_mask &= frame["structure_label"].eq(selected.get("structure_label"))
     if selected.get("product_code") is not None and "product_code" in frame:
         instrument_mask &= frame["product_code"] == selected["product_code"]
@@ -282,7 +282,7 @@ def build_instrument_figure(frame: pd.DataFrame, selected: dict) -> go.Figure:
     ) if fence else (
         ("Bid", "bid", "#dc2626"),
         ("Offer", "offer", "#059669"),
-        ("Single", "single_price", "#7c3aed"),
+        ("Trade", "single_price", "#7c3aed"),
         ("Our theo", "theoretical_price", "#111827"),
     ))
     for name, column, color in series:
@@ -302,7 +302,7 @@ def build_instrument_figure(frame: pd.DataFrame, selected: dict) -> go.Figure:
     iv_series = (
         ("Bid IV", "bid_iv_pct", "#dc2626"),
         ("Offer IV", "offer_iv_pct", "#059669"),
-        ("Single IV", "single_iv_pct", "#7c3aed"),
+        ("Trade IV", "single_iv_pct", "#7c3aed"),
         ("Our IV", "our_iv_pct", "#111827"),
     )
     for name, column, color in iv_series:
@@ -370,7 +370,6 @@ def filter_quote_rows(
         frame = frame[frame["processing_status"] == status]
     if positive_only:
         frame = frame[pd.to_numeric(frame["best_edge_ticks"], errors="coerce") >= 1.0]
-        if product is not None and quote_data._selected_product(product) == "TFO" and "edge_confidence" in frame:
+        if product is not None and quote_data._selected_product(product) in {"TFO", "JKM"} and "edge_confidence" in frame:
             frame = frame[frame["edge_confidence"].eq("qualified") & frame["edge_fresh_now"].eq(True)]
     return frame.sort_values("observed_at", ascending=False)
-

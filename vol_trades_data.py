@@ -1024,35 +1024,22 @@ def load_icap_settlement_surface(
     *,
     refresh: bool = False,
     snapshot_loader=None,
+    allow_prior: bool = False,
 ) -> pd.DataFrame:
-    """Reuse the governed TTF settlement snapshot contract."""
+    """Pin ICAP settlements, requiring the selected COB unless explicitly comparing prior data."""
     if snapshot_loader is None:
-        from surface_data import get_operational_surface_snapshot
+        from surface_data import get_operational_surface_snapshot, refresh_operational_surface_if_changed
 
-        snapshot_loader = get_operational_surface_snapshot
-    snapshot = snapshot_loader("TTF", cob_date, refresh=refresh)
-    surface = snapshot.get("data")
-    if not isinstance(surface, pd.DataFrame) or surface.empty:
-        return pd.DataFrame()
-    actual_cob = pd.to_datetime(snapshot.get("actual_cob"), errors="coerce")
-    if pd.isna(actual_cob):
-        return pd.DataFrame()
-    surface = surface.copy()
-    surface["cob_date"] = actual_cob.normalize()
-    surface["forward_value"] = np.nan
-    surface["source_name"] = f"ICAP settlement · COB {actual_cob:%Y-%m-%d}"
-    return surface[
-        [
-            "cob_date",
-            "contract_date",
-            "option_expiration_date",
-            "put_call",
-            "delta",
-            "volatility",
-            "forward_value",
-            "source_name",
-        ]
-    ]
+        def snapshot_loader(product, selected_cob, refresh=False):
+            refresh_operational_surface_if_changed(product, selected_cob)
+            return get_operational_surface_snapshot(product, selected_cob, refresh=refresh)
+    from vol_trades_provenance import prepare_icap_layer
+
+    try:
+        snapshot = snapshot_loader("TTF", cob_date, refresh=refresh)
+    except Exception:
+        return prepare_icap_layer(None, cob_date, allow_prior=allow_prior)
+    return prepare_icap_layer(snapshot, cob_date, allow_prior=allow_prior)
 
 
 def _empty_calibrated_surface(

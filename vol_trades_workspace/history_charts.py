@@ -934,7 +934,7 @@ def build_expiry_figure(
     )
     if x_axis == chart_data.X_AXIS_DELTA:
         figure.update_xaxes(
-            title_text="Delta (put wing → call wing)",
+            title_text="",
             range=[0.0, 1.0],
             tickmode="array",
             tickvals=[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
@@ -949,7 +949,7 @@ def build_expiry_figure(
             ],
         )
     else:
-        figure.update_xaxes(title_text=f"Strike ({spec['price_unit']})")
+        figure.update_xaxes(title_text="")
     expiry_trade_tape = (
         trade_tape.loc[
             chart_data._expiry_mask(trade_tape, expiry, "underlying_contract_month")
@@ -1116,8 +1116,8 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
     }
 
 
-def _stamp_plot_generation(cards, *, snapshot_id, product, x_axis, publication_id):
-    identity = json.dumps([snapshot_id, product, x_axis, publication_id])
+def _stamp_plot_generation(cards, *, snapshot_id, product, x_axis, publication_id, icap_revision=None):
+    identity = json.dumps([snapshot_id, product, x_axis, publication_id, icap_revision])
     generation = hashlib.sha256(identity.encode()).hexdigest()[:20]
     for graph in _plot_card_graphs(cards):
         graph.id = {**dict(graph.id), "generation": generation}
