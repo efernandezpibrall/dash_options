@@ -23,15 +23,15 @@ import numpy as np
 import pandas as pd
 import scipy
 
-from options import ttf_volatility
-from options.calibration_engine.io.loaders import load_market_data_with_metadata
-from options.calibration_engine.io.storage import get_database_engine
-from vol_calibration.batch_checkpoints import (
+from options.vol_calibration.api import implementation_fingerprint
+from options.vol_calibration.api import numeric_verified_checkpoint
+from options.vol_calibration.api import load_market_data_with_metadata
+from options.vol_calibration.api import get_database_engine
+from options.vol_calibration.api import (
     CalibrationCancelled,
     StaleCalibrationCheckpoint,
     canonical,
     digest,
-    verified_checkpoint,
 )
 from vol_calibration.jobs import JobStatus, PostgresJobRepository
 from source_identity import source_config_fingerprint
@@ -39,12 +39,11 @@ from vol_calibration.feature_flags import gas_batch_jobs_enabled
 from vol_calibration.ttf_market_context import load_ttf_trading_context
 
 
-JOB_TYPE = "gas_settlement_batch_v1"
+JOB_TYPE = "gas_settlement_batch_v2"
+JOB_PAYLOAD_SCHEMA_VERSION = 2
 LEASE_SECONDS = 300
 _DASH_ROOT = Path(__file__).resolve().parents[1]
-_OPTIONS_ROOT = Path(ttf_volatility.__file__).resolve().parent
 _CODE_FILES = (
-    _DASH_ROOT / "vol_calibration/batch_checkpoints.py",
     _DASH_ROOT / "vol_calibration/batch_job_runner.py",
     _DASH_ROOT / "source_identity.py",
     _DASH_ROOT / "surface_data.py",
@@ -55,23 +54,11 @@ _CODE_FILES = (
     _DASH_ROOT / "vol_calibration/jobs.py",
     _DASH_ROOT / "vol_calibration/feature_flags.py",
     _DASH_ROOT / "vol_calibration/batch_results.py",
+    _DASH_ROOT / "vol_calibration/batch_adapter.py",
     _DASH_ROOT / "vol_calibration/jkm_batch.py",
     _DASH_ROOT / "vol_calibration/ttf_batch.py",
-    _DASH_ROOT / "vol_calibration/jkm_hybrid_surface.py",
-    _DASH_ROOT / "vol_calibration/ttf_hybrid_surface.py",
-    _DASH_ROOT / "vol_calibration/convex_call_core.py",
     _DASH_ROOT / "vol_calibration/observed_fit_pool.py",
-    _DASH_ROOT / "vol_calibration/calibration_inputs.py",
     _DASH_ROOT / "vol_calibration/ttf_market_context.py",
-    _OPTIONS_ROOT / "ttf_volatility.py",
-    _OPTIONS_ROOT / "calibration_engine/models/wing_model.py",
-    _OPTIONS_ROOT / "calibration_engine/validation/arbitrage.py",
-    _OPTIONS_ROOT / "calibration_engine/config/bounds.py",
-    _OPTIONS_ROOT / "calibration_engine/config/defaults.py",
-    _OPTIONS_ROOT / "calibration_engine/config/calibration_policies.py",
-    _OPTIONS_ROOT / "calibration_engine/io/loaders.py",
-    _OPTIONS_ROOT / "calibration_engine/io/storage.py",
-    _OPTIONS_ROOT / "calibration_engine/converters/delta.py",
 )
 
 
@@ -93,8 +80,10 @@ def job_repository() -> PostgresJobRepository:
 
 def code_fingerprint() -> str:
     state = hashlib.sha256()
+    state.update(implementation_fingerprint().encode("utf-8"))
     for path in _CODE_FILES:
-        state.update(str(path).encode())
+        label = "dashboard/" + path.relative_to(_DASH_ROOT).as_posix()
+        state.update(label.encode())
         state.update(path.read_bytes())
     state.update(json.dumps({
         "python": platform.python_version(),
@@ -146,7 +135,7 @@ def build_payload(
         if isinstance(publication_payload, dict) else None
     )
     payload = {
-        "schema_version": 1,
+        "schema_version": JOB_PAYLOAD_SCHEMA_VERSION,
         "job_type": JOB_TYPE,
         "product": product,
         "trade_date": pd.Timestamp(trade_date).date().isoformat(),
@@ -255,7 +244,7 @@ def _checkpoint_items(repo, job_id):
 
 def _run_claimed(repo, job, *, source_loader=_fresh_source):
     payload = job.payload
-    if payload.get("schema_version") != 1 or payload.get("job_type") != JOB_TYPE:
+    if payload.get("schema_version") != JOB_PAYLOAD_SCHEMA_VERSION or payload.get("job_type") != JOB_TYPE:
         raise ValueError("Unsupported calibration job payload.")
     if payload.get("code_fingerprint") != code_fingerprint():
         raise ValueError("Calibration code or numerical runtime changed; resubmit the batch.")
@@ -407,6 +396,12 @@ def completed_batch(repo: PostgresJobRepository, job_id: UUID) -> dict:
     job = repo.get(job_id=job_id)
     if job is None or job.status != JobStatus.SUCCEEDED:
         raise ValueError("The batch job has not completed successfully.")
+    if (
+        job.payload.get("schema_version") != JOB_PAYLOAD_SCHEMA_VERSION
+        or job.payload.get("job_type") != JOB_TYPE
+        or job.payload.get("code_fingerprint") != code_fingerprint()
+    ):
+        raise ValueError("Calibration code or numerical runtime changed; resubmit the batch.")
     items, _, invalid_date = _checkpoint_items(repo, job_id)
     if invalid_date is not None:
         raise ValueError("The saved batch has an incomplete checkpoint.")
@@ -415,27 +410,29 @@ def completed_batch(repo: PostgresJobRepository, job_id: UUID) -> dict:
     ):
         raise ValueError("The saved batch is incomplete.")
     base = [dict(row) for row in job.payload["table_data"]]
-    from vol_calibration.calibration_inputs import expiry_month
+    from vol_calibration.batch_adapter import numeric_parameter_rows, format_numeric_outcome
+    parameters = numeric_parameter_rows(base)
+    from options.vol_calibration.api import expiry_month
     row_by_period = {expiry_month(row["expiry"]): index for index, row in enumerate(base)}
     results = []
     for item in items:
         saved = item["result_payload"]
-        verified_checkpoint(
+        numeric_verified_checkpoint(
             saved,
             expiry=saved["expiry"],
             input_fingerprint=item["input_fingerprint"],
             dependency_fingerprint=item["dependency_fingerprint"],
         )
-        base[row_by_period[expiry_month(saved["expiry"])]] = saved["updated_row"]
+        parameters[row_by_period[expiry_month(saved["expiry"])]] = saved["updated_row"]
         results.append(saved["result_row"])
-    return {
+    numeric = {
         "results": results,
-        "table_data": base,
+        "parameter_rows": parameters,
         "success_count": sum(row["status"] == "Success" for row in results),
         "skip_count": sum(row["status"] == "Skipped" for row in results),
         "fail_count": 0,
-        "payload": job.payload,
     }
+    return {**format_numeric_outcome(numeric, base), "payload": job.payload}
 
 
 def main(argv=None) -> int:

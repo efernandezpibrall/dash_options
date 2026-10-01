@@ -340,7 +340,7 @@ def create_comparison_plot(
     go.Figure
         Overlay comparison plot
     """
-    from options.calibration_engine.models.wing_model import wing_model_iv
+    from options.vol_calibration.api import wing_model_iv
 
     fig = go.Figure()
 
@@ -452,7 +452,7 @@ def create_comparison_plot(
         if not np.isfinite(left_width) or not np.isfinite(right_width):
             return None
         try:
-            from vol_calibration.ttf_hybrid_surface import (
+            from options.vol_calibration.api import (
                 operational_surface_frame as ttf_operational_surface_frame,
             )
 

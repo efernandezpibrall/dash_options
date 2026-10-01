@@ -8,8 +8,11 @@ from vol_calibration.components.data_status import calibration_blocked_status
 
 from vol_calibration import ttf_publication as publication_data
 
-from vol_calibration import batch_results, calibration_inputs
+from options.vol_calibration.api import prepare_gas_publication_expiry
+from vol_calibration import batch_results, batch_adapter
+from options.vol_calibration import api as calibration_inputs
 from datetime import date, timedelta
+from vol_calibration.excel_export import excel_safe_frame
 import getpass
 import hashlib
 from io import StringIO, BytesIO
@@ -46,16 +49,14 @@ from vol_calibration.components.batch_calibration_modal import (
     create_batch_results_table,
 )
 from vol_calibration.auth import resolve_request_identity
-from vol_calibration.calibration_inputs import (
+from options.vol_calibration.api import (
     calibration_eligibility_error,
     calibration_readiness,
     expiry_month,
 )
-from vol_calibration.jkm_hybrid_surface import (
+from options.vol_calibration.api import (
     JKM_HYBRID_METHOD,
     JKM_HYBRID_POLICY_VERSION,
-    hybrid_iv,
-    operational_surface_frame as jkm_hybrid_operational_surface_frame,
 )
 from vol_calibration.batch_job_runner import (
     background_jobs_enabled,
@@ -67,7 +68,7 @@ from vol_calibration.batch_job_runner import (
     submit_batch,
 )
 from vol_calibration.jobs import JobStatus
-from vol_calibration.batch_checkpoints import (
+from options.vol_calibration.api import (
     digest as checkpoint_digest,
 )
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
@@ -83,9 +84,9 @@ from vol_calibration.ttf_publication import (
     load_latest_hybrid_publication,
 )
 
-from options.calibration_engine.io.loaders import load_market_data_with_metadata
-from options.calibration_engine.config.defaults import get_defaults
-from options.calibration_engine.io.storage import (
+from options.vol_calibration.api import load_market_data_with_metadata
+from options.vol_calibration.api import get_defaults
+from options.vol_calibration.api import (
     get_database_engine,
     load_latest_surface_from_db,
     PARAM_COLUMNS
@@ -158,58 +159,14 @@ def _published_surface_for_market(publication_payload):
 
 def _publication_candidate_for_expiry(market_data, table_row, expiry):
     observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-    result = jkm_batch._evaluate_existing_hybrid(observations, table_row)
-    reproduced_ivs = hybrid_iv(
-        result['core'].strike_nodes,
-        result['core'],
-        result['params'],
-        left_blend_width=float(result['left_blend_width']),
-        right_blend_width=float(result['right_blend_width']),
-    )
-    node_error = np.asarray(reproduced_ivs) - result['core'].iv_nodes
-    max_node_error = float(np.max(np.abs(node_error)))
-    if (
-        not np.isfinite(max_node_error)
-        or max_node_error > JKM_NODE_REPRODUCTION_ATOL
-    ):
-        raise ValueError(
-            "JKM publication candidate does not reproduce its governed 11-node "
-            f"core (max IV error {max_node_error:.12g})."
-        )
-    surface = jkm_hybrid_operational_surface_frame(
+    return prepare_gas_publication_expiry(
         observations,
         batch_results.model_params(table_row),
-        left_blend_width=float(result['left_blend_width']),
-        right_blend_width=float(result['right_blend_width']),
-        n_points=401,
+        product="JKM",
+        left_blend_width=table_row.get("left_blend_width"),
+        right_blend_width=table_row.get("right_blend_width"),
+        fit_diagnostics=table_row.get("fit_diagnostics"),
     )
-    surface['contract_date'] = pd.Timestamp(observations['expiry'].iloc[0])
-    surface['option_expiration_date'] = pd.Timestamp(
-        observations['option_expiration_date'].iloc[0]
-    )
-    surface['working_forward'] = float(observations['forward'].iloc[0])
-    return surface, {
-        'option_expiration_date': pd.Timestamp(
-            observations['option_expiration_date'].iloc[0]
-        ).date().isoformat(),
-        'parameters': {
-            **batch_results.model_params(table_row),
-            'left_blend_width': float(result['left_blend_width']),
-            'right_blend_width': float(result['right_blend_width']),
-        },
-        'diagnostics': {
-            'calibration_target': 'settlement_nodes',
-            'node_reproduction_max_iv_error': max_node_error,
-            'core_tv_rmse': float(result['core_tv_rmse']),
-            'tail_fit_tv_rmse': float(result['tail_fit_tv_rmse']),
-            'iv_rmse': float(result['iv_rmse']),
-        },
-        'validation': result['validation'],
-        'weighted_rmse': float(result['tail_fit_tv_rmse']),
-        'unweighted_rmse': float(result['tail_fit_tv_rmse']),
-        'max_error': None,
-        'optimizer_success': True,
-    }
 
 
 def _canonical_value(value):
@@ -366,8 +323,8 @@ def create_header():
         dbc.Col([
             dbc.ButtonGroup([
                 dbc.Button([html.I(className="fas fa-sync-alt me-1"), "Reload"], id=f'{COMMODITY_LOWER}-reload-btn', color="secondary", outline=True, size="sm"),
-                dbc.Button([html.I(className="fas fa-magic me-1"), "Calibrate"], id=f'{COMMODITY_LOWER}-calibrate-all-btn', color="warning", outline=True, size="sm", title="Calibrate selected expiry"),
-                dbc.Button([html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"], id=f'{COMMODITY_LOWER}-batch-calibrate-btn', color="warning", size="sm", title="Calibrate all expiries at once"),
+                dbc.Button([html.I(className="fas fa-magic me-1"), "Calibrate"], id=f'{COMMODITY_LOWER}-calibrate-all-btn', disabled=True, color="warning", outline=True, size="sm", title="Calibrate selected expiry"),
+                dbc.Button([html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"], id=f'{COMMODITY_LOWER}-batch-calibrate-btn', disabled=True, color="warning", size="sm", title="Calibrate all expiries at once"),
                 dbc.Button([html.I(className="fas fa-file-excel me-1"), "Export"], id=f'{COMMODITY_LOWER}-export-btn', color="info", outline=True, size="sm"),
             ]),
         ], width="auto", className="ms-auto"),
@@ -379,6 +336,8 @@ layout = dbc.Container([
     dcc.Store(id=f'{COMMODITY_LOWER}-market-data-store'),
     create_operational_surface_store(COMMODITY),
     dcc.Store(id=f'{COMMODITY_LOWER}-params-store'),
+    dcc.Store(id=f'{COMMODITY_LOWER}-selected-action-blocked-store', data=True),
+    dcc.Store(id=f'{COMMODITY_LOWER}-batch-action-blocked-store', data=True),
     dcc.Store(id=f'{COMMODITY_LOWER}-comparison-data-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-results-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-job-store', storage_type='session'),
@@ -438,9 +397,9 @@ register_operational_surface_callback(COMMODITY, get_default_date)
      Output(f'{COMMODITY_LOWER}-params-store', 'data'),
      Output(f'{COMMODITY_LOWER}-data-status', 'children'),
      Output(f'{COMMODITY_LOWER}-data-status-tooltip', 'children'),
-     Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-selected-action-blocked-store', 'data'),
      Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'title'),
-     Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-batch-action-blocked-store', 'data'),
      Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'title')],
     [Input(f'{COMMODITY_LOWER}-date-picker', 'date'),
      Input(f'{COMMODITY_LOWER}-reload-btn', 'n_clicks')],
@@ -542,7 +501,7 @@ def load_data(trade_date, reload_clicks):
     for expiry in sorted(market_data['expiry'].unique()):
         try:
             exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-            basis = jkm_batch._calibration_basis(exp_data)
+            basis = calibration_inputs.jkm_calibration_basis(exp_data)
         except Exception:
             exp_data = pd.DataFrame()
             basis = ''
@@ -618,13 +577,13 @@ def load_data(trade_date, reload_clicks):
     prevent_initial_call=False,
 )
 def load_jkm_publication(trading_date, reload_clicks):
-    del reload_clicks
     try:
         payload = load_latest_hybrid_publication(
             get_database_engine(),
             pd.Timestamp(trading_date).date(),
             commodity=COMMODITY,
             prefer_exact_cob=True,
+            force_refresh=bool(reload_clicks),
         )
     except Exception as exc:
         payload = {
@@ -817,14 +776,14 @@ def handle_calibration(
         expiry = params_df.iloc[row_idx]['expiry']
         try:
             observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-            basis = jkm_batch._calibration_basis(observations)
+            basis = calibration_inputs.jkm_calibration_basis(observations)
             error = calibration_eligibility_error(observations)
             if error:
                 raise ValueError(error)
             forward = float(observations['forward'].iloc[0])
             current_values = params_df.iloc[row_idx].to_dict()
             current_params = batch_results.model_params(current_values)
-            candidate = jkm_batch._run_jkm_candidate(
+            candidate = batch_adapter.fit_jkm_candidate(
                 observations,
                 current_params,
                 basis=basis,
@@ -837,7 +796,7 @@ def handle_calibration(
             )
 
         try:
-            current_result = jkm_batch._evaluate_existing_hybrid(
+            current_result = calibration_inputs.evaluate_jkm_parameter_row(
                 observations,
                 current_values,
             )
@@ -933,7 +892,7 @@ def handle_calibration(
 
     try:
         observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-        final_result = jkm_batch._evaluate_existing_hybrid(observations, final_params)
+        final_result = calibration_inputs.evaluate_jkm_parameter_row(observations, final_params)
     except Exception as exc:
         return (
             True, comparison_store, f"Expiry: {expiry}", f"${forward:.2f}/MMBtu",
@@ -960,7 +919,7 @@ def handle_calibration(
     )
     if target_row is None:
         raise PreventUpdate
-    jkm_batch._update_hybrid_row(
+    calibration_inputs.update_jkm_parameter_row(
         target_row,
         final_result,
         str(comparison_store.get('calibration_basis')).strip().lower(),
@@ -1060,13 +1019,13 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         params_df = pd.DataFrame(table_data)
-        params_df.to_excel(writer, sheet_name='Parameters', index=False)
+        excel_safe_frame(params_df).to_excel(writer, sheet_name='Parameters', index=False)
 
         market_data = pd.DataFrame()
         if market_data_json is not None:
             try:
                 market_data = pd.read_json(StringIO(market_data_json), orient='split')
-                market_data.to_excel(writer, sheet_name='Market Data', index=False)
+                excel_safe_frame(market_data).to_excel(writer, sheet_name='Market Data', index=False)
             except Exception:
                 pass
 
@@ -1089,7 +1048,7 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
                 except Exception:
                     continue
         if operational_frames:
-            pd.concat(operational_frames, ignore_index=True).to_excel(
+            excel_safe_frame(pd.concat(operational_frames, ignore_index=True)).to_excel(
                 writer,
                 sheet_name='Operational Surface',
                 index=False,
@@ -1130,7 +1089,7 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
             summary_data['Min Core TV RMSE'] = [f"{np.min(rmse_values):.6f}"]
 
         summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        excel_safe_frame(summary_df).to_excel(writer, sheet_name='Summary', index=False)
 
     output.seek(0)
     excel_data = output.read()
@@ -1142,6 +1101,20 @@ def export_to_excel(n_clicks, table_data, market_data_json, trade_date):
 # ============================================================================
 # Batch Calibration Callbacks
 # ============================================================================
+
+@callback(
+    Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'disabled'),
+    Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'disabled'),
+    Input(f'{COMMODITY_LOWER}-selected-action-blocked-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-batch-action-blocked-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-param-table', 'data'),
+)
+def calibration_actions_disabled(selected_blocked, batch_blocked, market_data_json, table_data):
+    """Keep actions unavailable until both UI inputs have arrived."""
+    loading = not market_data_json or not table_data
+    return loading or bool(selected_blocked), loading or bool(batch_blocked)
+
 
 @callback(
     [Output(f'{COMMODITY_LOWER}-batch-confirm-modal', 'is_open'),
@@ -1209,8 +1182,9 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     if triggered_id != f'{COMMODITY_LOWER}-batch-confirm-btn':
         raise PreventUpdate
 
-    if market_data_json is None or table_data is None:
-        raise PreventUpdate
+    if not market_data_json or not table_data:
+        return (True, 0, "Waiting for market inputs and parameter rows to load.", [], False,
+                None, no_update, no_update, None)
 
     del auto_save_opts, is_open
     skip_good = 'skip_good' in (skip_good_opts or [])

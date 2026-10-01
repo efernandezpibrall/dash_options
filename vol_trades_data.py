@@ -17,8 +17,8 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import bindparam, text
 
-from options.calibration_engine.converters.delta import delta_to_strike
-from options.calibration_engine.io.brent_market import prepare_brent_calibration_observations
+from options.vol_calibration.api import delta_to_strike
+from options.vol_calibration.api import prepare_brent_calibration_observations
 from runtime_config import get_database_engine
 
 PRODUCT = "BRENT"
@@ -260,7 +260,7 @@ def load_available_jkm_cobs(engine=None, *, limit: int = SNAPSHOT_LIMIT) -> pd.D
 def load_jkm_official_market(cob_date: str) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Load the exact-COB official ICAP smile and ICE_JKM_MO forward set."""
 
-    from options.calibration_engine.io.loaders import load_market_data_with_metadata
+    from options.vol_calibration.api import load_market_data_with_metadata
 
     selected = pd.Timestamp(cob_date).date()
     result = load_market_data_with_metadata(

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-from vol_calibration.brent_intraday import (
+from options.vol_calibration.api import (
     ADJUSTMENT_PARAMS,
     adjustment_values,
     select_surface_slice,

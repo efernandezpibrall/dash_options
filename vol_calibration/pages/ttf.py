@@ -14,8 +14,14 @@ from vol_calibration import auth as calibration_auth
 
 from vol_calibration import ttf_publication as publication_data
 
-from vol_calibration import batch_results, calibration_inputs
+from options.vol_calibration.api import (
+    prepare_gas_publication_expiry, published_ttf_node_values, base_ttf_observations,
+    rebase_ttf_published_surface, changed_ttf_tail_overrides, fit_ttf_intraday_candidate,
+)
+from vol_calibration import batch_results, batch_adapter
+from options.vol_calibration import api as calibration_inputs
 from datetime import date
+from vol_calibration.excel_export import excel_safe_frame
 import getpass
 import hashlib
 from io import StringIO, BytesIO
@@ -56,7 +62,7 @@ from vol_calibration.feature_flags import (
     writes_enabled as _legacy_writes_enabled,
 )
 from vol_calibration.auth import resolve_request_identity
-from vol_calibration.calibration_inputs import (
+from options.vol_calibration.api import (
     calibration_eligibility_error,
     calibration_readiness,
     expiry_month,
@@ -64,10 +70,9 @@ from vol_calibration.calibration_inputs import (
 from vol_calibration.model_version import (
     DEFAULT_CALIBRATION_MODEL_VERSION,
 )
-from vol_calibration.ttf_hybrid_surface import (
+from options.vol_calibration.api import (
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
-    hybrid_iv,
     operational_surface_frame as ttf_hybrid_operational_surface_frame,
 )
 from vol_calibration.batch_job_runner import (
@@ -80,7 +85,7 @@ from vol_calibration.batch_job_runner import (
     submit_batch,
 )
 from vol_calibration.jobs import JobStatus
-from vol_calibration.batch_checkpoints import (
+from options.vol_calibration.api import (
     digest as checkpoint_digest,
 )
 from vol_calibration.operational_surface import (
@@ -101,7 +106,7 @@ from vol_calibration.components.ttf_intraday_workspace import (
     create_ttf_intraday_trade_panel,
     create_ttf_publication_status,
 )
-from vol_calibration.ttf_adjustments import apply_ttf_smile_adjustments
+from vol_calibration.observed_fit_pool import execute_hybrid_starts
 from vol_calibration.ttf_intraday import (
     TTF_INTRADAY_PREMIUM_METHOD,
     load_ttf_intraday_trades,
@@ -116,14 +121,13 @@ from vol_calibration.ttf_publication import (
     load_latest_ttf_publication,
     ttf_publication_frame,
 )
-from options.ttf_volatility import delta_node_to_strike
 
 # Import calibration engine modules
-from options.calibration_engine.io.loaders import (
+from options.vol_calibration.api import (
     load_market_data_with_metadata,
 )
-from options.calibration_engine.config.defaults import get_defaults
-from options.calibration_engine.io.storage import (
+from options.vol_calibration.api import get_defaults
+from options.vol_calibration.api import (
     get_database_engine,
     load_latest_surface_from_db,
     PARAM_COLUMNS
@@ -146,95 +150,15 @@ TTF_ADVANCED_PARAMS = [
 
 
 def _changed_ttf_tail_overrides(tail_row, initial_row):
-    """Return only expert values the trader actually changed.
-
-    The expert table is populated from the editable row before calibration.
-    Treating all displayed values as overrides would replace the newly fitted
-    tail with that stale snapshot and can invalidate an otherwise acceptable
-    hybrid.  An unchanged editor therefore contributes no override.
-    """
-    overrides = {}
-    for name in (
-        'dc',
-        'uc',
-        'put_wing_power',
-        'call_wing_power',
-        'left_blend_width',
-        'right_blend_width',
-    ):
-        value = pd.to_numeric(
-            pd.Series([(tail_row or {}).get(name)]), errors='coerce'
-        ).iloc[0]
-        initial_value = pd.to_numeric(
-            pd.Series([(initial_row or {}).get(name)]), errors='coerce'
-        ).iloc[0]
-        if np.isfinite(value) and (
-            not np.isfinite(initial_value)
-            or not np.isclose(float(value), float(initial_value), atol=1e-12)
-        ):
-            overrides[name] = float(value)
-    return overrides
+    return changed_ttf_tail_overrides(tail_row, initial_row)
 
 
 def _published_node_values(publication_payload, observations):
-    """Interpolate only saved IVs onto the governed delta nodes."""
-    published = ttf_publication_frame(publication_payload)
-    if published.empty or 'contract_date' not in published.columns:
-        return None
-    expiry = expiry_month(observations['expiry'].iloc[0])
-    periods = pd.to_datetime(
-        published['contract_date'], errors='coerce'
-    ).dt.to_period('M')
-    expiry_rows = published[periods == expiry].copy()
-    if expiry_rows.empty:
-        return None
-    for column in ('delta', 'volatility'):
-        if column in expiry_rows.columns:
-            expiry_rows[column] = pd.to_numeric(
-                expiry_rows[column], errors='coerce'
-            )
-    expiry_rows = expiry_rows.dropna(subset=['delta', 'volatility']).sort_values(
-        'delta'
-    )
-    expiry_rows = expiry_rows.drop_duplicates('delta', keep='last')
-    if len(expiry_rows) < 2:
-        return None
-    target_deltas = pd.to_numeric(observations['delta'], errors='coerce').to_numpy(
-        dtype=float
-    )
-    source_deltas = expiry_rows['delta'].to_numpy(dtype=float)
-    if (
-        target_deltas.min() < source_deltas.min() - 1e-8
-        or target_deltas.max() > source_deltas.max() + 1e-8
-    ):
-        return None
-    return {
-        'ivs': np.interp(
-            target_deltas,
-            source_deltas,
-            expiry_rows['volatility'].to_numpy(dtype=float),
-        ),
-    }
+    return published_ttf_node_values(ttf_publication_frame(publication_payload), observations)
 
 
 def _base_ttf_observations(market_data, expiry, publication_payload=None):
-    """Return the manual intraday base, preferring the latest published smile."""
-    observations = ttf_batch._settlement_ttf_observations(market_data, expiry)
-    published = _published_node_values(publication_payload, observations)
-    if published is not None:
-        observations['iv'] = published['ivs']
-    forward = float(observations['forward'].iloc[0])
-    dte = float(observations['dte'].iloc[0])
-    observations['strike'] = [
-        delta_node_to_strike(
-            forward,
-            dte / 365.25,
-            float(delta),
-            float(iv),
-        )
-        for delta, iv in zip(observations['delta'], observations['iv'])
-    ]
-    return observations
+    return base_ttf_observations(market_data, expiry, ttf_publication_frame(publication_payload))
 
 
 def _apply_published_parameters(table_rows, market_data, publication_payload):
@@ -282,52 +206,7 @@ def _apply_published_parameters(table_rows, market_data, publication_payload):
 
 
 def _published_surface_for_market(publication_payload, market_data):
-    """Re-express the saved IV-by-delta surface on current forwards and DTEs."""
-    published = ttf_publication_frame(publication_payload)
-    if published.empty or market_data is None or market_data.empty:
-        return published
-    frames = []
-    published_periods = pd.to_datetime(
-        published.get('contract_date'), errors='coerce'
-    ).dt.to_period('M')
-    for expiry in sorted(market_data['expiry'].dropna().unique()):
-        try:
-            observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-        except ValueError:
-            continue
-        rows = published[published_periods == expiry_month(expiry)].copy()
-        if rows.empty:
-            continue
-        rows['delta'] = pd.to_numeric(rows.get('delta'), errors='coerce')
-        rows['volatility'] = pd.to_numeric(
-            rows.get('volatility'), errors='coerce'
-        )
-        rows = rows.dropna(subset=['delta', 'volatility'])
-        rows = rows[
-            rows['delta'].between(0.0, 1.0, inclusive='neither')
-            & rows['volatility'].gt(0.0)
-        ]
-        if rows.empty:
-            continue
-        forward = float(observations['forward'].iloc[0])
-        dte = float(observations['dte'].iloc[0])
-        rows['strike'] = [
-            delta_node_to_strike(
-                forward,
-                dte / 365.25,
-                float(delta),
-                float(iv),
-            )
-            for delta, iv in zip(rows['delta'], rows['volatility'])
-        ]
-        rows['total_variance'] = dte / 365.25 * rows['volatility'] ** 2
-        rows['working_forward'] = forward
-        rows['contract_date'] = pd.Timestamp(observations['expiry'].iloc[0])
-        rows['option_expiration_date'] = pd.Timestamp(
-            observations['option_expiration_date'].iloc[0]
-        )
-        frames.append(rows)
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return rebase_ttf_published_surface(ttf_publication_frame(publication_payload), market_data)
 
 
 def _create_ttf_node_editor():
@@ -437,7 +316,7 @@ def _ttf_node_editor_rows(
         expiry,
         publication_payload,
     )
-    stored_entry = (node_store or {}).get(ttf_batch._expiry_store_key(expiry), {})
+    stored_entry = (node_store or {}).get(calibration_inputs.expiry_override_key(expiry), {})
     stored = stored_entry.get('nodes', stored_entry)
     published = _published_node_values(publication_payload, settlement_observations)
     published_by_delta = {}
@@ -536,6 +415,7 @@ def create_header():
                 dbc.Button(
                     [html.I(className="fas fa-magic me-1"), "Calibrate"],
                     id=f'{COMMODITY_LOWER}-calibrate-all-btn',
+                    disabled=True,
                     color="primary",
                     outline=True,
                     size="sm",
@@ -544,6 +424,7 @@ def create_header():
                 dbc.Button(
                     [html.I(className="fas fa-layer-group me-1"), "Calibrate All Expiries"],
                     id=f'{COMMODITY_LOWER}-batch-calibrate-btn',
+                    disabled=True,
                     color="primary",
                     size="sm",
                     title="Calibrate all expiries at once",
@@ -570,6 +451,8 @@ layout = dbc.Container([
     create_operational_surface_store(COMMODITY),
     create_ttf_traded_options_store(),
     dcc.Store(id=f'{COMMODITY_LOWER}-params-store'),
+    dcc.Store(id=f'{COMMODITY_LOWER}-selected-action-blocked-store', data=True),
+    dcc.Store(id=f'{COMMODITY_LOWER}-batch-action-blocked-store', data=True),
     dcc.Store(id=f'{COMMODITY_LOWER}-comparison-data-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-results-store'),
     dcc.Store(id=f'{COMMODITY_LOWER}-batch-job-store', storage_type='session'),
@@ -650,9 +533,9 @@ register_ttf_traded_options_callback(get_default_date)
      Output(f'{COMMODITY_LOWER}-params-store', 'data'),
      Output(f'{COMMODITY_LOWER}-data-status', 'children'),
      Output(f'{COMMODITY_LOWER}-data-status-tooltip', 'children'),
-     Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-selected-action-blocked-store', 'data'),
      Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'title'),
-     Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'disabled'),
+     Output(f'{COMMODITY_LOWER}-batch-action-blocked-store', 'data'),
      Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'title'),
      Output('ttf-trading-context-store', 'data')],
     [Input(f'{COMMODITY_LOWER}-date-picker', 'date'),
@@ -764,7 +647,7 @@ def load_data(trade_date, reload_clicks):
     for expiry in sorted(expiries):
         try:
             exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-            basis = ttf_batch._calibration_basis(exp_data)
+            basis = calibration_inputs.ttf_calibration_basis(exp_data)
         except ValueError:
             exp_data = pd.DataFrame()
             basis = None
@@ -939,7 +822,6 @@ def render_ttf_trading_context(context):
     prevent_initial_call=False,
 )
 def load_ttf_publication(trading_date, reload_clicks):
-    del reload_clicks
     selected = pd.to_datetime(trading_date or get_default_date()).date()
     try:
         engine = get_database_engine()
@@ -947,6 +829,7 @@ def load_ttf_publication(trading_date, reload_clicks):
             engine,
             selected,
             prefer_exact_cob=True,
+            force_refresh=bool(reload_clicks),
         )
     except Exception as exc:
         payload = {
@@ -1288,7 +1171,7 @@ def populate_ttf_node_editor(
         node_store,
         publication_payload,
     )
-    basis = ttf_batch._calibration_basis(observations).title()
+    basis = calibration_inputs.ttf_calibration_basis(observations).title()
     return rows, f"{expiry} · {basis}"
 
 
@@ -1356,7 +1239,7 @@ def render_ttf_adjustment_basis(expiry, market_data_json, publication_payload):
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
     try:
         observations = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-        basis = ttf_batch._calibration_basis(observations).title()
+        basis = calibration_inputs.ttf_calibration_basis(observations).title()
         published = _published_node_values(publication_payload, observations)
     except ValueError as exc:
         return str(exc)
@@ -1432,7 +1315,7 @@ def build_ttf_intraday_candidate(
     if not expiry or not market_data_json or not table_data:
         raise PreventUpdate
     row_index = _find_table_row(table_data, expiry)
-    key = ttf_batch._expiry_store_key(expiry)
+    key = calibration_inputs.expiry_override_key(expiry)
 
     if ctx.triggered_id == 'ttf-reset-adjustment-btn':
         updated_nodes = dict(node_store or {})
@@ -1486,54 +1369,26 @@ def build_ttf_intraday_candidate(
             selected_trade = trades[trade_index]
             if expiry_month(selected_trade.get('contract_date')) != expiry_month(expiry):
                 raise ValueError('The selected trade belongs to a different expiry.')
-            base_observations['forward'] = float(selected_trade['forward'])
-            base_observations['strike'] = [
-                delta_node_to_strike(
-                    float(selected_trade['forward']),
-                    float(base_observations['dte'].iloc[0]) / 365.25,
-                    float(delta),
-                    float(iv),
-                )
-                for delta, iv in zip(
-                    base_observations['delta'], base_observations['iv']
-                )
-            ]
-
-        adjusted, diagnostics = apply_ttf_smile_adjustments(
+        numeric_result = fit_ttf_intraday_candidate(
             base_observations,
+            batch_results.model_params(table_data[row_index]),
             {
-                'level': level,
-                'skew': skew,
-                'put_curvature': put_curvature,
-                'call_curvature': call_curvature,
+                'level': level, 'skew': skew,
+                'put_curvature': put_curvature, 'call_curvature': call_curvature,
             },
             selected_trade=selected_trade,
+            tail_overrides=_changed_ttf_tail_overrides(
+                (tail_rows or [{}])[0], table_data[row_index],
+            ),
+            start_executor=execute_hybrid_starts,
         )
-        # Recompute delta-node strikes after the final node vols so the current
-        # working-forward/delta convention remains internally consistent.
+        adjusted = numeric_result['observations']
+        diagnostics = numeric_result['diagnostics']
+        basis = numeric_result['basis']
+        final_result = numeric_result['candidate']
         working_forward = float(adjusted['forward'].iloc[0])
         working_dte = float(adjusted['dte'].iloc[0])
-        adjusted['strike'] = [
-            delta_node_to_strike(
-                working_forward,
-                working_dte / 365.25,
-                float(delta),
-                float(iv),
-            )
-            for delta, iv in zip(adjusted['delta'], adjusted['iv'])
-        ]
-        basis = ttf_batch._calibration_basis(adjusted)
-        initial = table_data[row_index]
-        fitted = ttf_batch._run_ttf_candidate(
-            adjusted,
-            initial,
-            basis=basis,
-            selected_expiry=True,
-        )
-        final_params = batch_results.candidate_params(fitted)
-        tail_row = (tail_rows or [{}])[0]
-        final_params.update(_changed_ttf_tail_overrides(tail_row, initial))
-        final_result = ttf_batch._evaluate_existing_hybrid(adjusted, final_params)
+
     except Exception as exc:
         return (
             no_update,
@@ -1666,17 +1521,17 @@ def validate_ttf_node_edits(
         values[f"{float(delta):.10f}"] = float(iv_pct) / 100.0
 
     candidate_store = dict(node_store or {})
-    store_key = ttf_batch._expiry_store_key(expiry)
+    store_key = calibration_inputs.expiry_override_key(expiry)
     existing_entry = candidate_store.get(store_key, {})
     if isinstance(existing_entry, dict) and 'nodes' in existing_entry:
         candidate_store[store_key] = {**existing_entry, 'nodes': values}
     else:
         candidate_store[store_key] = values
-    edited_market = ttf_batch._apply_node_edits(market_data, candidate_store, expiry)
+    edited_market = calibration_inputs.apply_ttf_node_overrides(market_data, candidate_store, expiry)
     try:
         observations = calibration_inputs.select_hybrid_expiry_inputs(edited_market, expiry)
-        basis = ttf_batch._calibration_basis(observations)
-        result = ttf_batch._run_ttf_candidate(
+        basis = calibration_inputs.ttf_calibration_basis(observations)
+        result = batch_adapter.fit_ttf_candidate(
             observations,
             table_data[row_index],
             basis=basis,
@@ -1802,12 +1657,12 @@ def update_smile_grid(
     if not market_data.empty:
         market_data = pd.concat(
             [
-                ttf_batch._settlement_ttf_observations(market_data, expiry)
+                calibration_inputs.settlement_ttf_observations(market_data, expiry)
                 for expiry in sorted(market_data['expiry'].dropna().unique())
             ],
             ignore_index=True,
         )
-    market_data = ttf_batch._apply_node_edits(market_data, node_store)
+    market_data = calibration_inputs.apply_ttf_node_overrides(market_data, node_store)
     params_df = parse_table_data(table_data or [])
     selected_row = selected_rows[0] if selected_rows else None
     selected_axis = x_axis or 'delta'
@@ -1892,7 +1747,7 @@ def handle_calibration(
         raise PreventUpdate
 
     market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    market_data = ttf_batch._apply_node_edits(market_data, node_store)
+    market_data = calibration_inputs.apply_ttf_node_overrides(market_data, node_store)
     params_df = parse_table_data(table_data)
 
     if triggered_id == f'{COMMODITY_LOWER}-calibrate-all-btn':
@@ -1904,7 +1759,7 @@ def handle_calibration(
         expiry = params_df.iloc[row_idx]['expiry']
         try:
             exp_data = calibration_inputs.select_hybrid_expiry_inputs(market_data, expiry)
-            basis = ttf_batch._calibration_basis(exp_data)
+            basis = calibration_inputs.ttf_calibration_basis(exp_data)
             eligibility_error = calibration_eligibility_error(exp_data)
         except Exception as exc:
             eligibility_error = str(exc)
@@ -1932,7 +1787,7 @@ def handle_calibration(
 
         # Run calibration
         try:
-            result = ttf_batch._run_ttf_candidate(
+            result = batch_adapter.fit_ttf_candidate(
                 exp_data,
                 current_params,
                 basis=basis,
@@ -1960,7 +1815,7 @@ def handle_calibration(
         # instead of manufacturing a legacy IV RMSE.
         try:
             current_values = params_df.iloc[row_idx].to_dict()
-            current_result = ttf_batch._evaluate_existing_hybrid(exp_data, current_values)
+            current_result = calibration_inputs.evaluate_ttf_parameter_row(exp_data, current_values)
             current_params = {
                 **current_params,
                 'left_blend_width': float(current_result['left_blend_width']),
@@ -2074,7 +1929,7 @@ def handle_calibration(
 
     # Rebuild and validate the complete hybrid after every Advanced tail edit.
     try:
-        final_result = ttf_batch._evaluate_existing_hybrid(exp_data, final_params)
+        final_result = calibration_inputs.evaluate_ttf_parameter_row(exp_data, final_params)
         final_rmse = float(final_result['core_tv_rmse'])
     except Exception as exc:
         return (
@@ -2176,71 +2031,24 @@ def _publication_candidate_for_expiry(
     calibration_target=TTF_INTRADAY_CALIBRATION_TARGET,
 ):
     if calibration_target == TTF_BATCH_CALIBRATION_TARGET:
-        base_observations = ttf_batch._settlement_ttf_observations(market_data, expiry)
+        base_observations = calibration_inputs.settlement_ttf_observations(market_data, expiry)
     elif calibration_target == TTF_INTRADAY_CALIBRATION_TARGET:
-        base_observations = _base_ttf_observations(
-            market_data,
-            expiry,
-            publication_payload,
-        )
+        base_observations = _base_ttf_observations(market_data, expiry, publication_payload)
     else:
         raise ValueError(f"Unsupported TTF calibration target: {calibration_target}")
-    edited_market = ttf_batch._apply_node_edits(base_observations, node_store, expiry)
+    edited_market = calibration_inputs.apply_ttf_node_overrides(base_observations, node_store, expiry)
     observations = calibration_inputs.select_hybrid_expiry_inputs(edited_market, expiry)
-    result = ttf_batch._evaluate_existing_hybrid(observations, table_row)
-    reproduced_ivs = hybrid_iv(
-        result['core'].strike_nodes,
-        result['core'],
-        result['params'],
-        left_blend_width=float(result['left_blend_width']),
-        right_blend_width=float(result['right_blend_width']),
-    )
-    node_error = np.asarray(reproduced_ivs) - result['core'].iv_nodes
-    max_node_error = float(np.max(np.abs(node_error)))
-    if not np.isfinite(max_node_error) or max_node_error > TTF_NODE_REPRODUCTION_ATOL:
-        raise ValueError(
-            "TTF publication candidate does not reproduce its governed 11-node "
-            f"core (max IV error {max_node_error:.12g})."
-        )
-    surface = ttf_hybrid_operational_surface_frame(
+    key = calibration_inputs.expiry_override_key(expiry)
+    return prepare_gas_publication_expiry(
         observations,
         batch_results.model_params(table_row),
-        left_blend_width=float(result['left_blend_width']),
-        right_blend_width=float(result['right_blend_width']),
-        n_points=401,
+        product="TTF",
+        left_blend_width=table_row.get("left_blend_width"),
+        right_blend_width=table_row.get("right_blend_width"),
+        calibration_target=calibration_target,
+        adjustment_diagnostics=(adjustment_store or {}).get(key),
+        fit_diagnostics=table_row.get("fit_diagnostics"),
     )
-    surface['contract_date'] = pd.Timestamp(observations['expiry'].iloc[0])
-    surface['option_expiration_date'] = pd.Timestamp(
-        observations['option_expiration_date'].iloc[0]
-    )
-    surface['working_forward'] = float(observations['forward'].iloc[0])
-    key = ttf_batch._expiry_store_key(expiry)
-    diagnostics = dict((adjustment_store or {}).get(key) or {})
-    return surface, {
-        'option_expiration_date': pd.Timestamp(
-            observations['option_expiration_date'].iloc[0]
-        ).date().isoformat(),
-        'parameters': {
-            **batch_results.model_params(table_row),
-            'left_blend_width': float(result['left_blend_width']),
-            'right_blend_width': float(result['right_blend_width']),
-        },
-        'diagnostics': {
-            **diagnostics,
-            'calibration_target': calibration_target,
-            'node_reproduction_max_iv_error': max_node_error,
-            'core_tv_rmse': float(result['core_tv_rmse']),
-            'tail_fit_tv_rmse': float(result['tail_fit_tv_rmse']),
-            'iv_rmse': float(result['iv_rmse']),
-            'core_interpolation': result['core'].core_interpolation,
-            'core_diagnostics': result['core'].core_diagnostics,
-        },
-        'validation': result['validation'],
-        'weighted_rmse': float(result['tail_fit_tv_rmse']),
-        'unweighted_rmse': float(result['tail_fit_tv_rmse']),
-        'max_error': None,
-        'optimizer_success': True,
-    }
 
 
 _BATCH_SAVE_STATUSES = frozenset({'Success', 'Skipped'})
@@ -2526,20 +2334,6 @@ def _publication_created_by(
     )
 
 
-@callback(
-    Output(f'{COMMODITY_LOWER}-download-excel', 'data'),
-    Input(f'{COMMODITY_LOWER}-export-btn', 'n_clicks'),
-    [State(f'{COMMODITY_LOWER}-param-table', 'data'),
-     State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
-     State(f'{COMMODITY_LOWER}-date-picker', 'date'),
-     State(f'{COMMODITY_LOWER}-traded-options-store', 'data'),
-     State(f'{COMMODITY_LOWER}-final-nodes-store', 'data'),
-     State('ttf-trading-context-store', 'data'),
-     State('ttf-published-surface-store', 'data'),
-     State('ttf-intraday-trades-store', 'data'),
-     State('ttf-adjustment-store', 'data')],
-    prevent_initial_call=True
-)
 def export_to_excel(
     n_clicks,
     table_data,
@@ -2551,6 +2345,7 @@ def export_to_excel(
     publication_payload=None,
     manual_trade_payload=None,
     adjustment_store=None,
+    batch_state=None,
 ):
     """Export parameters, calibration inputs, and displayed traded options."""
     if n_clicks is None or table_data is None:
@@ -2581,7 +2376,7 @@ def export_to_excel(
                 market_data,
                 row.get('expiry'),
             )
-            basis = ttf_batch._calibration_basis(observations)
+            basis = calibration_inputs.ttf_calibration_basis(observations)
             source_name = str(observations['source_name'].iloc[0])
         canonical_bases.append(basis)
         source_names.append(source_name)
@@ -2590,7 +2385,22 @@ def export_to_excel(
     params_df['calibration_method'] = TTF_HYBRID_METHOD
     params_df['calibration_policy_version'] = TTF_HYBRID_POLICY_VERSION
 
-    edited_market = ttf_batch._apply_node_edits(market_data, node_store)
+    settlement_batch = False
+    if batch_state is not None:
+        settlement_batch, reason = _batch_state_ready(
+            batch_state, str(trade_date), market_data_json, table_data,
+            node_store, publication_payload,
+        )
+        if not settlement_batch:
+            raise ValueError(f"The settlement batch cannot be exported: {reason}")
+    base_frames = [
+        calibration_inputs.settlement_ttf_observations(market_data, expiry)
+        if settlement_batch
+        else _base_ttf_observations(market_data, expiry, publication_payload)
+        for expiry in sorted(market_data['expiry'].dropna().unique())
+    ] if not market_data.empty else []
+    base_market = pd.concat(base_frames, ignore_index=True) if base_frames else market_data.copy()
+    edited_market = calibration_inputs.apply_ttf_node_overrides(base_market, node_store)
     operational_frames = []
     for row in params_df.to_dict('records'):
         left_width = pd.to_numeric(
@@ -2601,11 +2411,13 @@ def export_to_excel(
         ).iloc[0]
         if not np.isfinite(left_width) or not np.isfinite(right_width):
             continue
-        observations = calibration_inputs.select_hybrid_expiry_inputs(
-            edited_market,
-            row.get('expiry'),
-        )
-        validation = ttf_batch._evaluate_existing_hybrid(observations, row)
+        # Export the same target used to validate this candidate. Raw source
+        # strikes can differ from the governed settlement delta coordinates.
+        observations = calibration_inputs.select_hybrid_expiry_inputs(edited_market, row.get('expiry'))
+        try:
+            validation = calibration_inputs.evaluate_ttf_parameter_row(observations, row)
+        except ValueError as exc:
+            raise ValueError(f"{row.get('expiry')}: {exc}") from exc
         params_df.loc[
             params_df['expiry'] == row.get('expiry'),
             'tail_fit_tv_rmse',
@@ -2644,10 +2456,10 @@ def export_to_excel(
 
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         # Sheet 1: Parameters
-        params_df.to_excel(writer, sheet_name='Parameters', index=False)
+        excel_safe_frame(params_df).to_excel(writer, sheet_name='Parameters', index=False)
 
         if not operational_surface.empty:
-            operational_surface.to_excel(
+            excel_safe_frame(operational_surface).to_excel(
                 writer,
                 sheet_name='Operational Surface',
                 index=False,
@@ -2661,7 +2473,7 @@ def export_to_excel(
             settlement_nodes['settlement_cob'] = (
                 (trading_context or {}).get('settlement_cob')
             )
-            settlement_nodes.to_excel(
+            excel_safe_frame(settlement_nodes).to_excel(
                 writer,
                 sheet_name='Settlement Nodes',
                 index=False,
@@ -2671,12 +2483,12 @@ def export_to_excel(
             candidate_nodes['node_state'] = [
                 (
                     'adjusted'
-                    if ttf_batch._expiry_store_key(expiry) in (node_store or {})
+                    if calibration_inputs.expiry_override_key(expiry) in (node_store or {})
                     else 'base'
                 )
                 for expiry in candidate_nodes['expiry']
             ]
-            candidate_nodes.to_excel(
+            excel_safe_frame(candidate_nodes).to_excel(
                 writer,
                 sheet_name='Candidate Nodes',
                 index=False,
@@ -2684,7 +2496,7 @@ def export_to_excel(
 
             published_surface = ttf_publication_frame(publication_payload)
             if not published_surface.empty:
-                published_surface.to_excel(
+                excel_safe_frame(published_surface).to_excel(
                     writer,
                     sheet_name='Latest Published',
                     index=False,
@@ -2694,7 +2506,7 @@ def export_to_excel(
                 (manual_trade_payload or {}).get('trades') or []
             )
             if not manual_trades.empty:
-                manual_trades.to_excel(
+                excel_safe_frame(manual_trades).to_excel(
                     writer,
                     sheet_name='Intraday Manual Trades',
                     index=False,
@@ -2725,13 +2537,13 @@ def export_to_excel(
                     }
                 )
             if recipes:
-                pd.DataFrame(recipes).to_excel(
+                excel_safe_frame(pd.DataFrame(recipes)).to_excel(
                     writer,
                     sheet_name='Adjustment Recipe',
                     index=False,
                 )
             if validation_rows:
-                pd.DataFrame(validation_rows).to_excel(
+                excel_safe_frame(pd.DataFrame(validation_rows)).to_excel(
                     writer,
                     sheet_name='Validation',
                     index=False,
@@ -2753,7 +2565,7 @@ def export_to_excel(
                 )
                 if column in params_df.columns
             ]
-            params_df[tail_columns].to_excel(
+            excel_safe_frame(params_df[tail_columns]).to_excel(
                 writer,
                 sheet_name='Tail Parameters',
                 index=False,
@@ -2761,7 +2573,7 @@ def export_to_excel(
 
         # Sheet 2: Market Data (if available)
         if not market_data.empty:
-            market_data.to_excel(writer, sheet_name='Market Data', index=False)
+            excel_safe_frame(market_data).to_excel(writer, sheet_name='Market Data', index=False)
 
         traded_options = ttf_traded_options_frame(
             traded_options_payload,
@@ -2778,7 +2590,7 @@ def export_to_excel(
                         errors='coerce',
                     )
                 )
-            traded_options_export.to_excel(
+            excel_safe_frame(traded_options_export).to_excel(
                 writer,
                 sheet_name='Traded Options',
                 index=False,
@@ -2853,7 +2665,7 @@ def export_to_excel(
             ]
 
         summary_df = pd.DataFrame(summary_data)
-        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        excel_safe_frame(summary_df).to_excel(writer, sheet_name='Summary', index=False)
 
     # Get the data
     output.seek(0)
@@ -2865,9 +2677,49 @@ def export_to_excel(
     return dcc.send_bytes(excel_data, filename)
 
 
+@callback(
+    Output(f'{COMMODITY_LOWER}-download-excel', 'data'),
+    Output(f'{COMMODITY_LOWER}-data-status', 'children', allow_duplicate=True),
+    Input(f'{COMMODITY_LOWER}-export-btn', 'n_clicks'),
+    [State(f'{COMMODITY_LOWER}-param-table', 'data'),
+     State(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+     State(f'{COMMODITY_LOWER}-date-picker', 'date'),
+     State(f'{COMMODITY_LOWER}-traded-options-store', 'data'),
+     State(f'{COMMODITY_LOWER}-final-nodes-store', 'data'),
+     State('ttf-trading-context-store', 'data'),
+     State('ttf-published-surface-store', 'data'),
+     State('ttf-intraday-trades-store', 'data'),
+     State('ttf-adjustment-store', 'data'),
+     State('ttf-batch-results-store', 'data')],
+    prevent_initial_call=True,
+)
+def export_selected_ttf(*args):
+    """Deliver the selected candidate or display the failed validation reason."""
+    try:
+        return export_to_excel(*args), no_update
+    except PreventUpdate:
+        raise
+    except ValueError as exc:
+        return no_update, dbc.Alert(f"Export blocked: {exc}", color="danger")
+
+
 # ============================================================================
 # Batch Calibration Callbacks
 # ============================================================================
+
+@callback(
+    Output(f'{COMMODITY_LOWER}-calibrate-all-btn', 'disabled'),
+    Output(f'{COMMODITY_LOWER}-batch-calibrate-btn', 'disabled'),
+    Input(f'{COMMODITY_LOWER}-selected-action-blocked-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-batch-action-blocked-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-market-data-store', 'data'),
+    Input(f'{COMMODITY_LOWER}-param-table', 'data'),
+)
+def calibration_actions_disabled(selected_blocked, batch_blocked, market_data_json, table_data):
+    """Keep actions unavailable until both UI inputs have arrived."""
+    loading = not market_data_json or not table_data
+    return loading or bool(selected_blocked), loading or bool(batch_blocked)
+
 
 @callback(
     [Output(f'{COMMODITY_LOWER}-batch-confirm-modal', 'is_open'),
@@ -2941,8 +2793,9 @@ def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_
     if triggered_id != f'{COMMODITY_LOWER}-batch-confirm-btn':
         raise PreventUpdate
 
-    if market_data_json is None or table_data is None:
-        raise PreventUpdate
+    if not market_data_json or not table_data:
+        return (True, 0, "Waiting for market inputs and parameter rows to load.", [], False,
+                None, no_update, no_update, None)
 
     # Server-side publication invariant: the hybrid has no governed database
     # provenance yet, so batch output is always session/export-only.

@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict, Optional
 
-from options.calibration_engine.validation.arbitrage import check_butterfly
+from options.vol_calibration.api import check_arbitrage_status
 
 
 # Parameter columns configuration
@@ -299,62 +299,6 @@ def get_param_tooltip(param_id: str) -> str:
     return tooltips.get(param_id, '')
 
 
-def check_arbitrage_status(
-    params: Dict[str, float],
-    forward: Optional[float] = None,
-    dte: Optional[float] = None,
-) -> str:
-    """
-    Check arbitrage status for a set of Wing Model parameters.
-
-    Parameters
-    ----------
-    params : dict
-        Wing Model parameters (vr, sr, pc, cc, dc, uc, dsm, usm, vcr, scr, ssr,
-        put_wing_power, call_wing_power)
-
-    forward : float
-        Forward price for the expiry
-
-    dte : float
-        Days to expiry
-
-    Returns
-    -------
-    str
-        'Pass' if no violations, 'Warn' if marginal (min_g between -0.01 and 0),
-        'Fail' if butterfly arbitrage detected
-    """
-    try:
-        if (
-            forward is None
-            or dte is None
-            or not np.isfinite(float(forward))
-            or not np.isfinite(float(dte))
-            or float(forward) <= 0
-            or float(dte) <= 0
-        ):
-            return 'Warn'
-        result = check_butterfly(
-            params=params,
-            forward=forward,
-            dte=dte,
-            moneyness_range=(-0.40, 0.40),
-            n_points=50,
-            tol=1e-6
-        )
-
-        if result['is_valid']:
-            # Check if marginal (min_g close to zero)
-            if result['min_g'] < 0.001:
-                return 'Warn'
-            return 'Pass'
-        else:
-            return 'Fail'
-
-    except Exception:
-        # If check fails, return warning
-        return 'Warn'
 
 
 def format_params_for_table(

@@ -6,12 +6,11 @@ from vol_calibration import auth as calibration_auth
 
 from vol_calibration import ttf_publication as publication_data
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 import hashlib
 import os
 from pathlib import Path
-import pickle
 import sys
 
 import dash_bootstrap_components as dbc
@@ -23,19 +22,14 @@ from dash import Input, Output, State, callback, dash_table, dcc, html, no_updat
 from dash.exceptions import PreventUpdate
 
 from snapshot_cache import publish_snapshot, resolve_snapshot
-from options import hh_lne_calibration as hh_calibration_module
-from options.build_brent_vol_surface import (
-    exclude_expired_option_targets,
-    horizon_from_as_of,
-)
-from options.surface_expiry_metadata import resolve_surface_expiry_metadata
-from options.hh_lne_calibration import (
+from options.vol_calibration.api import (
     HH_LNE_CALIBRATION_ENGINE_VERSION,
     HH_LNE_CALIBRATION_METHOD,
     HH_LNE_CALIBRATION_POLICY_VERSION,
     build_hh_lne_candidate_surface,
     load_hh_lne_calibration_market,
     resolve_hh_lne_snapshot_reference,
+    verify_hh_candidate_source,
 )
 from runtime_config import get_database_engine
 from vol_calibration.auth import Permission, authorize
@@ -67,24 +61,14 @@ def _candidate_namespace(identity):
 
 def _candidate_code_fingerprint():
     """Invalidate retained candidates after a relevant code/configuration change."""
-    options_root = Path(hh_calibration_module.__file__).resolve().parent
-    dash_root = Path(__file__).resolve().parents[2]
-    paths = (
-        options_root / "hh_lne_calibration.py",
-        options_root / "hh_single_surface.py",
-        options_root / "brent_single_surface.py",
-        options_root / "build_hh_vol_surface_from_settlements.py",
-        options_root / "build_brent_vol_surface.py",
-        options_root / "calibration_engine" / "models" / "wing_model.py",
-        options_root / "calibration_engine" / "converters" / "delta.py",
-        options_root / "surface_expiry_metadata.py",
-        dash_root / "vol_calibration" / "ttf_hybrid_surface.py",
-        Path(__file__),
-    )
+    from options.vol_calibration.api import implementation_fingerprint
+
     digest = hashlib.sha256()
-    for path in paths:
-        digest.update(str(path).encode("utf-8"))
-        digest.update(path.read_bytes())
+    digest.update(implementation_fingerprint().encode("utf-8"))
+    # Installed engine identity already covers its code and expiry metadata.
+    # App labels are relative so identical web and worker artifacts agree.
+    digest.update(b"vol_calibration/pages/hh_governed.py")
+    digest.update(Path(__file__).read_bytes())
     digest.update(os.getenv("APP_CODE_REVISION", "unknown").encode("utf-8"))
     for version in (sys.version, np.__version__, pd.__version__, scipy.__version__):
         digest.update(version.encode("utf-8"))
@@ -92,8 +76,12 @@ def _candidate_code_fingerprint():
 
 
 def _candidate_output_fingerprint(candidate):
-    payload = (candidate["surface"], candidate["expiry_results"])
-    return hashlib.sha256(pickle.dumps(payload, protocol=5)).hexdigest()
+    # Pickle identity depends on object sharing and pandas' internal caches.
+    # Hash semantic values so the same candidate survives disk-cache transport.
+    return input_manifest_fingerprint({
+        "surface": candidate["surface"].to_dict(orient="split"),
+        "expiry_results": candidate["expiry_results"],
+    })
 
 
 def _resolve_candidate(browser_candidate, identity):
@@ -118,89 +106,7 @@ def _resolve_candidate(browser_candidate, identity):
 
 
 def _verify_candidate_source(engine, stored):
-    """Recheck the pinned LNE rows and expiries without rerunning the fit."""
-    source = resolve_hh_lne_snapshot_reference(
-        engine, stored["cob_date"], snapshot_id=stored["snapshot_id"]
-    )
-    manifest_source = stored["input_manifest"]["source_snapshots"][0]
-    expected = {
-        "snapshot_id": manifest_source["snapshot_id"],
-        "source_revision": manifest_source["revision"],
-        "observed_at": manifest_source["observed_at"],
-        "option_quote_count": manifest_source["option_quote_count"],
-        "forward_count": manifest_source["forward_count"],
-        "chain_row_count": manifest_source["raw_chain_count"],
-        "iv_resolved_count": manifest_source["resolved_iv_count"],
-    }
-    if any(source.get(key) != value for key, value in expected.items()):
-        raise ValueError("The pinned HH settlement source changed; recalibrate.")
-    surface = stored["surface"]
-    expiries = surface[["contract_date", "option_expiration_date"]].drop_duplicates()
-    requested = pd.DataFrame(
-        {"product": "HH", "maturity_date": expiries["contract_date"]}
-    )
-    current = resolve_surface_expiry_metadata(engine, requested)
-    saved_by_month = {
-        pd.Timestamp(row.contract_date).date(): pd.Timestamp(
-            row.option_expiration_date
-        ).date()
-        for row in expiries.itertuples(index=False)
-    }
-    current_by_month = {
-        pd.Timestamp(row.maturity_date).date(): pd.Timestamp(
-            row.option_expiration_date
-        ).date()
-        for row in current.itertuples(index=False)
-    }
-    if current_by_month != saved_by_month:
-        raise ValueError("The HH option expiry reference changed; recalibrate.")
-
-    # The snapshot identifier and counts alone cannot detect a changed quote
-    # value under the same identifier. Re-read the raw lineage saved in the
-    # candidate, while skipping the expensive SVI, ATM, and projection stages.
-    api = hh_calibration_module._builder_api()
-    snapshot = api.resolve_snapshot(
-        engine, stored["cob_date"], stored["snapshot_id"]
-    )
-    forwards = api.load_forwards(
-        engine, snapshot, horizon_from_as_of(snapshot.business_date)
-    )
-    options = api.load_options(engine, snapshot)
-    api.validate_rows(options, forwards, snapshot)
-    expiry_metadata = api.resolve_expiries(
-        engine,
-        pd.DataFrame({"product": "HH", "maturity_date": forwards["strip"]}),
-    )
-    api.validate_expiries(options, expiry_metadata)
-    forwards, _ = exclude_expired_option_targets(
-        forwards, expiry_metadata, snapshot.business_date
-    )
-    manifest = stored["input_manifest"]
-    saved_options = manifest.get("raw_observations") or []
-    saved_forwards = manifest.get("forwards") or []
-    if not saved_options or not saved_forwards:
-        raise ValueError("The locked HH input lineage is incomplete; recalibrate.")
-    option_columns = [
-        key for key in saved_options[0]
-        if key not in {"calibration_eligible", "exclusion_reason"}
-    ]
-    forward_columns = list(saved_forwards[0])
-    current_inputs = {
-        "options": hh_calibration_module._manifest_records(options, option_columns),
-        "forwards": hh_calibration_module._manifest_records(
-            forwards, forward_columns
-        ),
-    }
-    locked_inputs = {
-        "options": [
-            {key: row.get(key) for key in option_columns} for row in saved_options
-        ],
-        "forwards": saved_forwards,
-    }
-    if input_manifest_fingerprint(current_inputs) != input_manifest_fingerprint(
-        locked_inputs
-    ):
-        raise ValueError("The pinned HH settlement rows changed; recalibrate.")
+    return verify_hh_candidate_source(engine, stored)
 
 
 def _empty_figure(message: str):
@@ -729,9 +635,17 @@ def export_hh_governed(_clicks, candidate, published, trade_date):
             "engine": HH_LNE_CALIBRATION_ENGINE_VERSION,
             "active_publication_id": (published or {}).get("publication_id"),
         }]).to_excel(writer, sheet_name="Provenance", index=False)
-        pd.DataFrame(
+        raw_inputs = pd.DataFrame(
             candidate["input_manifest"].get("raw_observations") or []
-        ).to_excel(writer, sheet_name="Raw Inputs", index=False)
+        )
+        # Excel has no timezone-aware datetime type. Preserve the original
+        # capture instant and offset as ISO text rather than dropping the zone.
+        raw_inputs = raw_inputs.map(
+            lambda value: value.isoformat()
+            if isinstance(value, (datetime, pd.Timestamp)) and value.tzinfo is not None
+            else value
+        )
+        raw_inputs.to_excel(writer, sheet_name="Raw Inputs", index=False)
     return dcc.send_bytes(
         output.getvalue(),
         f"HH_LNE_calibration_{pd.Timestamp(trade_date):%Y%m%d}.xlsx",

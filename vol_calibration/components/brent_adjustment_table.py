@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from dash import dash_table, html
 
-from vol_calibration.brent_intraday import ADJUSTMENT_PARAMS
+from options.vol_calibration.api import ADJUSTMENT_PARAMS
 
 
 def create_brent_adjustment_table() -> html.Div:

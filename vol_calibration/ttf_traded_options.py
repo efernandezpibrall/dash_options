@@ -13,51 +13,16 @@ from dash import Input, Output, callback, dcc, html
 from sqlalchemy import text
 
 from db_fallback import DB_SCHEMA, safe_exception_message
-from options.ttf_volatility import (
-    TTFVolatilityError,
-    black76_call_delta,
-    year_fraction,
+from options.vol_calibration.api import (
+    TTF_ICE_HUB as TTF_ICE_HUB, TTF_ICE_CONTRACT as TTF_ICE_CONTRACT,
+    empty_ttf_traded_options as empty_ttf_traded_options,
+    normalize_ttf_traded_options as _normalize_ttf_traded_options,
+    attach_ttf_traded_option_coordinates as _attach_chart_coordinates,
 )
 from runtime_config import get_database_engine
 
 
 TTF_TRADED_OPTIONS_TABLE = f'{DB_SCHEMA}.gas_options_activity'
-TTF_ICE_HUB = 'TTF (Futures-style)'
-TTF_ICE_CONTRACT = 'TFO'
-TTF_TRADED_OPTION_COLUMNS = [
-    'trade_date',
-    'cob_date',
-    'hub',
-    'product',
-    'raw_product',
-    'strip',
-    'maturity_date',
-    'contract',
-    'contract_type',
-    'strike',
-    'settlement_price',
-    'total_volume',
-    'open_interest',
-    'expiration_date',
-    'option_expiration_date',
-    'option_volatility',
-    'volatility',
-    'forward_value',
-    'call_delta',
-    'dte',
-    'surface_source',
-    'source_name',
-    'vendor_published_at',
-    'ingested_at',
-    'quality_status',
-    'method',
-    'day_count',
-    'delta_convention',
-]
-
-
-def empty_ttf_traded_options() -> pd.DataFrame:
-    return pd.DataFrame(columns=TTF_TRADED_OPTION_COLUMNS)
 
 
 def create_ttf_traded_options_store():
@@ -75,117 +40,8 @@ def create_ttf_traded_options_status():
     )
 
 
-def _normalize_vendor_volatility(values: pd.Series) -> pd.Series:
-    """Normalize raw ICE percentage volatility to decimal volatility."""
-    numeric = pd.to_numeric(values, errors='coerce')
-    normalized = numeric.where(numeric <= 5.0, numeric / 100.0)
-    return normalized.where(normalized.gt(0) & normalized.lt(2.0))
 
 
-def _normalize_ttf_traded_options(
-    data: pd.DataFrame,
-    requested_cob,
-) -> pd.DataFrame:
-    """Validate exact-COB positive-volume rows from gas_options_activity."""
-    requested = pd.to_datetime(requested_cob, errors='coerce')
-    if pd.isna(requested):
-        raise ValueError('A valid COB date is required for traded options.')
-    requested = requested.normalize()
-
-    if data is None or data.empty:
-        return empty_ttf_traded_options()
-
-    prepared = data.copy()
-    raw_columns = [
-        'trade_date',
-        'hub',
-        'raw_product',
-        'strip',
-        'contract',
-        'contract_type',
-        'strike',
-        'settlement_price',
-        'total_volume',
-        'open_interest',
-        'expiration_date',
-        'option_volatility',
-        'source_name',
-        'vendor_published_at',
-        'ingested_at',
-    ]
-    for column in raw_columns:
-        if column not in prepared.columns:
-            prepared[column] = pd.NA
-
-    for column in ('trade_date', 'strip', 'expiration_date'):
-        prepared[column] = pd.to_datetime(
-            prepared[column],
-            errors='coerce',
-        ).dt.normalize()
-    for column in ('vendor_published_at', 'ingested_at'):
-        prepared[column] = pd.to_datetime(
-            prepared[column],
-            errors='coerce',
-        )
-    for column in (
-        'strike',
-        'settlement_price',
-        'total_volume',
-        'open_interest',
-        'option_volatility',
-    ):
-        prepared[column] = pd.to_numeric(prepared[column], errors='coerce')
-
-    prepared['contract_type'] = (
-        prepared['contract_type'].astype(str).str.strip().str.upper()
-    )
-    prepared = prepared[
-        prepared['trade_date'].eq(requested)
-        & prepared['hub'].astype(str).eq(TTF_ICE_HUB)
-        & prepared['contract'].astype(str).str.upper().eq(TTF_ICE_CONTRACT)
-        & prepared['contract_type'].isin({'C', 'P'})
-        & prepared['total_volume'].gt(0)
-        & prepared['strike'].gt(0)
-        & prepared['settlement_price'].notna()
-        & prepared['strip'].notna()
-        & prepared['expiration_date'].notna()
-    ].copy()
-
-    duplicate_mask = prepared.duplicated(
-        subset=['strip', 'strike', 'contract_type'],
-        keep=False,
-    )
-    if duplicate_mask.any():
-        raise ValueError(
-            'Duplicate raw ICE traded-option rows exist for the same '
-            'strip, strike, and contract type.'
-        )
-
-    prepared['volatility'] = _normalize_vendor_volatility(
-        prepared['option_volatility']
-    )
-    prepared = prepared[prepared['volatility'].notna()].copy()
-    prepared['cob_date'] = prepared['trade_date']
-    prepared['product'] = 'TTF'
-    prepared['maturity_date'] = prepared['strip']
-    prepared['option_expiration_date'] = prepared['expiration_date']
-    prepared['forward_value'] = pd.NA
-    prepared['call_delta'] = pd.NA
-    prepared['dte'] = (
-        prepared['option_expiration_date'] - prepared['cob_date']
-    ).dt.days.astype(float)
-    prepared['surface_source'] = 'ICE'
-    prepared['quality_status'] = 'raw_market_activity'
-    prepared['method'] = 'gas_options_activity.option_volatility'
-    prepared['day_count'] = 'ACT/365.25'
-    prepared['delta_convention'] = 'undiscounted_forward_call_delta'
-
-    for column in TTF_TRADED_OPTION_COLUMNS:
-        if column not in prepared.columns:
-            prepared[column] = pd.NA
-    return prepared[TTF_TRADED_OPTION_COLUMNS].sort_values(
-        ['maturity_date', 'strike', 'contract_type']
-    ).reset_index(drop=True)
 
 
 def load_ttf_traded_options_payload(requested_cob, *, engine=None) -> dict:
@@ -277,59 +133,6 @@ def load_ttf_traded_options_payload(requested_cob, *, engine=None) -> dict:
     }
 
 
-def _attach_chart_coordinates(
-    data: pd.DataFrame,
-    market_data: pd.DataFrame | None,
-) -> pd.DataFrame:
-    """Use the calibration forward only to position raw ICE vols by delta."""
-    if data.empty or market_data is None or market_data.empty:
-        return data
-    if not {'expiry', 'forward'}.issubset(market_data.columns):
-        return data
-
-    forwards = market_data[['expiry', 'forward']].copy()
-    forwards['expiry'] = pd.to_datetime(
-        forwards['expiry'],
-        errors='coerce',
-    ).dt.normalize()
-    forwards['forward'] = pd.to_numeric(forwards['forward'], errors='coerce')
-    forwards = forwards.dropna().drop_duplicates()
-    inconsistent = forwards.groupby('expiry')['forward'].nunique().gt(1)
-    if inconsistent.any():
-        return data.assign(quality_status='inconsistent_calibration_forward')
-    forward_map = (
-        forwards.drop_duplicates('expiry').set_index('expiry')['forward']
-    )
-
-    positioned = data.copy()
-    positioned['forward_value'] = positioned['maturity_date'].map(forward_map)
-    call_deltas = []
-    quality = []
-    for row in positioned.itertuples(index=False):
-        if pd.isna(row.forward_value):
-            call_deltas.append(float('nan'))
-            quality.append('missing_calibration_forward')
-            continue
-        try:
-            time_to_expiry = year_fraction(
-                row.cob_date,
-                row.option_expiration_date,
-            )
-            call_deltas.append(
-                black76_call_delta(
-                    float(row.forward_value),
-                    float(row.strike),
-                    time_to_expiry,
-                    float(row.volatility),
-                )
-            )
-            quality.append('raw_market_activity')
-        except (TTFVolatilityError, TypeError, ValueError):
-            call_deltas.append(float('nan'))
-            quality.append('delta_coordinate_unavailable')
-    positioned['call_delta'] = call_deltas
-    positioned['quality_status'] = quality
-    return positioned
 
 
 def ttf_traded_options_frame(

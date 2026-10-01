@@ -1,5 +1,77 @@
 # Vol Calibration migration
 
+## Shared analytics extraction, October 2026
+
+The numerical implementation is consolidated into the separately installed
+`options.vol_calibration` package. Its `api.py` is the application entry point;
+request/result contracts contain numerical inputs and diagnostics rather than
+table formatting or browser state. Applications retain callbacks, authentication,
+feature flags, queues, cancellation/progress, and bounded process dispatch.
+
+The shared Wing engine, gas core/tails and convex-call fallback, input eligibility,
+bounded retries, checkpoint data contracts, Brent/TTF adjustments, chart delta
+evaluation, parameter assessment, and publication-expiry candidate construction
+now live in that package. Brent/HH model and source-preparation implementations
+are also canonical there, with operational command lines under `cli/`.
+Compatibility paths forward to these implementations without numerical copies.
+Chronological gas batches and their checkpoint records are numerical engine
+contracts; the dashboard formats foreground and durable-worker results through
+the same adapter. Durable job payloads are now version 2 and incompatible
+retained jobs are rejected. Publication persistence is shared, with identity
+authorization and bounded immutable-grid caching retained in the dashboard.
+The immutable-content cache calls the public `load_publication_contents` engine
+operation. SQL and serialization remain canonical in options; the dashboard
+controls cache lifetime and publication authorization.
+TTF manual mark inversion, intraday fitting, published smile rebasing,
+trading-date policy and traded-option coordinates/eligibility are also shared.
+Legacy official gas extrapolation and long-end shaping are canonical in options.
+Selected-expiry fitting, accepted-row evaluation and node edits now use the
+public engine API rather than private compatibility helpers. The application
+supplies bounded process dispatch. HH publication source-lineage validation is
+shared as well; its candidate fingerprint uses relative application labels.
+
+The recorded complete installed replays match the frozen 30 September grids
+for all five products. NBP requires the lossless source capture: a pandas JSON
+roundtrip changed last-bit input values and materially changed fitted tails.
+These replay reports are artifact-specific and are not deployment evidence.
+
+The engine's implementation manifest is included in candidate/job fingerprints.
+Installing a changed implementation invalidates incompatible retained candidates;
+published revisions remain readable. Web and workers must use the same wheel.
+
+Three unused dashboard forwarding modules (convex-call core, gas retry helper,
+and JKM hybrid model) have been retired. Remaining forwarding paths have existing
+consumer contracts and contain no numerical copies. Operational pages use the
+public API; TTF/JKM adapters supply execution and formatting only.
+
+Actual staged TTF/JKM worker batches, resume/cancellation/stale-job behavior and
+their persisted dense grids match the references. The HH browser candidate and
+delivered workbook reconcile to all 24,862 points and 3,210 raw observations;
+Excel retains timezone-aware capture timestamps as ISO text. TTF export now
+resolves the same settlement target as the validated batch and rejects changed
+inputs or table state with feedback. The published-surface sheet also contains
+timezone-aware timestamps. TTF/JKM workbook frames use a presentation-only
+timestamp adapter so capture instants and offsets survive Excel delivery without
+changing calibration values. Calibration actions stay disabled until market
+inputs and editable parameter rows have arrived; the server also rejects an
+attempt to start a batch with missing page inputs.
+Fresh-process timing comparisons use six counterbalanced observations per
+variant: full Brent/HH runs and representative TTF/JKM/NBP expiry fits, with
+unchanged numerical contracts. They do not establish full-batch or browser
+performance improvements. The actual prior/candidate/rollback artifacts have
+also been rehearsed on an isolated port with database reads enforced read-only.
+
+Deployment status is recorded separately from the source code. Before switching
+production, verify the exact paired dashboard/wheel manifest, delivered browser
+exports, complete published reads, retained compatibility consumers, and the
+coordinated web/worker rollback. Preserve the actual deployed configuration and
+product flags. This migration does not republish existing surfaces. Operational
+evidence and the production switch record are kept in the options repository's
+`outputs/vol_calibration_migration_20261001/` directory; historical reports must
+not be presented as verification of a later artifact.
+
+## Historical dashboard integration
+
 The contents of this package were imported into `dash_options` as a squashed
 Git subtree and then adapted to run inside the existing Dash application.
 

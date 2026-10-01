@@ -1,0 +1,1016 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Options Dashboard — Daily Trader Workflow and Data Lineage</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07111f;
+      --surface: #0c1a2d;
+      --surface-2: #11243a;
+      --surface-3: #162d47;
+      --line: #29415d;
+      --text: #edf5ff;
+      --muted: #9fb2c8;
+      --blue: #5ca7ff;
+      --cyan: #46d2d0;
+      --green: #67d391;
+      --amber: #f3bd5b;
+      --red: #ff7f7f;
+      --purple: #b89cff;
+      --shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+      --radius: 16px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 10% -10%, rgba(92, 167, 255, 0.18), transparent 34rem),
+        radial-gradient(circle at 96% 5%, rgba(70, 210, 208, 0.10), transparent 30rem),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a { color: var(--blue); }
+    button, select { font: inherit; }
+    code {
+      color: #cde5ff;
+      background: rgba(92, 167, 255, 0.09);
+      border: 1px solid rgba(92, 167, 255, 0.19);
+      border-radius: 5px;
+      padding: 0.08rem 0.32rem;
+      overflow-wrap: anywhere;
+    }
+
+    .shell {
+      width: min(1480px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 38px 0 70px;
+    }
+
+    .hero {
+      position: relative;
+      padding: 34px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: linear-gradient(135deg, rgba(17, 36, 58, 0.96), rgba(8, 23, 40, 0.96));
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: auto -8rem -11rem auto;
+      width: 28rem;
+      height: 28rem;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(70, 210, 208, 0.12), transparent 68%);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--cyan);
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.16; }
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      font-size: clamp(2.15rem, 4.6vw, 4.55rem);
+      letter-spacing: -0.045em;
+    }
+
+    .hero-copy {
+      max-width: 950px;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 1.6vw, 1.22rem);
+    }
+
+    .status-row {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .status-card, .summary-card, .page-card, .guardrail, .detail-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(12, 26, 45, 0.86);
+    }
+
+    .status-card { padding: 16px; }
+    .status-label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .status-value { font-size: 1.02rem; font-weight: 700; }
+    .status-detail { margin-top: 4px; color: var(--muted); font-size: 0.82rem; }
+
+    .tone-amber { border-color: rgba(243, 189, 91, 0.52); }
+    .tone-green { border-color: rgba(103, 211, 145, 0.45); }
+    .tone-blue { border-color: rgba(92, 167, 255, 0.48); }
+    .tone-red { border-color: rgba(255, 127, 127, 0.48); }
+
+    .desk-alert {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 12px;
+      align-items: start;
+      margin-top: 16px;
+      padding: 14px 16px;
+      border: 1px solid rgba(243, 189, 91, 0.48);
+      border-radius: 12px;
+      color: #ffe4a8;
+      background: rgba(243, 189, 91, 0.08);
+    }
+    .desk-alert strong { color: #fff0c9; }
+    .alert-icon {
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      border-radius: 50%;
+      color: #182236;
+      background: var(--amber);
+      font-weight: 900;
+    }
+
+    .section { margin-top: 52px; }
+    .section-head {
+      display: flex;
+      gap: 22px;
+      align-items: end;
+      justify-content: space-between;
+      margin-bottom: 19px;
+    }
+    .section h2 {
+      margin: 0;
+      font-size: clamp(1.55rem, 2.6vw, 2.5rem);
+      letter-spacing: -0.025em;
+    }
+    .section-intro {
+      max-width: 760px;
+      margin: 7px 0 0;
+      color: var(--muted);
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px 15px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    .legend span { display: inline-flex; gap: 7px; align-items: center; }
+    .legend i { width: 10px; height: 10px; border-radius: 50%; }
+    .legend-read i { background: var(--blue); }
+    .legend-session i { background: var(--purple); }
+    .legend-file i { background: var(--cyan); }
+    .legend-official i { background: var(--green); }
+
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(130px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+      padding: 8px 3px 16px;
+      scrollbar-color: var(--line) transparent;
+    }
+
+    .workflow-step {
+      position: relative;
+      min-height: 177px;
+      padding: 17px 15px;
+      text-align: left;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(17, 36, 58, 0.9), rgba(9, 23, 40, 0.92));
+      cursor: pointer;
+      transition: border-color 150ms ease, transform 150ms ease, background 150ms ease;
+    }
+    .workflow-step:hover { transform: translateY(-2px); border-color: var(--blue); }
+    .workflow-step[aria-pressed="true"] {
+      border-color: var(--cyan);
+      background: linear-gradient(180deg, rgba(20, 58, 75, 0.95), rgba(9, 29, 47, 0.96));
+      box-shadow: 0 0 0 2px rgba(70, 210, 208, 0.12);
+    }
+    .workflow-step::after {
+      content: "→";
+      position: absolute;
+      top: 50%;
+      right: -12px;
+      z-index: 3;
+      color: var(--muted);
+      font-size: 1.1rem;
+      transform: translateY(-50%);
+    }
+    .workflow-step:last-child::after { display: none; }
+    .step-no {
+      display: block;
+      margin-bottom: 14px;
+      color: var(--cyan);
+      font-size: 0.73rem;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+    }
+    .workflow-step strong { display: block; font-size: 1rem; }
+    .workflow-step small { display: block; margin-top: 8px; color: var(--muted); line-height: 1.38; }
+
+    .workflow-detail {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 1px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--line);
+    }
+    .workflow-detail > div { padding: 17px 19px; background: var(--surface); }
+    .detail-kicker {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .workflow-detail p { margin: 0; }
+    .detail-impact { color: var(--green); }
+
+    .diagram-frame {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(12, 26, 45, 0.95), rgba(7, 17, 31, 0.95));
+      box-shadow: var(--shadow);
+    }
+    .map-block { padding: 22px; }
+    .map-block + .map-block { border-top: 1px solid var(--line); }
+    .map-block-head {
+      display: flex;
+      gap: 18px;
+      align-items: end;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .map-block-head h3 { margin: 0; font-size: 1.12rem; }
+    .map-block-head p { max-width: 760px; margin: 5px 0 0; color: var(--muted); font-size: 0.86rem; }
+    .map-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--muted); font-size: 0.78rem; }
+    .map-legend span { display: inline-flex; gap: 6px; align-items: center; }
+    .map-legend i { width: 22px; height: 3px; border-radius: 2px; }
+    .legend-direct i { background: var(--cyan); }
+    .legend-published i { background: var(--green); }
+    .legend-optional i { border-top: 2px dashed var(--amber); }
+
+    .publication-flow {
+      display: grid;
+      grid-template-columns: minmax(330px, 1.15fr) minmax(250px, 0.78fr) minmax(390px, 1.25fr);
+      gap: 42px;
+      align-items: stretch;
+    }
+    .flow-column {
+      position: relative;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(8, 23, 40, 0.66);
+    }
+    .flow-column:not(:last-child)::after {
+      content: "→";
+      position: absolute;
+      top: 50%;
+      right: -31px;
+      color: var(--green);
+      font-size: 1.65rem;
+      transform: translateY(-50%);
+    }
+    .flow-column-title {
+      display: block;
+      margin-bottom: 11px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .relation-list, .engine-list, .publication-list { display: grid; gap: 7px; }
+    .relation-node, .engine-node, .publication-node {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface-2);
+    }
+    .relation-node { border-color: rgba(92, 167, 255, 0.42); background: rgba(92, 167, 255, 0.065); }
+    .engine-node { border-color: rgba(184, 156, 255, 0.42); background: rgba(184, 156, 255, 0.065); }
+    .publication-node { border-color: rgba(103, 211, 145, 0.42); background: rgba(103, 211, 145, 0.065); }
+    .relation-node code, .publication-node code {
+      display: block;
+      padding: 0;
+      color: var(--text);
+      border: 0;
+      background: transparent;
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+    .engine-node strong, .publication-node strong { display: block; font-size: 0.86rem; }
+    .engine-node span, .publication-node span { display: block; margin-top: 3px; color: var(--muted); font-size: 0.76rem; }
+    .publication-node.official-view { border-color: var(--green); box-shadow: 0 0 0 2px rgba(103, 211, 145, 0.10); }
+
+    .dashboard-page-list {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+    .dashboard-page {
+      padding: 10px;
+      border: 1px solid rgba(70, 210, 208, 0.38);
+      border-radius: 10px;
+      background: rgba(70, 210, 208, 0.055);
+    }
+    .dashboard-page strong { display: block; font-size: 0.82rem; }
+    .dashboard-page code { display: block; margin-top: 3px; padding: 0; border: 0; background: transparent; color: var(--cyan); font-size: 0.69rem; }
+    .dashboard-page.manual { border-color: rgba(184, 156, 255, 0.44); background: rgba(184, 156, 255, 0.055); }
+    .dashboard-page.manual code { color: var(--purple); }
+
+    .dependency-list { display: grid; gap: 8px; }
+    .dependency-row {
+      display: grid;
+      grid-template-columns: minmax(330px, 0.95fr) 52px minmax(540px, 1.45fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .dependency-source, .dependency-targets {
+      padding: 12px 13px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(12, 26, 45, 0.74);
+    }
+    .dependency-source code {
+      display: block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      font-size: 0.76rem;
+      line-height: 1.42;
+    }
+    .dependency-source span { display: block; margin-top: 5px; color: var(--muted); font-size: 0.76rem; }
+    .dependency-arrow { display: grid; place-items: center; color: var(--cyan); font-size: 1.35rem; }
+    .dependency-row.published .dependency-arrow { color: var(--green); }
+    .dependency-row.optional .dependency-arrow { color: var(--amber); }
+    .dependency-row.optional .dependency-source, .dependency-row.optional .dependency-targets { border-style: dashed; border-color: rgba(243, 189, 91, 0.44); }
+    .target-label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 0.7rem; font-weight: 800; letter-spacing: 0.07em; text-transform: uppercase; }
+    .page-links { display: flex; flex-wrap: wrap; gap: 6px; }
+    .page-link {
+      display: inline-flex;
+      gap: 6px;
+      align-items: baseline;
+      padding: 4px 7px;
+      border: 1px solid rgba(70, 210, 208, 0.34);
+      border-radius: 7px;
+      color: var(--text);
+      background: rgba(70, 210, 208, 0.055);
+      font-size: 0.73rem;
+      white-space: nowrap;
+    }
+    .published .page-link { border-color: rgba(103, 211, 145, 0.34); background: rgba(103, 211, 145, 0.055); }
+    .optional .page-link { border-color: rgba(243, 189, 91, 0.34); background: rgba(243, 189, 91, 0.055); }
+    .page-link code { padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 0.65rem; }
+    .indirect-note { margin-top: 7px; color: var(--muted); font-size: 0.74rem; }
+    .indirect-note strong { color: var(--green); }
+
+    .diagram-note {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      border-top: 1px solid var(--line);
+      background: var(--line);
+    }
+    .diagram-note > div { padding: 14px 17px; background: var(--surface); }
+    .diagram-note strong { display: block; margin-bottom: 4px; }
+    .diagram-note span { color: var(--muted); font-size: 0.84rem; }
+
+    .snapshot-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 1fr 1fr;
+      gap: 14px;
+    }
+    .summary-card { padding: 20px; }
+    .summary-card h3 { margin: 0 0 10px; font-size: 1.05rem; }
+    .metric {
+      margin: 7px 0 0;
+      font-size: clamp(1.45rem, 3vw, 2.35rem);
+      font-weight: 800;
+      letter-spacing: -0.035em;
+    }
+    .summary-card p { margin: 8px 0 0; color: var(--muted); }
+    .mini-list { margin: 12px 0 0; padding-left: 1.2rem; color: var(--muted); }
+    .mini-list li + li { margin-top: 5px; }
+
+    .filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 14px;
+    }
+    .filter-btn {
+      padding: 8px 12px;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      cursor: pointer;
+    }
+    .filter-btn:hover { color: var(--text); border-color: var(--blue); }
+    .filter-btn[aria-pressed="true"] { color: #061321; border-color: var(--cyan); background: var(--cyan); }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(12, 26, 45, 0.86);
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      color: var(--muted);
+      background: var(--surface-2);
+      font-size: 0.74rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: rgba(92, 167, 255, 0.035); }
+    td { font-size: 0.9rem; }
+    td p { margin: 4px 0 0; color: var(--muted); font-size: 0.82rem; }
+    .nowrap { white-space: nowrap; }
+    .impact-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 8px;
+      border: 1px solid;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .tag-read { color: #b9ddff; border-color: rgba(92,167,255,.45); background: rgba(92,167,255,.08); }
+    .tag-session { color: #ddceff; border-color: rgba(184,156,255,.45); background: rgba(184,156,255,.08); }
+    .tag-file { color: #bdf5f3; border-color: rgba(70,210,208,.45); background: rgba(70,210,208,.08); }
+    .tag-official { color: #c7f6d7; border-color: rgba(103,211,145,.45); background: rgba(103,211,145,.08); }
+    .tag-disabled { color: #ffe2a6; border-color: rgba(243,189,91,.45); background: rgba(243,189,91,.08); }
+
+    .pages-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .page-card { padding: 20px; }
+    .page-card-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+    .page-card h3 { margin: 0; font-size: 1.05rem; }
+    .route { color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem; }
+    .page-purpose { min-height: 46px; margin: 10px 0 14px; color: var(--muted); }
+    .page-card dl { display: grid; grid-template-columns: 78px 1fr; gap: 7px 10px; margin: 0; font-size: 0.84rem; }
+    .page-card dt { color: var(--muted); }
+    .page-card dd { margin: 0; }
+
+    .playbooks {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .playbook {
+      padding: 21px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(12, 26, 45, 0.86);
+    }
+    .playbook h3 { margin: 0 0 13px; }
+    .playbook ol { margin: 0; padding-left: 1.3rem; }
+    .playbook li + li { margin-top: 9px; }
+    .playbook li::marker { color: var(--cyan); font-weight: 800; }
+    .callout {
+      margin-top: 15px;
+      padding: 11px 13px;
+      border-left: 3px solid var(--green);
+      color: var(--muted);
+      background: rgba(103, 211, 145, 0.06);
+    }
+
+    .guardrails {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .guardrail { padding: 17px; }
+    .guardrail strong { display: block; margin-bottom: 6px; }
+    .guardrail p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+    .guardrail-critical { border-color: rgba(255, 127, 127, 0.46); }
+
+    .source-tier {
+      display: inline-block;
+      min-width: 78px;
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .tier-core { color: var(--green); }
+    .tier-market { color: var(--blue); }
+    .tier-optional { color: var(--amber); }
+    .tier-govern { color: var(--purple); }
+
+    .footer {
+      margin-top: 48px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .footer strong { color: var(--text); }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1100px) {
+      .status-row, .snapshot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .pages-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .guardrails { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workflow-detail { grid-template-columns: 1fr; }
+      .publication-flow { grid-template-columns: 1fr; gap: 34px; }
+      .flow-column:not(:last-child)::after { content: "↓"; top: auto; right: 50%; bottom: -30px; transform: translateX(50%); }
+      .dashboard-page-list { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .dependency-row { grid-template-columns: minmax(280px, 0.9fr) 42px minmax(420px, 1.25fr); }
+    }
+
+    @media (max-width: 720px) {
+      .shell { width: min(100% - 24px, 1480px); padding-top: 14px; }
+      .hero { padding: 23px 20px; border-radius: 17px; }
+      .status-row, .snapshot-grid, .pages-grid, .playbooks, .guardrails { grid-template-columns: 1fr; }
+      .section { margin-top: 38px; }
+      .section-head { display: block; }
+      .section-head .legend { margin-top: 12px; }
+      .diagram-note { grid-template-columns: 1fr; }
+      .map-block { padding: 16px; }
+      .map-block-head { display: block; }
+      .map-legend { margin-top: 10px; }
+      .dashboard-page-list { grid-template-columns: 1fr 1fr; }
+      .dependency-row { grid-template-columns: 1fr; gap: 5px; }
+      .dependency-arrow { min-height: 24px; }
+      .dependency-arrow::before { content: "↓"; }
+      .dependency-arrow { font-size: 0; }
+      .dependency-arrow::before { font-size: 1.2rem; }
+      .page-purpose { min-height: 0; }
+      th, td { padding: 11px; }
+    }
+
+    @media print {
+      :root {
+        color-scheme: light;
+        --bg: #fff;
+        --surface: #fff;
+        --surface-2: #eef3f8;
+        --surface-3: #e4ebf2;
+        --line: #b9c7d6;
+        --text: #102238;
+        --muted: #4d647c;
+      }
+      body { background: #fff; }
+      .shell { width: 100%; padding: 0; }
+      .hero, .diagram-frame, .status-card, .summary-card, .page-card, .guardrail, .playbook, .table-wrap { box-shadow: none; break-inside: avoid; }
+      .filter-bar { display: none; }
+      .action-row[hidden] { display: table-row; }
+    }
+    .dependency-row > *, .flow-column { min-width: 0; }
+    .page-link { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
+    .page-card-head { flex-wrap: wrap; align-items: flex-start; }
+    .page-card dd, .route, .engine-node strong { overflow-wrap: anywhere; min-width: 0; }
+    .table-wrap { max-width: 100%; }
+    .table-wrap:focus-visible, button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+    @media (max-width: 400px) {
+      .dashboard-page-list { grid-template-columns: 1fr; }
+      .page-card dl { grid-template-columns: 1fr; }
+      .hero { padding: 20px 15px; }
+    }
+  </style>
+</head>
+<body><main class="shell">
+<header class="hero">
+<p class="eyebrow">Options desk playbook · production code and runtime traced</p>
+<h1>From market marks to published risk</h1>
+<p class="hero-copy">A daily trader workflow for the Options Dashboard: inspect market snapshots, calibrate and publish surfaces, price structures, and reconcile the separately published portfolio risk.</p>
+<div class="desk-alert" role="note"><span class="alert-icon" aria-hidden="true">!</span><div><strong>Two publication controls:</strong> <strong>Validate &amp; Publish</strong> in Vol Trades changes the active calibrated surface. The governed portfolio valuation process changes official Greeks, Valuation and Trades. Publishing a surface or refreshing the dashboard does not rerun the portfolio.</div></div>
+<div class="status-row" aria-label="Dated production inspection">
+<div class="status-card tone-amber"><span class="status-label">Published portfolio COB</span><div class="status-value">28 Aug 2026</div><div class="status-detail">Behind the market sources at this inspection</div></div>
+<div class="status-card tone-blue"><span class="status-label">Curves / operational surface COB</span><div class="status-value">28 Sep 2026</div><div class="status-detail">Global maxima; verify the selected product and expiry</div></div>
+<div class="status-card tone-green"><span class="status-label">Surface publication enabled</span><div class="status-value">Brent · TTF · JKM</div><div class="status-detail">Product flags, identity, confirmation and validation still apply</div></div>
+<div class="status-card tone-blue"><span class="status-label">Production reference</span><div class="status-value">29 Sep 2026</div><div class="status-detail">Dashboard 6cedc46 · analytics 1.2.1</div></div>
+</div>
+<p class="hero-copy" style="font-size:.9rem">Inspection: 29 Sep 2026 11:38 GST. These are dated observations, not a live status feed. Use the page’s source ledger and selected snapshot before making a trading decision.</p>
+</header>
+<section class="section" id="workflow"><div class="section-head"><div><p class="eyebrow">Daily sequence</p><h2>The trader’s workflow</h2><p class="section-intro">Select a step to see its source and effect. Read the action matrix before using refresh, calibration or publication controls.</p></div></div>
+<div class="workflow-track" aria-label="Trader workflow steps">
+<button class="workflow-step" type="button" data-step="gate" aria-pressed="true"><span class="step-no">01 · CHECK</span><strong>Check dates and revisions</strong><small>Portfolio COB, market COB and calibrated publication are separate.</small></button>
+<button class="workflow-step" type="button" data-step="marks" aria-pressed="false"><span class="step-no">02 · MARKS</span><strong>Inspect and calibrate</strong><small>Use Prices, Volatility Surface and the Vol Trades workspace.</small></button>
+<button class="workflow-step" type="button" data-step="risk" aria-pressed="false"><span class="step-no">03 · RISK</span><strong>Read official exposure</strong><small>Greeks reflects the published portfolio run for the selected COB.</small></button>
+<button class="workflow-step" type="button" data-step="reconcile" aria-pressed="false"><span class="step-no">04 · RECONCILE</span><strong>Explain value and P&amp;L</strong><small>Inspect Valuation, Trades and the P&amp;L Explain tab.</small></button>
+<button class="workflow-step" type="button" data-step="stress" aria-pressed="false"><span class="step-no">05 · STRESS</span><strong>Stress the book</strong><small>Run supported Kirk scenarios in one native currency.</small></button>
+<button class="workflow-step" type="button" data-step="idea" aria-pressed="false"><span class="step-no">06 · PRICE</span><strong>Price a trade idea</strong><small>Choose Exchange or OTC and check the surface reference.</small></button>
+<button class="workflow-step" type="button" data-step="publish" aria-pressed="false"><span class="step-no">07 · CONTROL</span><strong>Publish the intended object</strong><small>Surface publication and portfolio publication are distinct.</small></button>
+</div><div class="workflow-detail" aria-live="polite"><div><span class="detail-kicker">Trader decision</span><p id="workflow-decision">Are the portfolio run, market snapshot and selected calibrated revision suitable for this decision?</p></div><div><span class="detail-kicker">Primary source</span><p id="workflow-source">Published valuation current view · operational market sources · calibrated publication ledger</p></div><div><span class="detail-kicker">Official impact</span><p class="detail-impact" id="workflow-impact">Reading or refreshing does not revalue or publish the portfolio.</p></div></div></section>
+<section class="section" id="lineage"><div class="section-head"><div><p class="eyebrow">System of record</p><h2>Data lineage and publication control</h2><p class="section-intro">Trace each number through the source it actually uses. Operational delta surfaces, calibrated publications and portfolio valuation runs are separate records.</p></div></div>
+<div class="diagram-frame"><div class="map-block"><div class="map-block-head"><div><h3>Market snapshot → calibrated surface</h3><p>A candidate becomes a shared surface only after an explicit, validated publication.</p></div></div><div class="publication-flow">
+<div class="flow-column"><span class="flow-column-title">Locked market inputs</span><div class="engine-list">
+<div class="engine-node"><strong>Bloomberg snapshots</strong><span>Brent settlement/intraday; HH calibration uses the exact complete CME LNE settlement.</span></div>
+<div class="engine-node"><strong>Official gas marks</strong><span>TTF: exact-COB ICAP + ICE_TTF. JKM: exact-COB ICAP + ICE_JKM_MO.</span></div>
+<div class="engine-node"><strong>Source ledger</strong><span>Product, COB, market as-of, snapshot/revision, source ID, pricing policy and base publication.</span></div>
+</div></div>
+<div class="flow-column"><span class="flow-column-title">Vol Trades review</span><div class="engine-list">
+<div class="engine-node"><strong>Calibrate surface</strong><span>Open the workspace for the selected market context.</span></div>
+<div class="engine-node"><strong>Review the candidate</strong><span>Inspect expiry coverage, fit, source eligibility and validation diagnostics.</span></div>
+<div class="engine-node"><strong>Confirm and publish</strong><span>Product permissions and identity apply; changed inputs or a changed base revision can block publication.</span></div>
+</div></div>
+<div class="flow-column"><span class="flow-column-title">Persisted surface revision</span><div class="engine-list">
+<div class="engine-node"><strong>at_lng.vol_calibration_runs</strong><span>Calibration identity and provenance.</span></div>
+<div class="engine-node"><strong>at_lng.vol_surface_publications</strong><span>Active revision for commodity and COB, plus publication history.</span></div>
+<div class="engine-node"><strong>at_lng.implied_volatility_surface_calibrated</strong><span>Published points used by calibrated-reference consumers, including the Pricer.</span></div>
+</div></div>
+</div></div>
+        <div class="map-block">
+          <div class="map-block-head">
+            <div>
+              <h3>Governed valuation publication</h3>
+              <p>The portfolio backend loads its configured valuation sources. It creates an immutable draft; publishing its run pointer changes official risk. A calibrated surface publication alone does not execute this chain.</p>
+            </div>
+          </div>
+
+          <div class="publication-flow" aria-label="Governed valuation publication flow">
+            <div class="flow-column">
+              <span class="flow-column-title">Upstream PostgreSQL inputs</span>
+              <div class="relation-list">
+                <div class="relation-node"><code>at_lng.trades_options</code></div>
+                <div class="relation-node"><code>at_lng.curve</code></div>
+                <div class="relation-node"><code>at_lng.implied_volatility_surface_from_prices</code></div>
+                <div class="relation-node"><code>at_lng.implied_volatility_surface</code></div>
+                <div class="relation-node"><code>at_lng.options_correlations</code></div>
+                <div class="relation-node"><code>at_lng.option_contract_conventions</code></div>
+                <div class="relation-node"><code>at_lng.option_contract_expiries</code></div>
+                <div class="relation-node"><code>at_lng.mapping_volatility_surface_calendar</code></div>
+                <div class="relation-node"><code>at_lng.option_discount_curve_definitions</code></div>
+                <div class="relation-node"><code>at_lng.option_discount_curves</code></div>
+              </div>
+            </div>
+
+            <div class="flow-column">
+              <span class="flow-column-title">Valuation and controls</span>
+              <div class="engine-list">
+                <div class="engine-node"><strong>trades_options_valuation.py</strong><span>Operational orchestration, source-COB validation and run action.</span></div>
+                <div class="engine-node"><strong>portfolio_valuation.py</strong><span>Convention-specific option pricing and governed Greeks.</span></div>
+                <div class="engine-node"><strong>valuation_runs.py</strong><span>Immutable draft, publication, rollback and readback controls.</span></div>
+              </div>
+            </div>
+
+            <div class="flow-column">
+              <span class="flow-column-title">Persisted run and official views</span>
+              <div class="publication-list">
+                <div class="publication-node"><code>at_lng.trades_options_valuation_runs</code><span>Run metadata and fingerprint</span></div>
+                <div class="publication-node"><code>at_lng.trades_options_valuation_run_currency_totals</code><span>Per-currency control totals</span></div>
+                <div class="publication-node"><code>at_lng.trades_options_valuation</code><span>Immutable valuation rows</span></div>
+                <div class="publication-node"><code>at_lng.option_volatility_surface_comparison</code><span>Immutable volatility comparison nodes</span></div>
+                <div class="publication-node"><code>at_lng.trades_options_valuation_publications</code><span>Published run pointer by COB</span></div>
+                <div class="publication-node"><code>at_lng.trades_options_valuation_publication_events</code><span>Append-only publish and rollback events</span></div>
+                <div class="publication-node official-view"><code>at_lng.trades_options_valuation_current</code><span>Official option valuation view consumed by the dashboard</span></div>
+                <div class="publication-node official-view"><code>at_lng.option_volatility_surface_comparison_current</code><span>Published volatility comparison view</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+
+<div class="map-block"><div class="map-block-head"><div><h3>Page and source dependency map</h3><p>Direct reads and upstream valuation inputs are distinguished below. Configured Trino paths can precede PostgreSQL fallbacks on legacy market pages.</p></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.trades_options_valuation_current</code><span>Published risk rows, inputs and run lineage.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Greeks · Valuation · Trades · Scenarios · P&amp;L Explain · portfolio comparison in Volatility Surface</span></div><div class="indirect-note">Changing a market source does not rewrite these rows.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.curve</code><span>Forward marks.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Underlying Prices · Correlations · product-specific calibration and pricing inputs</span></div><div class="indirect-note">Also upstream of the governed portfolio calculation.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.implied_volatility_surface_from_prices</code><span>Operational delta surface.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Volatility Surface · operational comparisons in Vol Trades and Pricer</span></div><div class="indirect-note">The top banner checks this table, not every calibrated publication.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.implied_volatility_surface</code><span>Official ICAP observations.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">TTF and JKM calibration / official JKM market view</span></div><div class="indirect-note">Exact product and COB must match the calibration policy.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.vol_market_snapshots</code><br><code>at_lng.vol_market_option_quotes</code><br><code>at_lng.vol_market_forwards</code><br><code>at_lng.bbg_option_chain</code><span>Immutable captured markets and chain observations.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Vol Trades · Brent and HH calibration</span></div><div class="indirect-note">Settlement and intraday capture have separate identity, completeness and activity status.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.bbg_option_trade_events</code><br><code>at_lng.bbg_option_trade_tape_runs</code><span>Persisted option prints and tape provenance.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Vol Trades trade window / activity diagnostics</span></div><div class="indirect-note">Quote snapshots, volume, open interest and tape prints are distinct observations.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.vol_surface_publications</code><br><code>at_lng.implied_volatility_surface_calibrated</code><br><code>at_lng.vol_calibration_expiry_results</code><span>Governed published surface points and expiry results.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Vol Trades calibrated overlays · Pricer published references</span></div><div class="indirect-note">Check the selected revision and expiry. This is not the portfolio publication pointer.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.ice_chat_quote_dashboard</code><br><code>at_lng.ice_chat_service_status</code><span>Persisted quote valuations and service status.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">ICE Quotes section within Vol Trades</span></div><div class="indirect-note">Brent-only feed in this release; read-only dashboard, no send or execution action.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.option_volatility_surface_comparison_current</code><span>Published portfolio volatility comparison nodes.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Volatility Surface comparison</span></div><div class="indirect-note">Tied to the published valuation run.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.mapping_instrument_marker</code><br><code>at_lng.mapping_instrument_curve_enverus</code><span>Instrument and unit mappings.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Greeks</span></div><div class="indirect-note">Optional Aspect exposure is a separate overlay.</div></div></div>
+<div class="dependency-row"><div class="dependency-source"><code>at_lng.pnl_aspect</code><span>Optional middle-office P&amp;L source.</span></div><div class="dependency-arrow" aria-hidden="true">→</div><div class="dependency-targets"><span class="target-label">Consumer</span><div class="page-links"><span class="page-link">Valuation overlay when configured</span></div><div class="indirect-note">Availability depends on the selected middle-office connection; not audited here.</div></div></div>
+</div></div></section>
+<section class="section" id="current-state"><div class="section-head"><div><p class="eyebrow">Verified current at inspection</p><h2>Dated production status</h2><p class="section-intro">Read-only checks on 29 Sep 2026 11:38 GST. A ready service does not prove that all products are fresh, all workers are available or a candidate is publishable.</p></div></div>
+<div class="snapshot-grid">
+<article class="summary-card tone-amber"><h3>Source dates are not aligned</h3><div class="metric">28 Aug / 28 Sep</div><p>Latest portfolio COB: <strong>2026-08-28</strong>. Latest curve, operational derived surface and direct ICAP surface COBs: <strong>2026-09-28</strong>. These are table-wide maxima, not proof of complete product coverage.</p></article>
+<article class="summary-card tone-blue"><h3>Calibrated publication dates</h3><div class="metric">25 Sep</div><p>The most recent active calibrated publications found for Brent, TTF, JKM, HH and NBP have COB <strong>2026-09-25</strong>. Brent’s revision was published on 29 Sep. Publication time and market COB are different fields.</p></article>
+<article class="summary-card tone-green"><h3>Running service</h3><div class="metric">Ready</div><p>Both health endpoints returned HTTP 200. The service reported write-enabled mode, local-loopback authentication and migration head <code>20260929_01</code>. Product-level permissions remain decisive.</p></article>
+</div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Production capability reference table"><table><thead><tr><th scope="col">Production capability</th><th scope="col">Observed setting</th><th scope="col">Trader implication</th></tr></thead><tbody>
+<tr><td>Inline calibration</td><td>Enabled</td><td>Open <strong>Calibrate surface</strong> inside Vol Trades.</td></tr>
+<tr><td>Brent writes / publication</td><td>Enabled / enabled</td><td>The reviewed single-SVI candidate can be submitted to the governed publish action.</td></tr>
+<tr><td>TTF intraday writes / publication</td><td>Enabled / enabled</td><td>Product-specific writes and publication are available subject to validation and role checks.</td></tr>
+<tr><td>JKM writes / publication</td><td>Enabled / enabled</td><td>Publication remains explicit after complete candidate review.</td></tr>
+<tr><td>HH and NBP writes / publication</td><td>Disabled / disabled</td><td>Existing publications can still be read. HH calibration/review does not grant publication permission; NBP is not a Vol Trades product selector.</td></tr>
+<tr><td>Generic calibration writes / background jobs</td><td>Disabled / disabled</td><td>Do not infer product-level publication is disabled from the generic write flag.</td></tr>
+<tr><td>Durable gas batch jobs</td><td>Disabled</td><td>The TTF/JKM checkpointed worker path exists in code but is not enabled in this runtime.</td></tr>
+<tr><td>Bloomberg intraday / settlement refresh intake</td><td>Enabled / enabled; BRENT, LNE, ON, TFO</td><td>Buttons queue work for an eligible worker. A queued request is not a completed snapshot; JKM uses the official source path.</td></tr>
+<tr><td>Market, calibration and ICE Quote relations</td><td>Present in the configured PostgreSQL catalog</td><td>The old “absent / future schema” description no longer applies. Presence alone does not establish fresh rows.</td></tr>
+</tbody></table></div>
+</section>
+<section class="section" id="products">
+<div class="section-head"><div><p class="eyebrow">Vol Trades workspace · calibration migration review 1 Oct 2026</p><h2>Calibrate the selected product</h2><p class="section-intro">Select the product, market date and snapshot in Vol Trades, then open <strong>Calibrate surface</strong>. Check the locked source, market as-of time, forward, option expiry convention and base publication before fitting. The market-view product and the calibration authority can differ, particularly for HH.</p></div></div>
+<div class="callout"><strong>Migration contract · version 1.3.0.</strong> Calibration calculations live in the shared analytics package in version 1.3.0 while the dashboard keeps the same trader controls, execution and publication permissions. Complete replays of the frozen 30 September inputs match the reference surfaces for Brent, HH, TTF, JKM and NBP; this is verification evidence, not a production deployment or a new publication. The migration candidate also corrects an HH comparison-cache issue that could mark a newly calibrated candidate as expired. Its verified HH export contains the complete candidate, diagnostics, provenance and raw inputs; captured timestamps retain their UTC offsets as ISO text in Excel. TTF exports validate the complete batch context and use the same settlement coordinates as calibration and publication. TTF and JKM workbook timestamps retain their offsets as ISO text. Wait for the market inputs and editable parameter rows to load before starting calibration; the controls remain disabled during loading. A changed table, source or saved base blocks export and explains why recalibration is required. After upgrading, reload and recalibrate any expired unpublished candidate from its exact market context. Existing published revisions remain readable, and calibration still requires a separate explicit publication action.</div>
+<div class="callout"><strong>Historical implementation observation · 30 Sep 2026.</strong> The workspace includes the HH financing-rate provenance correction and the TTF quote-preserving convex-core fallback described below. At that observation, the changes had not yet been deployed and the HH panel retained the old timestamp rejection. The later 1 October production baseline includes the HH rate-capture policy and TTF v2 fallback; the shared-package migration has a separate operational release record that establishes its deployment status. The reviewed candidates were published through the governed writer using the modified workspace code and reconciled immutable 29 September inputs. The ready service now enables Brent, HH, TTF, JKM and NBP publication; NBP was explicitly enabled for this publication. Durable gas jobs remain disabled. Database migration <code>20260930_01</code> admits the TTF v2 policy while preserving the existing dense-point gates. Dated production observations elsewhere in this guide are historical and have not been refreshed.</div>
+<div class="callout"><strong>Published surfaces · settlement COB 29 Sep 2026.</strong> Brent covers <strong>61 expiries / 24,461 points</strong>; HH, TTF, JKM and NBP each cover <strong>62 expiries / 24,862 points</strong>. Publication occurred on 30 September; market COB remains 29 September. HH retained all 3,202 original financing-rate observations across 13 capture timestamps. Only the January 2027 TTF core required the convex call-price fallback; original anchors and boundary slopes were preserved and the complete joined surface passed the existing density margin. JKM and NBP retain their reviewed grids. NBP uses actual ICE_UKD forwards for 35 months and governed unit-forward coordinates for 27 extrapolated months; those unit values are coordinate normalization, not economic forward prices. Verify the new active revisions and persisted points using the receipts and operational readbacks under <code>options/outputs/vol_surface_publication_20260929_20260930/</code>. Verification uses operational checks only; no tests were added or run. Surface publication does not rerun portfolio valuation.</div>
+
+<h3>Choose the source and calibration path</h3>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Market selection and calibration authority"><table><thead><tr><th scope="col">Market selection</th><th scope="col">Locked calibration authority</th><th scope="col">Model and action</th></tr></thead><tbody>
+<tr><td><strong>Brent · settlement</strong></td><td>The exact complete Bloomberg settlement snapshot, its settlement forwards and governed Brent option expiries. Snapshot IVs are used where available; missing IVs are inverted from premiums with the American futures-style model.</td><td><strong>One continuous SVI-based surface fitted at actual option strikes.</strong> Use <strong>Calibrate selected snapshot</strong>, review <strong>Preview contract</strong>, then confirm <strong>Validate &amp; Publish BRENT</strong>.</td></tr>
+<tr><td><strong>Brent · intraday</strong></td><td>The selected immutable intraday snapshot plus the latest complete settlement available at or before that snapshot’s as-of time. The settlement model is rolled to the trading date before eligible executable quotes update it.</td><td>The same single-surface method. Accepted intraday expiries retain the forward used in their fit; other expiries carry the settlement model. Zero accepted updates blocks a new intraday candidate.</td></tr>
+<tr><td><strong>TFO → TTF</strong></td><td>Exact-COB ICAP-derived TTF nodes, including explicitly governed extrapolated months, with exact-COB <code>ICE_TTF</code> forwards. Selecting a TFO Bloomberg view does not substitute its quotes for this authority.</td><td><strong>Quote-preserving PCHIP core, convex call-price fallback and Wing-v2 tails.</strong> Use <strong>Reload</strong> and <strong>Calibrate All Expiries</strong> for the complete settlement-node candidate, then confirm <strong>Validate &amp; Publish TTF</strong>.</td></tr>
+<tr><td><strong>JKM</strong></td><td>The exact <code>OFFICIAL_COB</code> context: ICAP-derived JKM nodes, including governed extrapolated months, with exact-COB <code>ICE_JKM_MO</code> forwards.</td><td>PCHIP-core / Wing-v2-tail method with JKM policy and defaults. The TTF convex-core fallback does not apply to JKM. Use <strong>Reload</strong>, <strong>Calibrate All Expiries</strong>, then confirm <strong>Validate &amp; Publish JKM</strong>.</td></tr>
+<tr><td><strong>HH · ON / HH · LNE</strong></td><td>One HH authority: a complete exact-COB <strong>CME LNE settlement</strong>, paired NG forwards, captured <code>OPT_FINANCE_RT</code> rates and governed LNE expiries. LNE requires the selected settlement snapshot itself; ON resolves an LNE settlement for the selected ON COB.</td><td><strong>Actual-strike SVI with seasonal, quote-constrained sparse months.</strong> Use <strong>Reload locked inputs</strong>, <strong>Calibrate complete HH surface</strong>, then confirm <strong>Validate &amp; Publish HH</strong> when available.</td></tr>
+<tr><td><strong>NBP</strong></td><td>Exact-COB product-specific operational nodes, governed option expiries and ICE_UKD forwards where available; governed extrapolated months retain unit-forward coordinates.</td><td>PCHIP-core / Wing-v2-tail policy <code>nbp_pchip_core_wing_tail_hybrid_v1</code>. Not a current Vol Trades calibration selector. Writes and publication were enabled with explicit authorization on 30 September, and the 29 September surface is published and available to Pricer.</td></tr>
+</tbody></table></div>
+
+<h3>Fit and review the complete candidate</h3>
+<div class="playbooks">
+<article class="playbook"><h3>Brent settlement: fit once, sample afterward</h3><ol>
+<li>Check the snapshot UUID, COB and settlement status. Calibration uses eligible out-of-the-money puts below the forward and calls at or above it, with extra weight around the smile body. Pending settlement open interest uses equal liquidity weights and is disclosed in the status text.</li>
+<li>Run <strong>Calibrate selected snapshot</strong>. Each accepted observed expiry has one constrained SVI fit, with a smooth tapered wing extension beyond observed strike support. Missing maturities between accepted fits interpolate total variance; maturities outside them carry the nearest fitted volatility shape with time scaling. Treat these maturities as model-derived coverage.</li>
+<li>Inspect fitted versus target expiry counts, minimum implied density and representative front, body and long-end contracts. The preview is a sample of the continuous model. The shared 11 deltas and the dense publication points are sampled after fitting; they do not drive a second PCHIP/Wing fit or a later grid projection.</li>
+<li>Review differences at matching strikes, forwards and option expiries. A smooth preview or full target count alone does not establish a good quote fit; check the fit-error gates and observed/model-derived provenance.</li>
+</ol><div class="callout">Policy: <code>brent_single_svi_actual_strikes_v1</code>. The current workflow replaces the earlier SVI → projected delta grid → hybrid-smile sequence.</div></article>
+
+<article class="playbook"><h3>Brent intraday: update only supported expiries</h3><ol>
+<li>Select the intended <strong>INTRADAY</strong> snapshot and inspect both its as-of time and the preceding settlement anchor. Rolling reduces time to expiry while preserving the accepted settlement IV shape before quote updates.</li>
+<li>Use the same calibration button. Quotes must have resolved executable IV, the supported American pricing model, matching governed expiries, acceptable option spreads and synchronized option/underlying capture times.</li>
+<li>Check the number of expiries updated by executable quotes. Each replacement must pass the shape and quote-error gates and improve on the settlement model against those quotes. Sparse, stale or rejected expiries remain on the settlement model.</li>
+<li>If the status says no expiry improved the accepted settlement fit, there is no new candidate to publish. Obtain a suitable new snapshot and review it again. Before publication, the system rebuilds from the pinned database sources and checks the reviewed candidate fingerprint and active base revision.</li>
+</ol><div class="callout">The fitted forward stays attached to an accepted intraday smile. An excluded quote must not move its strike coordinates afterward.</div></article>
+
+<article class="playbook"><h3>HH: preserve the observed fit and seasonality</h3><ol>
+<li>Read the <strong>Input and provenance ledger</strong>. HH independently inverts LNE settlement premiums using premium-upfront Black-76, paired NG forwards, captured rates and governed option expiries. ON, ICE PHE, synthetic and alternate-COB observations cannot replace this source. An ON view without a complete same-COB LNE settlement cannot calibrate. Financing rates retain their original batch capture timestamps: they need not equal the completed snapshot timestamp. The captured UTC date must be from settlement COB through four days afterward, and capture cannot follow snapshot completion beyond its sub-second clock precision. Missing, stale, future or inconsistent rates block the candidate; no rate or timestamp is restamped.</li>
+<li>Run <strong>Calibrate complete HH surface</strong>. Liquid months fit SVI to actual eligible strikes, with stronger body weights. The seasonal estimate requires at least 24 accepted liquid months and 12 matched year-on-year delivery-month pairs.</li>
+<li>Review thin and distant months separately. Each starts from the accepted same delivery month one year earlier, adjusted by a bounded annual log-ATM trend. Sparse quotes constrain level and skew; five or more distinct strikes can support a fuller SVI fit with a seasonal prior. With no quotes, the month is model-only and its RMSE is shown as <strong>No quotes</strong>.</li>
+<li>Inspect <strong>Expiry selection and diagnostics</strong>: eligible quotes, RMSE, arbitrage status and source class. <code>observed_fit</code> identifies liquid fits; <code>sparse_quote_constrained</code> covers the seasonal branch, so check quote count as well to identify model-only months. Use <strong>Candidate versus active HH surface</strong> and <strong>Export</strong> to review the entire batch.</li>
+<li>Both ON and LNE show the same exact-COB HH publication, labelled <strong>HH surface · LNE calibrated</strong> for the new policy. Older policy revisions are labelled <strong>Legacy HH surface</strong>. If no publication exists for that date, the view reports it rather than borrowing another date.</li>
+</ol><div class="callout">Policy: <code>hh_lne_single_svi_seasonal_quotes_v1</code>. The final SVI model supplies both the 11-delta and dense samples. The old calendar/butterfly grid projection and second hybrid fit are removed from this candidate path. Density is still checked; cross-month calendar monotonicity is inapplicable here because the delivery-month NG futures are different underlyings.</div></article>
+
+<article class="playbook"><h3>TTF and JKM: preserve nodes, validate tails</h3><ol>
+<li>Use <strong>Reload</strong>, then check exact-COB forwards, positive time to the verified option expiry and all 11 undiscounted call-delta nodes: 1%, 10%, 20%, 30%, 40%, 50%, 60%, 70%, 80%, 90% and 99%. Each expiry must have one accepted source and one provenance class.</li>
+<li>Keep <strong>observed</strong> official nodes distinct from <strong>extrapolated</strong> template nodes. Approved extrapolated smiles are eligible calibration targets, but their successful fit does not turn them into market observations. Missing or mixed provenance blocks calibration.</li>
+<li><strong>Calibrate</strong> reviews the selected expiry. The authoritative core preserves its nodes using PCHIP in total variance versus log-moneyness. For TTF, a failing core triggers a fixed-anchor convex call-price interpolant, provided the original node prices satisfy the required price bounds, decreasing-price and convexity conditions. This changes interpolation between anchors, never the settlement nodes. Passing PCHIP cores retain their existing values. Wing-v2 tails join outside the selected core through smooth transitions. Review <strong>Core TV RMSE</strong>, <strong>Wing tail TV RMSE</strong>, <strong>IV RMSE</strong> and the complete hybrid’s arbitrage result separately. A zero core error only confirms node reproduction. Review the selected core interpolation, original PCHIP density and repaired-core density in the expiry diagnostics; both the core and complete joined smile must meet the existing <strong>0.006 density margin</strong>.</li>
+<li>Run <strong>Calibrate All Expiries</strong> before publication. Every required expiry must have an accepted result and pass validation. Extrapolated months are seeded from accepted fits; failed rows leave the batch incomplete. Changes to the date, source, parameters, node edits, policy/code or saved base invalidate the corresponding batch evidence.</li>
+<li>For TTF, batch calibration targets <strong>settlement nodes</strong>, including applicable session node edits. The manual intraday workflow starts from the latest published smile when available. A manually adjusted candidate or modal Final is session state; it does not replace the complete batch required by the inline publication button. Review that distinction before using the <a href="ttf_intraday_vol_surface_adjustment_guide.html">TTF intraday adjustment guide</a>. JKM uses its official COB path.</li>
+</ol><div class="callout">Policies: <code>ttf_quote_preserving_core_wing_tail_hybrid_v2</code> and <code>jkm_pchip_core_wing_tail_hybrid_v1</code>. Check the final core, joins and tails together; an accepted Wing-only fit is insufficient.</div></article>
+</div>
+
+<h3>Understand the acceptance gates</h3>
+<p class="section-intro">These are the reviewed policy defaults, not trader-tunable overrides. A volatility point means one percentage point of IV: 0.01 in decimal volatility. Shape checks apply to the continuous candidate as well as its sampled publication domain.</p>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Calibration acceptance gates"><table><thead><tr><th scope="col">Scope</th><th scope="col">Required evidence</th><th scope="col">Trader interpretation</th></tr></thead><tbody>
+<tr><td>Brent observed fit</td><td>At least 8 distinct strikes per fitted expiry and at least 2 accepted observed expiries. Mean absolute IV error at most <strong>1.0 vol point</strong> after constrained fitting. Eligible strikes have <code>0.50 &lt; K/F &lt; 2.00</code>, with body emphasis at <code>0.70–1.30</code>.</td><td>Target coverage can exceed observed coverage. Check which months are fitted, interpolated or extrapolated.</td></tr>
+<tr><td>Brent intraday update</td><td>Option spread at most <strong>25%</strong>; capture skew at most <strong>30 seconds</strong>; matched forwards within <strong>0.5%</strong>. A replacement must improve mean quote error by more than <strong>0.01 vol point</strong>. Below 3 days to expiry, the premium floor is <strong>USD 0.10/bbl</strong> for settlement and intraday observations.</td><td>Having quotes on screen does not make an expiry eligible for an update. Read the updated-expiry count.</td></tr>
+<tr><td>HH financing-rate provenance</td><td>Exact pinned LNE source, matching product/COB/security lineage, finite normalized rates consistent within each delivery month, retained batch timestamps within the settlement freshness window and completed-snapshot clock precision. The manifest records capture bounds, timestamp count and <code>bloomberg_lne_rate_capture_v2</code>.</td><td>Different request-batch timestamps are expected. Rate freshness and capture lineage must still pass.</td></tr>
+<tr><td>HH liquid and sparse fits</td><td>At least <strong>8 distinct strikes</strong> for a liquid fit. Liquid body mean absolute error at most <strong>0.5 vol point</strong> and maximum body error at most <strong>2.0 vol points</strong>; sparse-month maximum quote error at most <strong>2.5 vol points</strong>. The annual log-ATM trend is capped at <strong>±0.20</strong>; each sparse month needs an accepted same-season predecessor.</td><td>Preserve winter/summer structure and check original-quote residuals. Model-only months have no quote-fit error to certify.</td></tr>
+<tr><td>Brent and HH complete surface</td><td>Positive finite variance, supported IV range and acceptable implied density across every target expiry over the governed <strong>1%–99% call-delta domain</strong>. The dense publication uses <strong>401 points per expiry</strong>.</td><td>A density pass is bounded numerical validation, not a claim that every possible strike, market or future scenario has been certified.</td></tr>
+<tr><td>TTF and JKM complete hybrid</td><td>Complete homogeneous 11-node input, exact node reproduction, valid smooth joins and the full hybrid arbitrage gate; accepted results for every required expiry and unchanged batch fingerprints before publication.</td><td>Assess observed and extrapolated rows separately. Zero core error, an individual successful fit or a partial batch cannot establish complete publishability.</td></tr>
+</tbody></table></div>
+
+<h3>Confirm, publish and verify the selected revision</h3>
+<ol>
+<li>Review the complete candidate and its source classes, forwards, expiries, fit errors and validation warnings. Resolve blocked or stale results by reloading and recalibrating the affected context.</li>
+<li>Confirm the complete batch, then use the product’s <strong>Validate &amp; Publish</strong> action when its publication flag and your authenticated permission allow it. Brent rebuilds and compares the reviewed candidate; HH verifies its saved server-side candidate, code/output fingerprints, pinned settlement rows and expiry references. TTF/JKM verify complete batch evidence and rebuild the publication surface from the reviewed state. Active-base changes block replacement.</li>
+<li>Read the returned publication revision and persisted point count. Verify the active product/COB revision in the relevant consumer and inspect representative expiries. For Brent and HH, the Vol Trades overlay is exact-COB; for TTF/JKM, check the explicitly labelled publication COB rather than assuming it matches the market view.</li>
+<li>Keep the surface and portfolio publication steps separate: this activates a calibrated surface revision. Portfolio risk changes only after its own valuation draft, review and publication.</li>
+</ol>
+<details><summary>Code ownership and migration evidence</summary><p>Calibration calculations and policies are canonical in <code>options/vol_calibration/</code>: <code>api.py</code> is the public entry point; <code>products/</code> owns product fitting and source preparation; <code>models/</code> owns SVI, PCHIP/convex-core and Wing models; <code>inputs/</code> owns eligibility and timestamp rules; <code>calibration/</code> owns retries and numerical batches; <code>publication/</code> owns candidate validation and persistence. Dashboard <code>vol_calibration/</code> retains controls, charts, export presentation, process dispatch, jobs, authorization and caches. Its publication adapter authorizes the operator before calling the shared writer. Old numerical import paths are temporary forwarders; they must not acquire new calculations. Frozen inputs, wheel hashes, full recalibration reports, persisted readbacks and browser-export verification are recorded under <code>options/outputs/vol_calibration_migration_20261001/</code>. Migration verification, production deployment and surface publication are separate events. Confirm the running artifact identity and fresh persisted revision before treating an unpublished candidate as active.</p></details>
+</section>
+<section class="section" id="actions"><div class="section-head"><div><p class="eyebrow">Action / impact control</p><h2>What every action changes</h2><p class="section-intro">A database write can capture a market, persist calibration evidence, publish a surface or publish portfolio risk. Those effects are not interchangeable.</p></div></div>
+<div class="filter-bar" role="group" aria-label="Filter actions by impact">
+<button class="filter-btn" type="button" data-filter="all" aria-pressed="true">All actions</button>
+<button class="filter-btn" type="button" data-filter="read" aria-pressed="false">Read / display</button>
+<button class="filter-btn" type="button" data-filter="session" aria-pressed="false">Session / candidate</button>
+<button class="filter-btn" type="button" data-filter="file" aria-pressed="false">File export</button>
+<button class="filter-btn" type="button" data-filter="official" aria-pressed="false">Database / publication</button>
+<button class="filter-btn" type="button" data-filter="disabled" aria-pressed="false">Disabled in snapshot</button>
+</div><div class="table-wrap" tabindex="0" role="region" aria-label="Action impact matrix"><table><thead><tr><th scope="col">Area</th><th scope="col">Action</th><th scope="col">Immediate effect</th><th scope="col">Official impact</th><th scope="col">Type</th></tr></thead><tbody>
+<tr class="action-row" data-impact="read"><td>Top bar</td><td><strong>Refresh Options Data</strong></td><td>Reloads source status and affected page caches.</td><td>No upstream ingestion, portfolio valuation or publication.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="read"><td>Risk pages</td><td><strong>Change COB, strategy, units or grouping</strong></td><td>Re-slices or aggregates persisted published rows.</td><td>Does not change stored risk or the published run.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="session"><td>Greeks</td><td><strong>Aspect COB / Live</strong></td><td>Loads the optional exposure overlay when configured.</td><td>No booking or portfolio publication.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="file"><td>Risk / market pages</td><td><strong>Export</strong></td><td>Downloads the selected page’s workbook or review data.</td><td>A local file is not a published record.</td><td><span class="impact-tag tag-file">File</span></td></tr>
+<tr class="action-row" data-impact="read"><td>Volatility Surface</td><td><strong>Change product, COB, expiry or view</strong></td><td>Reads operational smiles, history and portfolio comparisons.</td><td>Does not publish a calibrated surface.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="read"><td>Vol Trades</td><td><strong>Select product, settlement / intraday snapshot, trade window or chart mode</strong></td><td>Reads persisted observations for that selection.</td><td>No new Bloomberg call merely from viewing a captured snapshot.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="official"><td>Vol Trades</td><td><strong>Refresh Bloomberg</strong></td><td>Queues a governed intraday market-data request for the worker.</td><td>Can persist a new market snapshot; does not publish a surface or revalue risk.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+<tr class="action-row" data-impact="official"><td>Vol Trades</td><td><strong>Refresh settlements</strong></td><td>Queues supported settlement refresh work, subject to worker readiness.</td><td>Persists market data on successful worker completion; verify job and resulting snapshot.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+<tr class="action-row" data-impact="read"><td>Vol Trades</td><td><strong>Calibrate surface / Reload</strong></td><td>Opens the locked product workspace or reloads its inputs.</td><td>Opening a workspace is not publication.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="session"><td>Brent</td><td><strong>Calibrate selected snapshot</strong></td><td>Fits and validates the selected immutable source; prepares preview and fingerprint.</td><td>Candidate only; active publication unchanged.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="session"><td>TTF / JKM</td><td><strong>Calibrate / Calibrate All Expiries</strong></td><td>Builds or refits candidate core/tail results.</td><td>Candidate only. The disabled durable-worker path would also persist job/checkpoint state if enabled.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="session"><td>TTF / JKM</td><td><strong>Edit / apply candidate or final parameters</strong></td><td>Changes the reviewed working candidate.</td><td>Does not itself activate a surface revision.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="official"><td>TTF intraday workspace</td><td><strong>Add trade (manual calibration mark)</strong></td><td>Persists eligible calibration inputs when the TTF write flag and authenticated identity permit; otherwise the mark stays in session. Check its persistence label.</td><td>Calibration evidence, not a booked portfolio trade or an active surface.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+<tr class="action-row" data-impact="session"><td>HH</td><td><strong>Calibrate complete HH surface</strong></td><td>Builds a governed candidate from the locked LNE source.</td><td>Active HH surface unchanged.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="official"><td>Brent / TTF / JKM</td><td><strong>Confirm + Validate &amp; Publish</strong></td><td>Validates and persists the surface, provenance and publication revision.</td><td>Changes the active calibrated surface for that commodity/COB. Portfolio risk still requires its own valuation publication.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+<tr class="action-row" data-impact="disabled"><td>HH / NBP</td><td><strong>Publish surface</strong></td><td>Product publication flags are off at inspection.</td><td>Existing published surfaces remain readable.</td><td><span class="impact-tag tag-disabled">Disabled</span></td></tr>
+<tr class="action-row" data-impact="disabled"><td>Calibration jobs</td><td><strong>Durable gas / generic background jobs</strong></td><td>Corresponding job flags are off at inspection.</td><td>Do not present resumable worker execution as currently enabled.</td><td><span class="impact-tag tag-disabled">Disabled</span></td></tr>
+<tr class="action-row" data-impact="file"><td>Calibration</td><td><strong>Export where offered</strong></td><td>Creates a candidate/calibration review workbook.</td><td>Export does not activate a revision.</td><td><span class="impact-tag tag-file">File</span></td></tr>
+<tr class="action-row" data-impact="read"><td>ICE Quotes</td><td><strong>Inspect / refresh / filter persisted quotes</strong></td><td>Displays valuations, edges, provenance and service/outbound status from the upstream service.</td><td>The dashboard does not send chat messages or execute trades.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="read"><td>Correlations</td><td><strong>Change market pair or window</strong></td><td>Calculates historical-return diagnostics from forward curves.</td><td>Does not overwrite production options_correlations.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="session"><td>Scenarios</td><td><strong>Run Scenario</strong></td><td>Revalues supported Kirk positions under the chosen shocks and currency.</td><td>Analytic result only; excluded rows must be reviewed.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="read"><td>Pricer</td><td><strong>Resolve a published surface reference</strong></td><td>Reads governed publication points and relevant convention/expiry inputs.</td><td>Read only; the Pricer is no longer manual-input-only.</td><td><span class="impact-tag tag-read">Read</span></td></tr>
+<tr class="action-row" data-impact="session"><td>Pricer</td><td><strong>Add / duplicate / remove structures or legs; calculate</strong></td><td>Updates Exchange/OTC working structures and calculation snapshots.</td><td>No booking or official portfolio valuation.</td><td><span class="impact-tag tag-session">Session</span></td></tr>
+<tr class="action-row" data-impact="official"><td>Portfolio backend</td><td><strong>Create draft valuation</strong></td><td>Persists an immutable run, rows, comparison evidence and control totals.</td><td>Reviewable draft; current-view pointer unchanged.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+<tr class="action-row" data-impact="official"><td>Portfolio backend</td><td><strong>Publish run</strong></td><td>Moves the COB’s published run pointer and records the event.</td><td>Changes official risk in Greeks, Valuation and Trades after reload.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+<tr class="action-row" data-impact="official"><td>Portfolio backend</td><td><strong>Rollback to run</strong></td><td>Repoints the COB to a prior immutable run and records rollback.</td><td>Changes official portfolio risk; it is a separate operation from surface publication.</td><td><span class="impact-tag tag-official">Database</span></td></tr>
+</tbody></table></div></section>
+<section class="section" id="pages"><div class="section-head"><div><p class="eyebrow">Current routes</p><h2>How a trader should use each page</h2><p class="section-intro">Navigation is taken from the production router. P&amp;L Explain is a Valuation tab; calibration and ICE Quotes are sections inside Vol Trades.</p></div></div>
+<div class="pages-grid">
+<article class="page-card"><div class="page-card-head"><h3>Greeks</h3><span class="route">/greeks · default /</span></div><p class="page-purpose">Primary monitor for published delta, gamma, vega, theta, correlation sensitivity and maturity ladders.</p><dl><dt>Source</dt><dd>Published valuation current view; instrument mappings; optional Aspect overlay.</dd><dt>Actions</dt><dd>COB, strategy, asset/pair, aggregation, units, Aspect, export.</dd><dt>Impact</dt><dd>Read / session / file.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Valuation</h3><span class="route">/valuation</span></div><p class="page-purpose">Official option value and P&amp;L with persisted source diagnostics.</p><dl><dt>Source</dt><dd>Published valuation current view; optional configured middle-office P&amp;L.</dd><dt>Actions</dt><dd>COB, strategies, export; switch to P&amp;L Explain.</dd><dt>Impact</dt><dd>Read / file; it does not choose the official run.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>P&amp;L Explain</h3><span class="route">/valuation?view=pnl-explain</span></div><p class="page-purpose">Explain change between two published COBs from prior Greeks and persisted marks.</p><dl><dt>Source</dt><dd>Two published portfolio snapshots.</dd><dt>Actions</dt><dd>Previous/current COB, strategy, currency, grouping, export.</dd><dt>Impact</dt><dd>Read / file. /pnl_explain remains an alias.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Trades</h3><span class="route">/trades</span></div><p class="page-purpose">Published trade ledger with economics, marks, Greeks and valuation-run lineage.</p><dl><dt>Source</dt><dd>Published valuation current view.</dd><dt>Actions</dt><dd>COB, strategy, grid filtering/sorting, export.</dd><dt>Impact</dt><dd>Read / file; no booking editor.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Underlying Prices</h3><span class="route">/prices</span></div><p class="page-purpose">Compare forward curves and delivery-period groupings.</p><dl><dt>Source</dt><dd>Configured Trino path with PostgreSQL curve fallback.</dd><dt>Actions</dt><dd>Products, dates, grouping, export.</dd><dt>Impact</dt><dd>Read / file. Check displayed source and completeness.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Volatility Surface</h3><span class="route">/vol_surface</span></div><p class="page-purpose">Operational ATM, smile, heatmap and history for Brent, HH, JKM, TTF and NBP, plus portfolio source comparisons.</p><dl><dt>Source</dt><dd>Operational from-prices surface; published comparison and valuation views.</dd><dt>Actions</dt><dd>Products, COBs, grouping, expiry, delta/view; Vol Trades link.</dd><dt>Impact</dt><dd>Read / file. Operational curves are distinct from calibrated-publication points.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Vol Trades</h3><span class="route">/brent_vol_history</span></div><p class="page-purpose">Inspect Brent, TFO, HH · ON, HH · LNE and JKM markets; compare observations and calibrated marks.</p><dl><dt>Source</dt><dd>Snapshot/chain/tape tables, official JKM inputs, operational and calibrated surfaces.</dd><dt>Actions</dt><dd>Product, captured market, settlement, trade window, refresh requests, Calibrate surface.</dd><dt>Impact</dt><dd>Read plus explicit market-data writes and controlled surface publication.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>ICE Quotes</h3><span class="route">/brent_vol_history#ice-quotes</span></div><p class="page-purpose">Read persisted Brent quote valuations, price/vol edges and service status beneath Vol Trades.</p><dl><dt>Source</dt><dd>ice_chat_quote_dashboard and ice_chat_service_status.</dd><dt>Actions</dt><dd>Time window and display filters; inspect source age and valuation/outbound status.</dd><dt>Impact</dt><dd>Read only. Other products do not inherit Brent rows.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Correlations</h3><span class="route">/correlations</span></div><p class="page-purpose">Historical returns, rolling correlations and regression for selected market pairs.</p><dl><dt>Source</dt><dd>Forward curve history through the configured loader.</dd><dt>Actions</dt><dd>Markets, delivery period, history, pair/window, export.</dd><dt>Impact</dt><dd>Analytic only; production correlation inputs are unchanged.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Scenarios</h3><span class="route">/scenarios</span></div><p class="page-purpose">Stress eligible Kirk spread positions using price, volatility, correlation, rate and time shifts.</p><dl><dt>Source</dt><dd>Selected published portfolio rows and embedded pricing inputs.</dd><dt>Actions</dt><dd>COB, strategy, currency, grouping, shocks, run/export.</dd><dt>Impact</dt><dd>Session / file; review exclusions and use one native currency.</dd></dl></article>
+<article class="page-card"><div class="page-card-head"><h3>Pricer</h3><span class="route">/pricer</span></div><p class="page-purpose">Current stacked Exchange and OTC workspaces for structures and multi-leg pricing.</p><dl><dt>Source</dt><dd>Manual inputs plus governed calibrated publications, mapping/convention and expiry references.</dd><dt>Actions</dt><dd>Select mapping/model and dates; add/duplicate structures; adjust inputs; calculate and inspect surfaces/payoff/Greeks.</dd><dt>Impact</dt><dd>Session calculations with database reads; no trade booking or publication.</dd></dl></article>
+
+</div><p class="section-intro">Old bookmarks: <code>/vol_calibration</code> redirects to <code>/brent_vol_history</code>; <code>/ice_chat_quotes</code> redirects to <code>/brent_vol_history#ice-quotes</code>. Use the destination’s product selector to establish the intended context.</p></section>
+<section class="section" id="pricer"><div class="section-head"><div><p class="eyebrow">Exchange and OTC</p><h2>Price with the correct contract and surface</h2><p class="section-intro">The Pricer reads published references as well as accepting manual inputs. A product label alone is not enough to determine expiry, settlement, premium convention or sizing.</p></div></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Pricing decision reference table"><table><thead><tr><th scope="col">Pricing decision</th><th scope="col">What to check</th></tr></thead><tbody>
+<tr><td>Exchange vs OTC</td><td>Select the intended workspace and, for exchange products, the mapping ID. The registry carries the pricing model, premium convention, contract size, expiry convention and surface source.</td></tr>
+<tr><td>Model and premium treatment</td><td>The mapped model governs the calculation. Examples: ICE TTF and Brent use futures-style conventions; JKM average-price options use Asian-76. The Brent exchange label explicitly identifies Black-76 as American-equivalent futures-style. Do not apply a generic discount factor to every product.</td></tr>
+<tr><td>Conditional mappings</td><td>Some mappings carry conditional evidence/status. The code labels ICE HH PHE premium evidence and JKM vanilla listing evidence as conditional; preserve those qualifications.</td></tr>
+<tr><td>Surface reference</td><td>Check publication ID/COB, source product, contract/option expiry, forward, interpolation or expiry adjustments, and any fallback/availability warning. Current inputs must match the returned surface reference before calculation.</td></tr>
+<tr><td>Input volatility and adjustments</td><td>Where surface-driven volatility is used, inspect published volatility plus ATM, skew and smile adjustments. Manual overrides and custom expiries change the pricing scenario; they do not change the shared published surface.</td></tr>
+<tr><td>Dates, quantities and units</td><td>Distinguish valuation date, option expiry, contract/delivery dates and averaging period. Respect mapping-specific sizing, including TTF delivery hours and JKM monthly lots. Keep signed quantities and native currencies explicit.</td></tr>
+<tr><td>Result scope</td><td>Inspect all legs, total premium, payoff and sensitivities. Session results do not book the trade, persist a portfolio draft or publish official Greeks.</td></tr>
+</tbody></table></div>
+</section>
+<section class="section" id="playbooks"><div class="section-head"><div><p class="eyebrow">Desk routines</p><h2>Six practical playbooks</h2></div></div>
+<div class="playbooks">
+<article class="playbook"><h3>Start of day</h3><ol><li>Refresh Options Data and read the source-alignment banner.</li><li>Compare portfolio COB with curves and operational surfaces; then separately check calibrated publication COB and revision.</li><li>Inspect selected product/expiry coverage in Prices, Volatility Surface and Vol Trades.</li><li>Open Greeks on the intended published COB and reconcile strategy/asset exposures.</li><li>Use Trades for row-level marks, inputs and run lineage.</li></ol><div class="callout">At this inspection, the portfolio lags the market tables by a month. A successful refresh does not close that gap.</div></article>
+<article class="playbook"><h3>Refresh and review a captured market</h3><ol><li>In Vol Trades, select the product and inspect the captured snapshot’s kind, date and as-of time.</li><li>If new data is needed, use the appropriate Bloomberg or settlement refresh control.</li><li>Wait for worker completion and select/verify the resulting complete snapshot.</li><li>Review quotes, trade prints, volume and open interest with their separate provenance.</li><li>For JKM, use the official COB source path; for ICE Quotes, keep the Brent feed boundary visible.</li></ol><div class="callout">Queue acceptance, worker readiness and a persisted complete snapshot are three separate checks.</div></article>
+<article class="playbook"><h3>Calibrate and publish a surface</h3><ol><li>Select the intended market context, open Calibrate surface and check the locked input ledger.</li><li>Run the product’s calibration action and review every required expiry, fit and validation warning.</li><li>For Brent, review the single observed-strike SVI fit and the settlement/intraday diagnostics.</li><li>When authorized and enabled, confirm the complete batch and use Validate &amp; Publish.</li><li>Read back the active publication revision and points, then refresh the relevant consumer.</li></ol><div class="callout">A candidate, an exported workbook and a published surface are different states. Portfolio risk remains unchanged until its own valuation run is published.</div></article>
+<article class="playbook"><h3>Investigate a P&amp;L move</h3><ol><li>Open Valuation and select the intended COB, strategy and currency.</li><li>Use the P&amp;L Explain tab with ordered previous/current published COBs.</li><li>Inspect changed prices, vols and correlations, as well as unchanged-mark/source warnings.</li><li>Trace unexplained results to Trades and persisted model/input lineage.</li><li>Keep TTF source diagnostics distinct from the official selected valuation inputs.</li></ol><div class="callout">Do not add native-currency values into an unlabeled portfolio total. Unexplained P&amp;L can contain higher-order and model effects.</div></article>
+<article class="playbook"><h3>Price and stress a trade idea</h3><ol><li>Choose Exchange or OTC. For Exchange, verify the mapping, payoff model and premium convention.</li><li>Check valuation date, option expiry, delivery/averaging dates, sizing and the published surface reference.</li><li>Build the legs and inspect any manual volatility or forward adjustments.</li><li>Calculate, then review premium, payoff, Greeks and source warnings.</li><li>Use Scenarios for supported portfolio Kirk shocks; review excluded rows and currency scope.</li></ol><div class="callout">The Pricer does not book a trade. Use the separate booking process before the next governed portfolio valuation.</div></article>
+<article class="playbook"><h3>End-of-day portfolio publication</h3><ol><li>Confirm trades and exact-COB valuation inputs, including each product’s source policy and conventions.</li><li>Run the governed backend’s dry valuation and review missing/mixed-input failures.</li><li>Create an immutable draft and reconcile rows, currency totals, fingerprints and comparison evidence.</li><li>Publish the approved run and verify the publication pointer/current-view readback.</li><li>Refresh Greeks, Valuation and Trades and confirm the intended run and COB.</li></ol><div class="callout">Surface publication does not replace the portfolio draft/review/publish sequence.</div></article>
+</div></section>
+<section class="section" id="guardrails"><div class="section-head"><div><p class="eyebrow">Interpretation and control</p><h2>Trader guardrails</h2></div></div>
+<div class="guardrails">
+<article class="guardrail guardrail-critical"><strong>Keep the three dates distinct</strong><p>Market COB, surface publication time and portfolio valuation COB serve different purposes. A newer timestamp does not prove newer underlying marks.</p></article>
+<article class="guardrail guardrail-critical"><strong>The banner is a partial freshness check</strong><p>It checks global maxima for portfolio, from-prices surface and curve. It does not certify selected-product completeness, calibrated publication freshness or Bloomberg worker liveness.</p></article>
+<article class="guardrail guardrail-critical"><strong>Refresh, fit and publish have different effects</strong><p>Top-bar refresh reads; Bloomberg refresh queues persistence; calibration creates a candidate; surface and portfolio publication activate different records.</p></article>
+<article class="guardrail guardrail-critical"><strong>Read flags by product</strong><p>Generic writes can be off while Brent, TTF or JKM publication is on. Server-side identity, validation and explicit confirmation still apply.</p></article>
+<article class="guardrail guardrail-critical"><strong>Do not blend source policies</strong><p>Brent uses its pinned snapshot; TTF/JKM use exact official inputs; HH uses complete LNE authority even when viewing ON.</p></article>
+<article class="guardrail guardrail-critical"><strong>Respect units and model scope</strong><p>Use mapping-specific premium and quantity conventions. Keep native currencies explicit and inspect scenario exclusions.</p></article>
+<article class="guardrail guardrail-critical"><strong>An ICE quote is not an execution</strong><p>The ICE Quotes section reads persisted values and status. Its display does not send an order or a chat response.</p></article>
+<article class="guardrail guardrail-critical"><strong>Changing context invalidates review</strong><p>If the market snapshot, inputs or active base publication changes, reload/recalibrate and inspect the replacement candidate before publishing.</p></article>
+<article class="guardrail guardrail-critical"><strong>Read back what changed</strong><p>Verify the actual published revision and consumer state. Health, a candidate preview or an exported file alone is not publication evidence.</p></article>
+</div></section>
+<section class="section" id="tables"><div class="section-head"><div><p class="eyebrow">Source reference</p><h2>Tables and views behind the workflow</h2><p class="section-intro">Code dependencies below describe purpose and scope. “Present” refers only to the relations explicitly checked in the dated catalog inspection; it is not a statement about completeness or freshness.</p></div></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Source family reference table"><table><thead><tr><th scope="col">Source family</th><th scope="col">Relations</th><th scope="col">Purpose</th><th scope="col">Consumers / control</th><th scope="col">Inspection or scope</th></tr></thead><tbody>
+<tr><td>Market</td><td><code>at_lng.curve</code></td><td>Forward curves and contract data.</td><td>Prices, correlations, valuation/calibration inputs.</td><td>Latest global COB 28 Sep 2026.</td></tr>
+<tr><td>Market</td><td><code>at_lng.implied_volatility_surface_from_prices</code></td><td>Operational derived delta grid and source metadata.</td><td>Volatility Surface, operational comparisons, configured valuation inputs.</td><td>Latest global COB 28 Sep 2026.</td></tr>
+<tr><td>Market</td><td><code>at_lng.implied_volatility_surface</code></td><td>Direct ICAP marks.</td><td>Exact official TTF/JKM calibration inputs and product-specific valuation treatment.</td><td>Latest global COB 28 Sep 2026.</td></tr>
+<tr><td>Market</td><td><code>at_lng.vol_market_snapshots</code><br><code>at_lng.vol_market_option_quotes</code><br><code>at_lng.vol_market_forwards</code></td><td>Captured market identity, quotes and forwards.</td><td>Brent / HH source authorities and market provenance.</td><td>All present.</td></tr>
+<tr><td>Market</td><td><code>at_lng.bbg_option_chain</code><br><code>at_lng.bbg_option_trade_events</code><br><code>at_lng.bbg_option_trade_tape_runs</code></td><td>Persisted option chain, prints and tape capture metadata.</td><td>Vol Trades.</td><td>Chain present; inspect selected capture and activity status.</td></tr>
+<tr><td>Service</td><td><code>at_lng.bbg_option_chain_workers</code></td><td>Worker registry / heartbeat.</td><td>Refresh request admission and status.</td><td>Present; no worker-liveness claim made by this guide.</td></tr>
+<tr><td>Service</td><td><code>at_lng.ice_chat_quote_dashboard</code><br><code>at_lng.ice_chat_service_status</code></td><td>Quote valuation view and service status.</td><td>Read-only ICE Quotes in Vol Trades.</td><td>Both present; current feed contract is Brent-only.</td></tr>
+<tr><td>Surface</td><td><code>at_lng.vol_surface_publications</code><br><code>at_lng.implied_volatility_surface_calibrated</code></td><td>Publication ledger and published points.</td><td>Vol Trades calibrated overlays and Pricer.</td><td>Present; latest active COBs observed: 25 Sep for all five commodities.</td></tr>
+<tr><td>Surface</td><td><code>at_lng.vol_calibration_runs</code><br><code>at_lng.vol_calibration_expiry_results</code><br><code>at_lng.vol_calibration_audit_events</code></td><td>Run, per-expiry fit and audit evidence.</td><td>Governed calibration/publication.</td><td>All present; no longer a future-only schema.</td></tr>
+<tr><td>Surface</td><td><code>at_lng.vol_calibration_intraday_trades</code><br><code>at_lng.vol_calibration_run_trade_inputs</code></td><td>Manual calibration observations and run-input links.</td><td>TTF intraday / governed input lineage.</td><td>Both present. Not portfolio bookings.</td></tr>
+<tr><td>Jobs</td><td><code>at_lng.vol_calibration_jobs</code><br><code>at_lng.vol_calibration_job_items</code></td><td>Job state and per-expiry items/checkpoints.</td><td>Generic and durable gas batch execution.</td><td>Present; both corresponding runtime job paths are disabled.</td></tr>
+<tr><td>Portfolio</td><td><code>at_lng.trades_options</code></td><td>Booked option economics.</td><td>Upstream portfolio calculation.</td><td>A Pricer calculation does not insert a booking.</td></tr>
+<tr><td>Portfolio</td><td><code>at_lng.trades_options_valuation_runs</code><br><code>at_lng.trades_options_valuation_run_currency_totals</code><br><code>at_lng.trades_options_valuation</code></td><td>Immutable run metadata, control totals and valuation rows.</td><td>Governed draft and review.</td><td>Draft persistence alone does not move the current view.</td></tr>
+<tr><td>Portfolio</td><td><code>at_lng.trades_options_valuation_publications</code><br><code>at_lng.trades_options_valuation_publication_events</code><br><code>at_lng.trades_options_valuation_current</code></td><td>Published pointer, event history and official current view.</td><td>Greeks, Valuation, Trades, Scenarios, P&amp;L Explain.</td><td>Latest current-view COB 28 Aug 2026.</td></tr>
+<tr><td>Portfolio</td><td><code>at_lng.option_volatility_surface_comparison</code><br><code>at_lng.option_volatility_surface_comparison_current</code></td><td>Persisted comparison nodes and published comparison view.</td><td>Volatility Surface portfolio comparison.</td><td>Governed by the portfolio publication chain.</td></tr>
+<tr><td>Governance</td><td><code>at_lng.options_correlations</code><br><code>at_lng.option_contract_conventions</code><br><code>at_lng.option_contract_expiries</code><br><code>at_lng.mapping_volatility_surface_calendar</code><br><code>at_lng.option_discount_curve_definitions</code><br><code>at_lng.option_discount_curves</code></td><td>Correlation, contract, expiry/calendar and discount inputs.</td><td>Product-specific valuation/convention resolution.</td><td>Code dependencies; current row completeness not audited here.</td></tr>
+<tr><td>Supporting</td><td><code>at_lng.gas_options_activity</code><br><code>at_lng.oil_options_activity</code><br><code>at_lng.cleared_gas</code><br><code>at_lng.cleared_oil</code><br><code>at_lng.wing_model_parameter_history</code></td><td>Activity observations, supporting settlement loaders and legacy parameters.</td><td>Selected diagnostics/loaders; not substitutes for the locked product authority.</td><td>Do not infer these are the authoritative inputs to every calibration.</td></tr>
+<tr><td>Optional</td><td><code>at_lng.pnl_aspect</code><br><code>at_lng.mapping_instrument_marker</code><br><code>at_lng.mapping_instrument_curve_enverus</code></td><td>Middle-office overlay and instrument/unit mappings.</td><td>Valuation / Greeks as configured.</td><td>Connection, access and completeness are deployment-specific.</td></tr>
+</tbody></table></div>
+</section>
+<section class="section" id="evidence"><div class="section-head"><div><p class="eyebrow">Audit trail</p><h2>Production evidence and maintenance</h2><p class="section-intro">The guide follows the running release, rather than assuming the main checkout is deployed. Recheck this section after a release or a configuration change.</p></div></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="Evidence reference table"><table><thead><tr><th scope="col">Evidence</th><th scope="col">Reference</th><th scope="col">What it establishes</th></tr></thead><tbody>
+<tr><td>Dashboard release</td><td><code>6cedc469250cfc3e9e87188ca5d285b7ac31ee6a</code><br><code>/Users/fernandezpibrall/Repositories/dash_options_brent_single_surface</code></td><td>Listener on 127.0.0.1:8071 runs index_options:server from this checkout. Observed process start: 29 Sep 2026.</td></tr>
+<tr><td>Analytics release</td><td><code>at-options-analytics 1.2.1</code><br><code>/Users/fernandezpibrall/.local/share/brent-surface-release/1.2.1/site</code></td><td>The service’s PYTHONPATH selects this installed release; the main options working tree is not assumed to be its analytics source.</td></tr>
+<tr><td>Routing</td><td><code>index_options.py</code></td><td>Current routes, current Pricer selection, Valuation tabs, calibration/ICE redirects. Redirect destinations checked over HTTP.</td></tr>
+<tr><td>Market and calibration</td><td><code>pages/brent_vol_history.py</code><br><code>vol_calibration/inline_workspace.py</code><br><code>vol_calibration/brent_single_workspace.py</code><br><code>vol_calibration/brent_single_candidate.py</code></td><td>Product selectors, locked source handoff, single-SVI review and publication safeguards.</td></tr>
+<tr><td>Gas / HH methodology</td><td><code>vol_calibration/pages/ttf.py</code><br><code>vol_calibration/pages/jkm.py</code><br><code>vol_calibration/pages/hh_governed.py</code><br><code>vol_calibration/ttf_hybrid_surface.py</code></td><td>Current mounted product workflows and source authorities.</td></tr>
+<tr><td>Surface publication</td><td><code>vol_calibration/ttf_publication.py</code><br><code>vol_calibration/feature_flags.py</code></td><td>Immutable publication records and independent product write gates.</td></tr>
+<tr><td>Pricer and ICE Quotes</td><td><code>pages/pricer.py</code><br><code>pricer_workspace/state.py</code><br><code>pricer_workspace/components.py</code><br><code>pricer_workspace/callbacks.py</code><br><code>pricer_exchange_registry.py</code><br><code>pricer_surface_reference.py</code><br><code>pages/ice_chat_quotes.py</code></td><td>Exchange/OTC workspaces, mapping conventions, governed surface reads and Brent-only quote feed.</td></tr>
+<tr><td>Freshness and runtime</td><td><code>source_status.py</code><br><code>/health/live</code> · <code>/health/ready</code></td><td>Global source checks and live effective flags. Local config defaults alone differ from the running process and were not used as its final flag evidence.</td></tr>
+<tr><td>Database inspection</td><td>Read-only transaction against the service-configured PostgreSQL connection; 29 Sep 2026 11:38 GST</td><td>Direct maximum-COB queries, active publication ledger reads and selected relation-existence checks. No market refresh, calibration, publication or database mutation was executed for this documentation update.</td></tr>
+<tr><td>Evidence limits</td><td>Static production-code trace + HTTP/runtime and bounded database inspection</td><td>This document is not a full end-to-end revalidation of every page, worker, model, expiry, export or publication path. Dated values must be refreshed before being treated as current.</td></tr>
+</tbody></table></div>
+</section><footer class="footer"><strong>Evidence basis:</strong> production dashboard commit <code>6cedc46</code>, installed analytics <code>1.2.1</code>, effective live health flags and read-only PostgreSQL inspection on 29 Sep 2026 11:38 GST. The August inspection has been replaced; historical counts and absent-schema claims are not carried forward. Update routes, source policies, action effects and this dated evidence together.</footer></main>
+  <script>
+    (function () {
+      const workflowContent = {
+  "gate": {
+    "decision": "Are the portfolio run, market snapshot and calibrated publication suitable for this decision?",
+    "source": "Portfolio current view · curve · operational delta surface · calibrated publication ledger",
+    "impact": "Read-only. Global date alignment does not prove selected-product or calibrated-surface freshness."
+  },
+  "marks": {
+    "decision": "Are the selected quotes, forwards, fit and expiry coverage credible under this product’s source policy?",
+    "source": "Pinned Bloomberg snapshot or exact official gas inputs · operational and calibrated surfaces",
+    "impact": "Viewing is read-only; refresh requests can persist markets; calibration builds candidates; explicit publication activates a surface."
+  },
+  "risk": {
+    "decision": "Where are the signed Greek concentrations by strategy, maturity and asset or pair?",
+    "source": "at_lng.trades_options_valuation_current · mappings · optional Aspect overlay",
+    "impact": "Filtering changes the view. A newer calibrated surface does not recalculate this portfolio snapshot."
+  },
+  "reconcile": {
+    "decision": "Which positions, changed marks and source diagnostics explain value and P&L?",
+    "source": "Published valuation snapshots · persisted comparisons · optional middle-office overlay",
+    "impact": "Read-only analytics and exports; no published run changes."
+  },
+  "stress": {
+    "decision": "How does the supported Kirk book respond to the selected shocks in one native currency?",
+    "source": "Selected published portfolio rows with embedded prices, vols, correlations and Greeks",
+    "impact": "Analytic/session result. Inspect unsupported or invalid exclusions; no official write."
+  },
+  "idea": {
+    "decision": "Does the Exchange or OTC structure use the right mapping, expiry, sizing, premium convention and surface reference?",
+    "source": "Manual inputs + governed calibrated publication points + convention and expiry references",
+    "impact": "Reads market references and calculates in session. Does not book trades or publish portfolio risk."
+  },
+  "publish": {
+    "decision": "Am I approving a calibrated surface revision or a portfolio valuation run, and has that exact object passed review?",
+    "source": "Surface publication ledger OR portfolio runs, totals, publications and event tables",
+    "impact": "Surface publication changes calibrated marks; portfolio publication changes the official risk current view. Verify each separately."
+  }
+};
+
+      const steps = Array.from(document.querySelectorAll(".workflow-step"));
+      const decision = document.getElementById("workflow-decision");
+      const source = document.getElementById("workflow-source");
+      const impact = document.getElementById("workflow-impact");
+      steps.forEach(function (step) {
+        step.addEventListener("click", function () {
+          steps.forEach(function (candidate) { candidate.setAttribute("aria-pressed", "false"); });
+          step.setAttribute("aria-pressed", "true");
+          const content = workflowContent[step.dataset.step];
+          decision.textContent = content.decision;
+          source.textContent = content.source;
+          impact.textContent = content.impact;
+        });
+      });
+
+      const filters = Array.from(document.querySelectorAll(".filter-btn"));
+      const rows = Array.from(document.querySelectorAll(".action-row"));
+      filters.forEach(function (filter) {
+        filter.addEventListener("click", function () {
+          filters.forEach(function (candidate) { candidate.setAttribute("aria-pressed", "false"); });
+          filter.setAttribute("aria-pressed", "true");
+          const value = filter.dataset.filter;
+          rows.forEach(function (row) {
+            row.hidden = value !== "all" && row.dataset.impact !== value;
+          });
+        });
+      });
+    }());
+  </script>
+</body>
+</html>

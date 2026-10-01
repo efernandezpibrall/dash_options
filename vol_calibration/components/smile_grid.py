@@ -15,10 +15,11 @@ from plotly.subplots import make_subplots
 import dash_bootstrap_components as dbc
 from dash import html, dcc
 from typing import Dict, Optional, Literal
-from options.calibration_engine.converters.delta import strike_to_delta
 
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
-from vol_calibration.ttf_hybrid_surface import (
+from options.vol_calibration.api import delta_to_strike_iv as delta_to_strike_iv
+from options.vol_calibration.api import delta_curve_to_strike_iv
+from options.vol_calibration.api import (
     GAS_HYBRID_POLICY_VERSIONS,
     TTF_HYBRID_METHOD,
 )
@@ -32,144 +33,8 @@ X_AXIS_OPTIONS = [
 ]
 
 
-def delta_to_strike_iv(
-    target_delta,
-    forward,
-    dte,
-    wing_params,
-    wing_model_iv_func,
-    is_put=True,
-    tol=1e-6,
-    max_iter=80,
-    model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
-):
-    """
-    Solve for strike and IV given a target delta using bracketed bisection.
-
-    This uses REVERSE-DELTA mapping to guarantee monotonicity in delta space.
-    Instead of Strike→IV→Delta (which can be non-monotonic when IV varies with strike),
-    we solve Delta→Strike→IV by iteratively finding the strike that produces the target delta.
-
-    Args:
-        target_delta: Target delta value (positive, 0-0.5 for OTM options)
-        forward: Forward price
-        dte: Days to expiration
-        wing_params: Wing model parameters dict
-        wing_model_iv_func: Wing model IV function
-        is_put: True for put wing; False for the call wing. Targets are
-            positive absolute deltas in both cases.
-        tol: Convergence tolerance
-        max_iter: Maximum iterations
-
-    Returns:
-        (strike, iv) tuple, or (None, None) if convergence fails
-    """
-    _, strikes, ivs = delta_curve_to_strike_iv(
-        np.asarray([target_delta], dtype=float),
-        forward,
-        dte,
-        wing_params,
-        wing_model_iv_func,
-        is_put=is_put,
-        tol=tol,
-        max_iter=max_iter,
-        model_version=model_version,
-    )
-    if not len(strikes):
-        return None, None
-    return float(strikes[0]), float(ivs[0])
 
 
-def delta_curve_to_strike_iv(
-    target_deltas,
-    forward,
-    dte,
-    wing_params,
-    wing_model_iv_func,
-    is_put=True,
-    tol=1e-6,
-    max_iter=80,
-    model_version=DEFAULT_CALIBRATION_MODEL_VERSION,
-):
-    """Map target deltas to the model with a vectorized bracketed solve.
-
-    Extreme Wing-v2 tails can require strikes well beyond five times the
-    forward.  A damped Newton solve with a hard 5F cap therefore returned an
-    unconverged point while still drawing it.  Bisection is slower per
-    iteration but deterministic, derivative-free, and lets us reject any
-    target whose delta residual did not actually converge.
-    """
-    target_deltas = np.asarray(target_deltas, dtype=float)
-    if target_deltas.ndim != 1:
-        target_deltas = target_deltas.reshape(-1)
-    finite_targets = np.isfinite(target_deltas) & (target_deltas > 0.0) & (
-        target_deltas < 1.0
-    )
-    lower = np.full_like(target_deltas, forward * np.exp(-8.0))
-    upper = np.full_like(target_deltas, forward * np.exp(8.0))
-    option_type = 'put' if is_put else 'call'
-
-    def delta_at(strikes):
-        iv = np.asarray(wing_model_iv_func(
-            strike=np.asarray(strikes, dtype=float),
-            forward=forward,
-            model_version=model_version,
-            dte=dte,
-            **wing_params,
-        ), dtype=float)
-        delta = np.asarray(
-            strike_to_delta(
-                strikes,
-                forward,
-                iv,
-                dte,
-                option_type,
-            ),
-            dtype=float,
-        )
-        if is_put:
-            delta = -delta
-        return delta, iv
-
-    lower_delta, _ = delta_at(lower)
-    upper_delta, _ = delta_at(upper)
-    if is_put:
-        bracketed = (lower_delta <= target_deltas) & (
-            upper_delta >= target_deltas
-        )
-    else:
-        bracketed = (lower_delta >= target_deltas) & (
-            upper_delta <= target_deltas
-        )
-
-    active = finite_targets & bracketed
-    for _ in range(max_iter):
-        strikes = np.sqrt(lower * upper)
-        current_delta, _ = delta_at(strikes)
-        error = current_delta - target_deltas
-        unconverged = active & np.isfinite(error) & (np.abs(error) >= tol)
-        if not np.any(unconverged):
-            break
-
-        if is_put:
-            move_lower = unconverged & (error < 0.0)
-        else:
-            move_lower = unconverged & (error > 0.0)
-        move_upper = unconverged & ~move_lower
-        lower[move_lower] = strikes[move_lower]
-        upper[move_upper] = strikes[move_upper]
-
-    strikes = np.sqrt(lower * upper)
-    final_delta, final_iv = delta_at(strikes)
-    residual = np.abs(final_delta - target_deltas)
-    valid = (
-        active
-        & np.isfinite(strikes)
-        & np.isfinite(final_iv)
-        & np.isfinite(residual)
-        & (residual < tol)
-    )
-    return target_deltas[valid], strikes[valid], np.asarray(final_iv)[valid]
 
 
 def create_smile_grid(
@@ -323,7 +188,7 @@ def create_smile_grid_figure(
         Plotly figure with subplot grid
     """
     # Import wing model
-    from options.calibration_engine.models.wing_model import wing_model_iv
+    from options.vol_calibration.api import wing_model_iv
 
     market_data = market_data.copy() if market_data is not None else pd.DataFrame()
     params_df = params_df.copy() if params_df is not None else pd.DataFrame()
@@ -987,10 +852,10 @@ def create_smile_grid_figure(
 
             if is_ttf_hybrid:
                 try:
-                    from vol_calibration.calibration_inputs import (
+                    from options.vol_calibration.api import (
                         select_expiry_observations,
                     )
-                    from vol_calibration.ttf_hybrid_surface import (
+                    from options.vol_calibration.api import (
                         operational_surface_frame as ttf_operational_surface_frame,
                     )
 
@@ -1278,7 +1143,7 @@ def create_single_smile_plot(
     go.Figure
         Single smile plot
     """
-    from options.calibration_engine.models.wing_model import wing_model_iv
+    from options.vol_calibration.api import wing_model_iv
 
     fig = go.Figure()
 

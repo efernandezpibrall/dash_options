@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from options.calibration_engine.io.storage import PARAM_COLUMNS
+from options.vol_calibration.api import model_params, candidate_params  # noqa: F401
 
 
 def parse_table_data(data: List[Dict]) -> pd.DataFrame:
@@ -84,22 +84,8 @@ def format_batch_result_row(
     return row
 
 
-def model_params(values):
-    """Extract only Wing parameters from an editable table/store mapping."""
-    return {
-        name: float(values[name])
-        for name in PARAM_COLUMNS
-        if name in values and pd.notna(values[name])
-    }
 
 
-def candidate_params(result):
-    """Return editable tail parameters plus the selected join widths."""
-    return {
-        **model_params(result.get('params', {})),
-        'left_blend_width': float(result['left_blend_width']),
-        'right_blend_width': float(result['right_blend_width']),
-    }
 
 
 def format_tv_rmse(value):

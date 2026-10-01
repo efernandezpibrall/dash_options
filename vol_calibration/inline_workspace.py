@@ -18,7 +18,7 @@ import pandas as pd
 from dash import Input, Output, State, callback, dcc, html, no_update
 from dash.exceptions import PreventUpdate
 
-from options.hh_lne_calibration import (
+from options.vol_calibration.api import (
     HH_LNE_CALIBRATION_ENGINE_VERSION,
     HH_LNE_CALIBRATION_METHOD,
     HH_LNE_CALIBRATION_POLICY_VERSION,
@@ -34,12 +34,12 @@ from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.pages import jkm, ttf
 from vol_calibration.pages import hh_governed
 from vol_calibration import brent_single_workspace
-from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
-from vol_calibration.ttf_hybrid_surface import (
+from options.vol_calibration.api import BRENT_SINGLE_SURFACE_POLICY_VERSION
+from options.vol_calibration.api import (
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
 )
-from vol_calibration.jkm_hybrid_surface import (
+from options.vol_calibration.api import (
     JKM_HYBRID_METHOD,
     JKM_HYBRID_POLICY_VERSION,
 )
@@ -172,6 +172,8 @@ def resolve_inline_context(engine, snapshot: dict[str, Any], product: str) -> di
             commodity=commodity,
             as_of=market_as_of,
             require_exact_cob=(commodity == "HH"),
+            prefer_exact_cob=True,
+            include_surface=False,
         )
     )
     return {

@@ -7,10 +7,10 @@ disabled unless their feature flags are explicitly enabled.
 ## Build
 
 Install the locked deployment environment with
-`at-options-analytics==1.2.4`, built from reviewed `options` commit
-`63baa7a29f9876d36153d115c462b80de13b6043`, and this repository's
+`at-options-analytics==1.2.5`, built from reviewed `options` commit
+`ef9f18d` (plus the 1.2.5 packaging version), and this repository's
 requirements. The release wheel SHA-256 is
-`709ee0e145726aa83bba221c13e4645de2d431b7c7066a72c507e6df6778e676`.
+`6fcf30ca3bfc4c26b8effb67995de8df7855a79075359fbc103b811f6a501563`.
 Do not resolve an unversioned
 checkout of the analytics repository at deployment time.
 Use a dedicated virtual environment for this application; other tools in the
@@ -25,12 +25,13 @@ analytics package and require no sibling options checkout.
 Build and install the analytics wheel before installing this application:
 
 ```bash
-git -C /path/to/options checkout 63baa7a29f9876d36153d115c462b80de13b6043
+git -C /path/to/options checkout ef9f18d
+# Set project version to 1.2.5, as recorded by the calibration release manifest.
 SOURCE_DATE_EPOCH=$(git -C /path/to/options show -s --format=%ct HEAD) python -m pip wheel /path/to/options --no-deps --no-build-isolation --wheel-dir dist
-echo "709ee0e145726aa83bba221c13e4645de2d431b7c7066a72c507e6df6778e676  dist/at_options_analytics-1.2.4-py3-none-any.whl" | shasum -a 256 -c -
-python -m pip install dist/at_options_analytics-1.2.4-py3-none-any.whl
+echo "6fcf30ca3bfc4c26b8effb67995de8df7855a79075359fbc103b811f6a501563  dist/at_options_analytics-1.2.5-py3-none-any.whl" | shasum -a 256 -c -
+python -m pip install dist/at_options_analytics-1.2.5-py3-none-any.whl
 python -m pip install -r requirements.txt
-python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.4'"
+python -c "from importlib.metadata import version; assert version('at-options-analytics') == '1.2.5'"
 ```
 
 Run before producing the deployment artifact:
@@ -75,11 +76,53 @@ Calibration input selection and result helpers are shared by web and worker
 callers while their distinct publication-ID and date-error policies remain
 explicit in their respective helpers.
 
-TTF and JKM batch calculations live in `vol_calibration/ttf_batch.py` and
-`vol_calibration/jkm_batch.py`; pages and detached workers call those same
-implementations. Ship these modules with the web and worker code. Calculation
-fingerprints include the service files, so earlier-code checkpoints remain
-incompatible with a changed calculation build rather than being silently reused.
+In the 1.3.0 migration artifact, TTF and JKM batch calculations live
+in `options.vol_calibration`. Dashboard `vol_calibration/ttf_batch.py` and
+`vol_calibration/jkm_batch.py` are execution adapters; `batch_adapter.py` translates
+editable tables and numerical results. Ship the same immutable analytics wheel
+and dashboard artifact to web and detached workers. Version 2 job payloads and
+numerical checkpoints reject incompatible retained work. Historical published
+revisions remain readable. The build instructions above describe the historical
+1.2.5 release; use version 1.3.0 and the recorded wheel digest for this migration.
+The operational release record determines whether the production switch has
+passed its gates; package installation alone is not a completed deployment.
+
+The reproducible candidate wheel is `at_options_analytics-1.3.0-py3-none-any.whl`,
+SHA-256 `70273ee92cc1527c23ea5bff3b3023f4a60202ea0c392f78de28195d6ac66f6e`.
+Its paired dashboard is based on the actually deployed source-alignment v2
+artifact, preserving its market-source corrections. The older active-release
+pointer was stale; never use that pointer alone to select a baseline or rollback.
+The staged environment retains the deployed 60-package dependency lock and
+passes `pip check`. Both independent wheel builds have the same digest.
+Do not deploy until the final dashboard manifest, browser exports and readiness
+are verified together. HH candidate identity hashes semantic surface and
+diagnostic values, so cache serialization does not invalidate identical data.
+
+Before a migration release, run the static ownership gate from the analytics
+checkout against both the source dashboard and the staged dashboard:
+
+```bash
+python scripts/check_vol_calibration_boundaries.py --dashboard /path/to/dash_options
+```
+
+Verify the paired file manifest and every installed analytics file against the
+wheel before startup and again before production cutover:
+
+```bash
+python scripts/check_vol_calibration_release.py --release /path/to/release --wheel /path/to/at_options_analytics-1.3.0-py3-none-any.whl
+```
+
+This also rejects unrecorded dashboard code/assets and checks installed dependency
+compatibility. It runs the release interpreter outside the source checkout. It
+does not contact sources or establish browser/readback readiness.
+
+This verifies import ownership only. Require full captured-input recalibration,
+actual isolated PostgreSQL publication/job rehearsals, browser/export reconciliation,
+and a coordinated web/worker rollback rehearsal on the exact release artifact.
+Use the authorized operational-verification workflow when automated tests are
+excluded. Preserve original floating-point inputs; lossy JSON replay is not an
+equivalent optimizer input. Recheck the running process's dashboard directory
+before staging: a saved release pointer alone may be stale.
 
 Set database and Trino values through environment variables or point
 `OPTIONS_CONFIG_PATH` at a mounted configuration file. Do not put credentials

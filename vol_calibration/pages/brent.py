@@ -37,7 +37,7 @@ from vol_calibration.components.batch_calibration_modal import (
 )
 from vol_calibration.batch_results import format_batch_result_row
 from vol_calibration.feature_flags import writes_enabled
-from vol_calibration.brent_intraday import (
+from options.vol_calibration.api import (
     ADJUSTMENT_LABELS,
     ADJUSTMENT_PARAMS,
     BrentAdjustmentError,

@@ -11,6 +11,16 @@
 - Calibration UI/service code lives in `vol_calibration/`; analytics remain in the
   separate `options` package. Read [vol_calibration/MIGRATION.md](vol_calibration/MIGRATION.md)
   when changing that boundary; the former standalone app is not the active server.
+- New calibration calculations belong in `options.vol_calibration`; dashboard
+  code calls its public `api.py` and owns presentation and execution. Existing
+  compatibility adapters are temporary. Do not add numerical fitting, repair,
+  source-eligibility policy, or arbitrage acceptance logic to Dash pages/components.
+  Before releasing calibration changes, run the analytics repository's
+  `scripts/check_vol_calibration_boundaries.py --dashboard <dashboard path>`
+  against both this checkout and the staged artifact. Named compatibility
+  bridges are temporary exceptions; pages and workers must use the public API.
+  This import check does not replace function ownership review or operational
+  calibration, persistence, export and browser verification.
 - For deployment, schema, write/publication, or worker changes, read
   [DEPLOYMENT.md](DEPLOYMENT.md). Preserve independent feature flags and server-side
   identity/role checks; implementing a feature does not itself enable it in deployment.

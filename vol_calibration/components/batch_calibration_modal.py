@@ -224,10 +224,25 @@ def create_batch_results_table(results: List[Dict]) -> dash_table.DataTable:
     for column_id, label in hybrid_columns:
         if any(column_id in row for row in results):
             columns.append({'id': column_id, 'name': label})
+    if any(row.get('error') for row in results):
+        columns.append({'id': 'error', 'name': 'Failure reason'})
+    display_results = []
+    for row in results:
+        diagnostics = row.get('fit_diagnostics') or {}
+        display_results.append({
+            key: value for key, value in row.items()
+            if key not in {'fit_diagnostics', 'retry_diagnostics', 'optimizer_attempts'}
+        })
+        if diagnostics.get('recovered'):
+            display_results[-1]['recovery'] = (
+                f"Passed with {diagnostics['stages'][-1]['start_budget']} starts"
+            )
+    if any(row.get('recovery') for row in display_results):
+        columns.append({'id': 'recovery', 'name': 'Recovery'})
 
     return dash_table.DataTable(
         columns=columns,
-        data=results,
+        data=display_results,
         style_table={'overflowX': 'auto'},
         style_header={
             'backgroundColor': '#f8f9fa',
