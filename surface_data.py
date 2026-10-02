@@ -74,6 +74,10 @@ SURFACE_SOURCE_SELECT = ', '.join(SURFACE_SOURCE_COLUMNS)
 
 SURFACE_POSTGRES_SOURCE_LABEL = f'{DB_SCHEMA}.implied_volatility_surface_from_prices'
 
+PUBLISHED_SURFACE_SOURCE_LABEL = f'{DB_SCHEMA}.implied_volatility_surface_calibrated'
+PUBLISHED_SURFACE_PRODUCTS = {'BRENT', 'HH'}
+PUBLISHED_SURFACE_DELTAS = (0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99)
+
 SURFACE_SOURCE_LABEL = 'raw.icap.implied_volatility_surface_from_prices'
 
 SURFACE_TRINO_SOURCES = [
@@ -125,7 +129,7 @@ _SURFACE_SNAPSHOT_GENERATION = 0
 
 _SURFACE_SNAPSHOT_CACHE_ATTR = '_surface_snapshot_cache_key'
 
-VOL_SURFACE_SNAPSHOT_NAMESPACE = 'vol-surface-v1'
+VOL_SURFACE_SNAPSHOT_NAMESPACE = 'vol-surface-v2'
 
 _ACTIVE_SURFACE_SNAPSHOT_ID = None
 
@@ -253,7 +257,7 @@ def load_surface_atm_data(surface_df=None):
     return surface_df[UNIFIED_ATM_COLUMNS]
 
 
-def _normalize_surface_data(surface_df):
+def _normalize_surface_data(surface_df, *, volatility_in_percent=None):
     if surface_df.empty:
         return _empty_surface_df()
 
@@ -317,7 +321,11 @@ def _normalize_surface_data(surface_df):
         surface_df.loc[signed_put_mask, 'put_call'] = 'put'
         surface_df.loc[signed_call_mask, 'put_call'] = 'call'
 
-    if not surface_df['volatility'].dropna().empty and surface_df['volatility'].max() > 5:
+    if volatility_in_percent is True or (
+        volatility_in_percent is None
+        and not surface_df['volatility'].dropna().empty
+        and surface_df['volatility'].max() > 5
+    ):
         surface_df['volatility'] = surface_df['volatility'] / 100.0
 
     surface_df = surface_df.dropna(subset=['cob_date', 'contract_date', 'volatility', 'delta_abs'])
@@ -340,7 +348,7 @@ def _normalize_surface_data(surface_df):
     return surface_df[SURFACE_COLUMNS]
 
 
-def load_surface_data():
+def _load_legacy_surface_data():
     load_errors = []
 
     for source_index, (source_label, table_name) in enumerate(
@@ -390,6 +398,94 @@ def load_surface_data():
     }
 
 
+def _load_published_surface_data():
+    """Read exact sharing nodes from active publications, never refit or round IV."""
+    query = text(f"""
+        WITH points AS (
+            SELECT p.publication_id::text, p.published_at, p.commodity AS product,
+                   p.cob_date, s.contract_date AS maturity_date,
+                   s.option_expiration_date, s.put_call, s.delta, s.volatility AS value,
+                   count(s.surface_point_id) OVER (
+                       PARTITION BY p.publication_id, s.contract_date
+                   ) AS dense_count,
+                   count(*) FILTER (WHERE round(s.delta::numeric, 8)
+                       IN (0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99))
+                       OVER (PARTITION BY p.publication_id, s.contract_date) AS anchor_count
+            FROM {DB_SCHEMA}.vol_surface_publications p
+            LEFT JOIN {PUBLISHED_SURFACE_SOURCE_LABEL} s
+              ON s.publication_id = p.publication_id
+             AND s.commodity = p.commodity AND s.cob_date = p.cob_date
+            WHERE p.is_active AND p.status = 'published'
+              AND p.commodity IN ('BRENT', 'HH')
+        )
+        SELECT * FROM points
+        WHERE anchor_count <> 11 OR delta IS NULL OR round(delta::numeric, 8)
+            IN (0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99)
+        ORDER BY product, cob_date, maturity_date, delta
+    """)
+    rows = pd.read_sql(query, get_database_engine())
+    if rows.empty:
+        return _empty_surface_df(), {}
+    keys = ['product', 'cob_date', 'maturity_date']
+    deltas = pd.to_numeric(rows['delta'], errors='coerce').round(8)
+    values = pd.to_numeric(rows['value'], errors='coerce')
+    valid = (
+        rows['dense_count'].eq(401).all()
+        and rows['anchor_count'].eq(11).all()
+        and deltas.isin(PUBLISHED_SURFACE_DELTAS).all()
+        and rows['option_expiration_date'].notna().all()
+        and rows['put_call'].astype(str).str.lower().isin(['c', 'call']).all()
+        and np.isfinite(values).all() and values.gt(0).all()
+        and not rows.assign(delta=deltas).duplicated(keys + ['delta']).any()
+        and rows.groupby(keys, dropna=False).size().eq(len(PUBLISHED_SURFACE_DELTAS)).all()
+        and rows.groupby(keys)['option_expiration_date'].nunique().eq(1).all()
+        and rows.groupby(['product', 'cob_date'])['publication_id'].nunique().eq(1).all()
+    )
+    if not valid:
+        raise SnapshotReferenceError('Published Brent/HH sharing nodes are incomplete or invalid')
+    rows['delta'] = deltas
+    normalized = _normalize_surface_data(rows, volatility_in_percent=False)
+    publications = {
+        f'{row.product}:{pd.Timestamp(row.cob_date):%Y-%m-%d}': {
+            'publication_id': row.publication_id,
+            'published_at': pd.Timestamp(row.published_at).isoformat(),
+        }
+        for row in rows.drop_duplicates(['product', 'cob_date']).itertuples()
+    }
+    return normalized, publications
+
+
+def load_surface_data():
+    legacy, metadata = _load_legacy_surface_data()
+    published, publications = _load_published_surface_data()
+    if published.empty:
+        return legacy, metadata
+    # Preserve pre-publication history, but never use an old operational row to
+    # fill a missing publication date after the governed history begins.
+    for product, frame in published.groupby('code'):
+        legacy = legacy.loc[~(legacy['code'].eq(product)
+                              & legacy['cob_date'].ge(frame['cob_date'].min()))]
+    combined = concat_dataframes([legacy, published]).sort_values(
+        ['code', 'cob_date', 'contract_date', 'delta_sort_key']
+    ).reset_index(drop=True)
+    return combined, {
+        **metadata,
+        'legacy_source': metadata['source'],
+        'source': f"{PUBLISHED_SURFACE_SOURCE_LABEL} (Brent/HH); {metadata['source']} (legacy/other products)",
+        'publications': publications,
+    }
+
+
+def surface_source_for(product, cob_date, status=None):
+    status = DATA_CACHE_STATE['surface'] if status is None else status
+    key = f'{str(product).upper()}:{pd.Timestamp(cob_date):%Y-%m-%d}' if cob_date else ''
+    publication = status.get('publications', {}).get(key)
+    if publication:
+        return (f"{PUBLISHED_SURFACE_SOURCE_LABEL} | Publication: {publication['publication_id']}"
+                f" | Published: {publication['published_at']}")
+    return status.get('legacy_source', status['source'])
+
+
 def _build_source_status(df, source_name, error_message=None, fallback_used=False):
     latest_cob_date = None
     if not df.empty and 'cob_date' in df.columns:
@@ -423,6 +519,7 @@ def _surface_source_revision(surface_df, source_meta):
         'latest_cob': str(latest_cob),
         'rows': int(len(surface_df)),
         'frame_sha256': frame_digest,
+        'publications': source_meta.get('publications', {}),
     }
     encoded = json.dumps(revision, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
@@ -464,6 +561,8 @@ def _build_surface_snapshot_payload(refresh_token=None):
             fallback_used=surface_meta.get('fallback_used', False),
         ),
     }
+    state['surface'].update({key: surface_meta[key] for key in ('legacy_source', 'publications')
+                             if key in surface_meta})
     payload = {
         'atm_dataset': loaded_atm_df,
         'surface_dataset': loaded_surface_df,
@@ -517,7 +616,7 @@ def prepare_vol_surface_snapshot(*, force=False, refresh_token=None):
             except SnapshotReferenceError:
                 pass
 
-    with snapshot_lock('build-vol-surface-v1', expire=300):
+    with snapshot_lock('build-vol-surface-v2', expire=300):
         if not force:
             reference = latest_snapshot(VOL_SURFACE_SNAPSHOT_NAMESPACE)
             if reference:
@@ -529,7 +628,7 @@ def prepare_vol_surface_snapshot(*, force=False, refresh_token=None):
         payload, source_revision = _build_surface_snapshot_payload(refresh_token)
         state = payload['data_cache_state']
         if state['surface'].get('error'):
-            raise SnapshotReferenceError('ICAP source unavailable; refresh required')
+            raise SnapshotReferenceError('Volatility surface source unavailable; refresh required')
         reference = publish_snapshot(
             VOL_SURFACE_SNAPSHOT_NAMESPACE,
             source_revision,
@@ -703,6 +802,9 @@ def get_operational_surface_snapshot(product, requested_cob, refresh=False):
     result['data'] = snapshot
     result['actual_cob'] = actual_cob
     result['date_fallback_used'] = actual_cob < requested_timestamp
+    result['source'] = surface_source_for(product, actual_cob, surface_status)
+    if f'{normalized_product}:{actual_cob:%Y-%m-%d}' in surface_status.get('publications', {}):
+        result['source_fallback_used'] = False
     return result
 
 
@@ -1020,13 +1122,23 @@ def refresh_operational_surface_if_changed(product, requested_cob):
     """
     reference = prepare_vol_surface_snapshot()
     payload = resolve_snapshot(reference, expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE)
-    source = payload['data_cache_state']['surface']['source']
+    status = payload['data_cache_state']['surface']
+    source = status.get('legacy_source', status['source'])
     requested = pd.Timestamp(requested_cob).date()
     product = str(product).upper()
     if product not in SURFACE_SOURCE_PRODUCTS:
         raise ValueError('Unsupported operational surface product')
     display = SURFACE_PRODUCT_DISPLAY_MAP.get(product, product)
-    if source in dict(SURFACE_TRINO_SOURCES):
+    if product in PUBLISHED_SURFACE_PRODUCTS:
+        # The same composite reader enforces publication precedence and preserves
+        # pre-publication history. Comparing provenance catches identical-value republishes.
+        fresh, fresh_meta = load_surface_data()
+        fresh = fresh.loc[fresh['code'].eq(display) & fresh['cob_date'].le(pd.Timestamp(requested))]
+        if not fresh.empty:
+            fresh = fresh.loc[fresh['cob_date'].eq(fresh['cob_date'].max())]
+        if status.get('publications') != fresh_meta.get('publications'):
+            return prepare_vol_surface_snapshot(force=True)
+    elif source in dict(SURFACE_TRINO_SOURCES):
         table = dict(SURFACE_TRINO_SOURCES)[source]
         query = (f"SELECT {SURFACE_SOURCE_SELECT} FROM {table} WHERE product = '{product}' "
                  f"AND cob_date = (SELECT max(cob_date) FROM {table} WHERE product = '{product}' "

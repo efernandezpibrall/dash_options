@@ -1363,7 +1363,7 @@ layout = html.Div([
                 dcc.Link(
                     'Open Vol Trades',
                     id='open-vol-trades-link',
-                    href='/brent_vol_history',
+                    href='/vol_trades',
                     className='custom-export-btn volatility-export-button',
                     style={'display': 'none'},
                 ),
@@ -1588,7 +1588,7 @@ def _build_surface_status_line(
     previous_surface=None,
 ):
     surface_error = surface_data.DATA_CACHE_STATE['surface']['error']
-    surface_source = surface_data.DATA_CACHE_STATE['surface']['source']
+    surface_source = surface_data.surface_source_for(active_product, selected_date)
     if surface_error and surface_data.surface_dataset.empty:
         return _build_message_span(f'Surface source unavailable: {surface_error}', tone='error')
 

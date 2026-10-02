@@ -83,6 +83,14 @@ Shared read-only data access lives outside the Dash pages:
 - `market_data.py` owns forward history and recent underlying prices, with separate selection rules and caches.
 - `source_identity.py` owns the same source-configuration fingerprint for web caches and workers.
 
+ICE quote conventions and saved-edge interpretation belong to the shared
+`options.ice_quote_interpretation` module. Dash consumes its direction, cash-flow,
+trade, confidence and current-action fields; it retains table/chart formatting
+and read-only source access. ICEchat owns assessment policy, valuation
+orchestration, outgoing message formatting and ICE API transport. Deploy the
+shared module with the dashboard artifact; an editable source change alone does
+not update the running dashboard's analytics wheel.
+
 The page registry in `index_options.py` defines route titles, navigation groups
 and validation layouts together. `/pricer_old` is removed without a redirect.
 Pricer composition lives in `pages/pricer.py`; `pricer_workspace/` separates
@@ -149,7 +157,9 @@ Set database and Trino values through environment variables or point
 `OPTIONS_CONFIG_PATH` at a mounted configuration file. Do not put credentials
 in the image.
 
-Calibration controls are mounted in Vol Trades at `/brent_vol_history`;
+Vol Trades uses `/vol_trades`; existing `/brent_vol_history` bookmarks redirect
+to this route while retaining query parameters and browser section links.
+Calibration controls are mounted in Vol Trades at `/vol_trades`;
 `VOL_CALIBRATION_ENABLED` remains the shared feature gate. The retired
 `/vol_calibration` URL redirects to Vol Trades. The Vol Trades calibration
 button is visible by default; set `VOL_TRADES_INLINE_CALIBRATION_ENABLED=false`

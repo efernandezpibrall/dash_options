@@ -8,7 +8,7 @@ from urllib.parse import parse_qs
 
 from dash import html, dcc, clientside_callback
 from dash.dependencies import Input, Output
-from flask import redirect
+from flask import redirect, request
 from app import app
 from source_status import load_dashboard_source_statuses, summarize_alignment
 
@@ -31,16 +31,24 @@ import vol_calibration.session_callbacks  # noqa: F401 - Register Vol Trades tab
 server = app.server
 
 
+@server.route('/brent_vol_history')
+def redirect_renamed_vol_trades():
+    """Keep existing Vol Trades bookmarks and query parameters usable."""
+    query = request.query_string.decode('latin-1')
+    target = '/vol_trades' + (f'?{query}' if query else '')
+    return redirect(target, code=302)
+
+
 @server.route('/vol_calibration')
 def redirect_retired_vol_calibration():
     """Keep old bookmarks usable after removing the standalone page."""
-    return redirect('/brent_vol_history', code=302)
+    return redirect('/vol_trades', code=302)
 
 
 @server.route('/ice_chat_quotes')
 def redirect_retired_ice_quotes():
     """Keep ICE Quotes bookmarks on their new Vol Trades section."""
-    return redirect('/brent_vol_history#ice-quotes', code=302)
+    return redirect('/vol_trades#ice-quotes', code=302)
 
 
 @dataclass(frozen=True)
@@ -70,7 +78,7 @@ PAGE_REGISTRY = (
                        brent_single_layout, hh_governed.layout, jkm.layout, ttf.layout,
                        dcc.Store(id='vol-calibration-session-state', storage_type='session'),
                    )),
-    PageDefinition('/brent_vol_history', 'Vol Trades', pages.brent_vol_history.layout,
+    PageDefinition('/vol_trades', 'Vol Trades', pages.brent_vol_history.layout,
                    'nav-brent-vol-history', validation_order=4),
     PageDefinition('/correlations', 'Correlations', pages.correlations.layout, 'nav-correlations',
                    validation_order=7),
@@ -456,7 +464,7 @@ def render_dashboard_source_status(
             '/',
             '/greeks',
             '/trades',
-            '/brent_vol_history',
+            '/vol_trades',
         )
         or (
             pathname == '/valuation'
@@ -537,15 +545,21 @@ def display_page(pathname, search):
     page = PAGES_BY_PATH.get(pathname)
     if page is not None and page.workspace_view is not None:
         return _valuation_workspace(search, default_view=page.workspace_view)
+    if pathname == '/brent_vol_history':
+        return dcc.Location(
+            id='renamed-vol-trades-redirect',
+            pathname='/vol_trades',
+            search=search or '',
+        )
     if pathname == '/vol_calibration':
         return dcc.Location(
             id='retired-vol-calibration-redirect',
-            pathname='/brent_vol_history',
+            pathname='/vol_trades',
         )
     if pathname == '/ice_chat_quotes':
         return dcc.Location(
             id='retired-ice-chat-quotes-redirect',
-            pathname='/brent_vol_history',
+            pathname='/vol_trades',
             hash='#ice-quotes',
         )
     return STATIC_PAGE_LAYOUTS.get(pathname, '404 - Page not found')

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from vol_trades_workspace import quote_charts
+from options.ice_quote_interpretation import assessment_summary
 
 import dash_ag_grid as dag
 import pandas as pd
@@ -425,14 +426,10 @@ def _edge_audit(assessment, context, valuation=None):
     unit = f"{assessment['currency']}/{assessment['unit']}"
     def amount(value):
         return f"{value:+.6f}" if value is not None else "unassigned"
-    status = confidence["status"].replace("_", " ")
-    reported_trade = (valuation is not None and valuation.get("single_price") is not None
-                      and valuation.get("bid") is None and valuation.get("offer") is None)
-    if reported_trade:
-        status = "TRADE; no actionable bid/offer"
-    tone = "qualified" if confidence["qualified"] else "provisional" if confidence["reasons"] else "neutral"
-    if reported_trade:
-        tone = "neutral"
+    summary = assessment_summary(assessment, valuation)
+    status = ("TRADE; no actionable bid/offer" if summary["status"] == "trade"
+              else summary["status"].replace("_", " "))
+    tone = summary["tone"]
     rows = [html.Tr([html.Td(side), html.Td(amount(costs['gross'][side])),
                     html.Td(amount(costs['total_cost'])), html.Td(amount(costs['net'][side]))])
             for side in ("BUY", "SELL")]

@@ -8393,6 +8393,7 @@ button:hover {
 }
 
 .brent-vol-history-settlement-exclusion-note {
+    order: 1;
     grid-column: 1 / -1;
     overflow: hidden;
     border: 1px solid #d8dee8;

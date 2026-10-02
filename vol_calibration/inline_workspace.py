@@ -98,7 +98,7 @@ def _prepare_embedded_layout(product: str, context: dict[str, Any]):
         if component_id in hidden_actions:
             component.disabled = True
             component.style = {"display": "none"}
-        if getattr(component, "href", None) == "/brent_vol_history":
+        if getattr(component, "href", None) == "/vol_trades":
             component.style = {"display": "none"}
     return workspace
 

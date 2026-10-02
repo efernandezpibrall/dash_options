@@ -20,7 +20,7 @@ from snapshot_cache import (
 )
 
 
-SOURCE_STATUS_SNAPSHOT_NAMESPACE = 'dashboard-source-status-v1'
+SOURCE_STATUS_SNAPSHOT_NAMESPACE = 'dashboard-source-status-v2'
 SOURCE_STATUS_CACHE_TTL_SECONDS = 5 * 60
 
 
@@ -63,7 +63,8 @@ def make_source_status(source, latest_cob=None, fallback_used=False, error=None,
 def _load_dashboard_source_statuses_uncached(as_of=None):
     sources = {
         'Portfolio': f'{DB_SCHEMA}.trades_options_valuation_current',
-        'Vol Surface': f'{DB_SCHEMA}.implied_volatility_surface_from_prices',
+        'Vol Surface': (f'{DB_SCHEMA}.implied_volatility_surface_calibrated (Brent/HH); '
+                        f'{DB_SCHEMA}.implied_volatility_surface_from_prices (JKM/NBP/TTF)'),
         'Forward Curves': f'{DB_SCHEMA}.curve',
     }
     query = text(
@@ -71,8 +72,13 @@ def _load_dashboard_source_statuses_uncached(as_of=None):
         SELECT 'Portfolio' AS label, max(cob_date)::date AS latest_cob
         FROM {DB_SCHEMA}.trades_options_valuation_current
         UNION ALL
-        SELECT 'Vol Surface', max(cob_date)::date
-        FROM {DB_SCHEMA}.implied_volatility_surface_from_prices
+        SELECT 'Vol Surface', max(cob_date)::date FROM (
+            SELECT cob_date FROM {DB_SCHEMA}.implied_volatility_surface_from_prices
+            WHERE product NOT IN ('BRENT', 'HH')
+            UNION ALL
+            SELECT cob_date FROM {DB_SCHEMA}.vol_surface_publications
+            WHERE commodity IN ('BRENT', 'HH') AND is_active AND status = 'published'
+        ) surface_dates
         UNION ALL
         SELECT 'Forward Curves', max(cob)::date
         FROM {DB_SCHEMA}.curve

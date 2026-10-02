@@ -65,6 +65,11 @@ def governed_surface_cache(monkeypatch):
         },
     )
     surface_data._SURFACE_SNAPSHOT_CACHE.clear()
+    reference = {'snapshot_id': 'fixture', 'source_revision': 'fixture'}
+    monkeypatch.setattr(surface_data, 'prepare_vol_surface_snapshot', lambda **kwargs: reference)
+    monkeypatch.setattr(surface_data, 'resolve_snapshot', lambda *args, **kwargs: {
+        'surface_dataset': normalized, 'data_cache_state': surface_data.DATA_CACHE_STATE,
+    })
     return normalized
 
 
@@ -139,7 +144,7 @@ def test_legacy_trino_surface_is_reported_as_a_source_fallback(monkeypatch):
         return raw
 
     monkeypatch.setattr(surface_data, 'read_trino_query', fake_trino)
-    surface, metadata = surface_data.load_surface_data()
+    surface, metadata = surface_data._load_legacy_surface_data()
 
     assert len(surface) == 3
     assert metadata['source'] == 'raw.icap.implied_volatility_surface'

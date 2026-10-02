@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vol_trades_workspace import chart_data, grids, history_cards, history_charts, history_layout, overlays, trade_tape as tape_views
+from vol_trades_workspace import chart_data, grids, history_cards, history_charts, history_layout, overlays, strip_charts, trade_tape as tape_views
 
 import json
 import hashlib
@@ -1481,6 +1481,30 @@ def render_ice_quote_overlays(
         updates.append(no_update if previous_revisions.get(key) == revision else patch)
         revisions[key] = revision
     return updates, message, revisions if revisions != previous_revisions else no_update
+
+
+@callback(
+    Output("brent-vol-history-strip-plots", "children"),
+    Input("ice-chat-quote-snapshot", "data"),
+    Input("brent-vol-history-snapshot", "data"),
+    Input("brent-vol-history-trade-window-state", "data"),
+    Input("brent-vol-history-x-axis", "value"),
+    Input("brent-vol-history-expiry-layers", "value"),
+    Input("ice-chat-contract", "value"),
+    Input("ice-chat-option-type", "value"),
+    Input("ice-chat-strike", "value"),
+    Input("ice-chat-sender", "value"),
+    Input("ice-chat-source-channel", "value"),
+    Input("ice-chat-status-filter", "value"),
+    Input("ice-chat-positive-only", "value"),
+)
+def render_quarter_season_charts(quote_snapshot, history, window, x_axis, layers,
+                                contract, option_type, strike, sender, source_channel, status, positive_only):
+    return strip_charts.render_strip_charts(
+        quote_snapshot, history, window, x_axis, layers,
+        contract=contract, option_type=option_type, strike=strike, sender=sender,
+        source_channel=source_channel, status=status, positive_only="positive" in (positive_only or []),
+    )
 
 
 clientside_callback(

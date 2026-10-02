@@ -45,7 +45,7 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
         '/trades': 'Trades',
         '/prices': 'Underlying Prices',
         '/vol_surface': 'Volatility Surface',
-        '/brent_vol_history': 'Vol Trades',
+        '/vol_trades': 'Vol Trades',
         '/correlations': 'Correlations',
         '/scenarios': 'Scenarios',
         '/pnl_explain': 'P&L Explain',
@@ -59,6 +59,12 @@ def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
         '/valuation',
         '/pnl_explain',
     }
+
+    with index_options.server.test_client() as client:
+        for query in ("", "?product=TFO&view=settlement"):
+            response = client.get("/brent_vol_history" + query)
+            assert response.status_code == 302
+            assert response.location == "/vol_trades" + query
 
     app._setup_server()
     nav_callback = app.callback_map['nav-active-sink.children']
@@ -680,7 +686,7 @@ def test_source_status_moves_inline_on_current_state_pages_without_weakening_ali
     brent_content, brent_class, _brent_row_class = (
         index_options.render_dashboard_source_status(
             statuses,
-            '/brent_vol_history',
+            '/vol_trades',
         )
     )
     assert brent_content is None

@@ -108,7 +108,7 @@ Git subtree and then adapted to run inside the existing Dash application.
 The standalone Dash app, router, port 8056 server, and calibration navbar were
 removed. The root `dash_options` app is the sole callback owner and server.
 The later `/vol_calibration` page was also retired; calibration is mounted
-inside Vol Trades at `/brent_vol_history`. The `vol_calibration` package and
+inside Vol Trades at `/vol_trades`. The `vol_calibration` package and
 governed database tables remain in use by that workspace and its consumers.
 
 Release 1 enables reading, diagnostic calibration, comparison, and export.

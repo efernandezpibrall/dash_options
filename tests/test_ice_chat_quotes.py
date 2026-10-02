@@ -279,14 +279,14 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
 
 def test_route_redirects_to_embedded_section_and_navigation_is_retired():
     redirect = index_options.display_page("/ice_chat_quotes", None)
-    assert redirect.pathname == "/brent_vol_history"
+    assert redirect.pathname == "/vol_trades"
     assert redirect.hash == "#ice-quotes"
     links = [item for item in _walk(index_options.nav_links) if isinstance(item, dcc.Link)]
     assert not any(link.children == "ICE Quotes" for link in links)
     with index_options.server.test_client() as client:
         response = client.get("/ice_chat_quotes")
     assert response.status_code == 302
-    assert response.headers["Location"].endswith("/brent_vol_history#ice-quotes")
+    assert response.headers["Location"].endswith("/vol_trades#ice-quotes")
 
 
 def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():

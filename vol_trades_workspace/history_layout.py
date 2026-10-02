@@ -298,7 +298,10 @@ def build_layout(ice_quotes_layout):
                     dcc.Loading(
                         type="circle",
                         children=html.Div(
-                            id="brent-vol-history-plots",
+                            [
+                                html.Div(id="brent-vol-history-plots", style={"display": "contents"}),
+                                html.Div(id="brent-vol-history-strip-plots", style={"display": "contents"}),
+                            ],
                             className="brent-vol-history-plot-grid",
                         ),
                     ),

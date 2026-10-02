@@ -574,7 +574,10 @@ def test_trade_tape_exposes_individual_future_quote_ages():
 
 
 def test_navigation_routes_to_history_page():
-    assert index_options.display_page("/brent_vol_history", None) is history.layout
+    assert index_options.display_page("/vol_trades", None) is history.layout
+    retired = index_options.display_page("/brent_vol_history", "?product=TFO")
+    assert retired.pathname == "/vol_trades"
+    assert retired.search == "?product=TFO"
 
 
 def test_available_snapshot_query_is_product_scoped_and_latest_per_date(monkeypatch):

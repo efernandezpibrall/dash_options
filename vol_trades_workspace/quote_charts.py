@@ -369,7 +369,5 @@ def filter_quote_rows(
     if status:
         frame = frame[frame["processing_status"] == status]
     if positive_only:
-        frame = frame[pd.to_numeric(frame["best_edge_ticks"], errors="coerce") >= 1.0]
-        if product is not None and quote_data._selected_product(product) in {"TFO", "JKM"} and "edge_confidence" in frame:
-            frame = frame[frame["edge_confidence"].eq("qualified") & frame["edge_fresh_now"].eq(True)]
+        frame = frame[frame["edge_actionable_now"].eq(True)]
     return frame.sort_values("observed_at", ascending=False)

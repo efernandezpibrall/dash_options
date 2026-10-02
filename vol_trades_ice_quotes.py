@@ -3,8 +3,57 @@
 from __future__ import annotations
 
 import pandas as pd
+import json
 
 from vol_trades_market_window import filter_event_window
+
+
+def quarter_season_identity(row):
+    """Use explicit ICE delivery months; a label alone is insufficient coverage."""
+    from options.ttf_strip_charts import strip_period
+
+    months = row.get("strip_months") or []
+    try:
+        if isinstance(months, str):
+            months = json.loads(months)
+        return strip_period(months)
+    except (ValueError, TypeError):
+        return None
+
+
+def prepare_strip_events(rows, product, window):
+    """Select latest quarter/season outrights before status or table filters."""
+    if product != "TFO":
+        return {}
+    frame = filter_event_window(pd.DataFrame(rows), "observed_at", window)
+    if frame.empty:
+        return {}
+    eligible = []
+    for row in frame.to_dict("records"):
+        if str(row.get("product_code") or "").upper() not in {"TFM", "TFO"} or row.get("structure_code"):
+            continue
+        identity = quarter_season_identity(row)
+        if identity is None:
+            continue
+        key, label, months = identity
+        if str(row.get("contract_month") or "")[:10] != months[0].isoformat():
+            continue
+        row.update(_strip_key=key, _strip_label=label, _strip_months=months)
+        eligible.append(row)
+    if not eligible:
+        return {}
+    frame = pd.DataFrame(eligible)
+    frame["_observed"] = pd.to_datetime(frame["observed_at"], utc=True)
+    for field in ("event_id", "sender_handle", "source_channel", "option_type"):
+        frame[field] = frame.get(field, pd.Series("", index=frame.index)).fillna("").astype(str)
+    frame["strike"] = pd.to_numeric(frame.get("strike"), errors="coerce")
+    latest = frame.sort_values(["_observed", "event_id"], ascending=False).drop_duplicates(
+        ["_strip_key", "option_type", "strike", "sender_handle", "source_channel"], keep="first",
+    )
+    # A new blocked event suppresses its preceding usable broker quote.
+    latest = latest.loc[latest.get("valuation_status", pd.Series("valued", index=latest.index)).fillna("valued").eq("valued")]
+    latest = latest.loc[latest["option_type"].isin(["C", "P"]) & latest["strike"].gt(0) & latest["strike"].lt(float("inf"))]
+    return {key: subset.drop(columns="_observed").to_dict("records") for key, subset in latest.groupby("_strip_key", sort=False)}
 
 
 def prepare_overlay_events(rows, product, window, graphs):
@@ -28,7 +77,11 @@ def prepare_overlay_events(rows, product, window, graphs):
     structure = frame.get("structure_code", pd.Series("", index=frame.index)).fillna("").ne("")
     strip = frame.get("strip_label", pd.Series("", index=frame.index)).fillna("")
     unsupported = structure | (strip.ne("") & strip.ne(monthly_label))
-    counts["unsupported_instrument"] = int(unsupported.sum())
+    recognized_strips = pd.Series(False, index=frame.index)
+    if product == "TFO":
+        recognized_strips = frame.apply(lambda row: not row.get("structure_code") and quarter_season_identity(row) is not None, axis=1)
+    counts["quarter_season_events"] = int(recognized_strips.sum())
+    counts["unsupported_instrument"] = int((unsupported & ~recognized_strips).sum())
     frame = frame.loc[~unsupported].copy()
     if frame.empty:
         return {}, counts

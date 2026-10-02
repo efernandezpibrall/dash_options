@@ -499,12 +499,12 @@ def test_host_app_registers_vol_trades_without_standalone_calibration_page():
         if output.startswith("vol-calibration-session-state.data")
     }
     assert persistence_inputs == {"jkm-param-table"}
-    assert index_options.display_page("/brent_vol_history", None) is index_options.pages.brent_vol_history.layout
+    assert index_options.display_page("/vol_trades", None) is index_options.pages.brent_vol_history.layout
     retired = index_options.display_page("/vol_calibration", "?product=jkm")
-    assert retired.pathname == "/brent_vol_history"
+    assert retired.pathname == "/vol_trades"
     response = index_options.server.test_client().get("/vol_calibration?product=jkm")
     assert response.status_code == 302
-    assert response.location.endswith("/brent_vol_history")
+    assert response.location.endswith("/vol_trades")
 
     validation_components = _components_by_id(app.validation_layout)
     assert "vol-calibration-product-tabs" not in validation_components

@@ -232,6 +232,7 @@ def update_ice_quote_overlays(
         names = {
             "outside_window": "outside market window",
             "unsupported_instrument": "structure/strip events excluded",
+            "quarter_season_events": "quarter/season events",
             "invalid_instrument": "invalid instruments", "outside_display": "outside displayed expiries",
             "expiry_mismatch": "expiry mismatches", "superseded": "superseded events",
             "blocked_valuation": "blocked valuations", "missing_iv": "quote sides without IV",
@@ -256,4 +257,3 @@ def update_ice_quote_overlays(
         elif not plotted:
             message += " for the selected snapshot date and quote window"
     return updates, message
-

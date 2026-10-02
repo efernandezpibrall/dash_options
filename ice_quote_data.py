@@ -16,6 +16,8 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import text
 
+from options.ice_quote_interpretation import interpret_quote_record
+
 from runtime_config import get_database_engine
 from vol_trades_market_window import market_context, utc_timestamp
 
@@ -94,6 +96,7 @@ QUOTE_COLUMNS = (
 
 # Read optional product/unit metadata while preserving historical Brent rows.
 QUOTE_METADATA_EXPRESSIONS = (
+    "COALESCE(to_jsonb(quote_row)->'strip_months', '[]'::jsonb) AS strip_months",
     "COALESCE(NULLIF(to_jsonb(quote_row)->>'product_code', ''), 'B') AS product_code",
     "COALESCE(NULLIF(to_jsonb(quote_row)->>'product_label', ''), "
     "NULLIF(to_jsonb(quote_row)->>'product_name', ''), 'Brent') AS product_label",
@@ -163,13 +166,6 @@ def _compact_number(value: Any) -> str:
     if value is None or pd.isna(value):
         return "—"
     return f"{float(value):,.6f}".rstrip("0").rstrip(".")
-
-
-def _infer_fence_orientation(reference_price: float) -> str | None:
-    price = float(reference_price)
-    if not math.isfinite(price) or abs(price) < 0.005 / 2:
-        return None
-    return "to_call" if price > 0 else "to_put"
 
 
 def _cutoff(window: str, now: datetime | None = None) -> datetime:
@@ -307,25 +303,13 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     )
     normalized["strike_filter_key"] = normalized["strike"].map(_compact_number)
     normalized.loc[structure, "strike_filter_key"] = normalized.loc[structure, "structure_label"]
-    normalized["theoretical_cash_premium"] = normalized["theoretical_price"]
-    normalized.loc[fence, "theoretical_cash_premium"] = normalized.loc[fence, "theoretical_price"].abs()
-    normalized["fence_premium_orientation"] = None
-    valued_fence = fence & normalized["theoretical_price"].notna()
-    normalized.loc[valued_fence, "fence_premium_orientation"] = normalized.loc[
-        valued_fence, "theoretical_price"
-    ].map(_infer_fence_orientation)
-    normalized["broker_indication_magnitude"] = normalized["broker_indication_price"]
-    use_structured_single = fence & normalized["broker_indication_magnitude"].isna() & normalized["single_price"].notna()
-    normalized.loc[use_structured_single, "broker_indication_magnitude"] = normalized.loc[use_structured_single, "single_price"].abs()
-    normalized["broker_indication_signed_inferred"] = pd.NA
-    infer = fence & normalized["broker_indication_magnitude"].notna() & normalized["fence_premium_orientation"].notna()
-    normalized.loc[infer, "broker_indication_signed_inferred"] = (
-        normalized.loc[infer, "broker_indication_magnitude"]
-        * normalized.loc[infer, "theoretical_price"].map(lambda value: -1 if value < 0 else 1)
+    interpretation_time = datetime.now(timezone.utc)
+    interpretations = pd.DataFrame(
+        [interpret_quote_record(row, now=interpretation_time) for row in normalized.to_dict("records")],
+        index=normalized.index,
     )
-    normalized["broker_indication_gap"] = (
-        normalized["broker_indication_magnitude"] - normalized["theoretical_cash_premium"]
-    ).abs().where(infer)
+    for field in interpretations:
+        normalized[field] = interpretations[field]
     def display_indication(row):
         magnitude = row["broker_indication_magnitude"]
         if pd.isna(magnitude):
@@ -345,7 +329,7 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
             side = {"to_put": "to put", "to_call": "to call"}.get(row["fence_premium_orientation"], "side?")
             return f"{amount} {side}*"
         if row["structure_code"] in {"CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"}:
-            return f"{amount} {'debit' if value >= 0 else 'credit'}"
+            return f"{amount} {row['premium_cashflow']}"
         return amount
     normalized["theoretical_display"] = normalized.apply(display_theoretical, axis=1)
     normalized["instrument_label"] = (
@@ -372,106 +356,6 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
         ("offer_volatility_edge", "offer_iv_edge_pp"),
     ):
         normalized[target] = normalized[source] * 100.0
-    normalized["single_iv_deviation_pp"] = (
-        normalized["single_iv_pct"] - normalized["our_iv_pct"]
-    )
-    normalized["single_edge_ticks"] = (
-        normalized["single_deviation"] / normalized["tick_size"]
-    )
-    edge_candidates = pd.concat(
-        {
-            "SELL": pd.to_numeric(normalized["bid_edge_ticks"], errors="coerce"),
-            "BUY": pd.to_numeric(normalized["offer_edge_ticks"], errors="coerce"),
-        },
-        axis=1,
-    )
-    normalized["signal_edge_ticks"] = edge_candidates.max(axis=1, skipna=True)
-    has_executable_quote = ~edge_candidates.isna().all(axis=1)
-    normalized["signal_side"] = None
-    normalized.loc[has_executable_quote, "signal_side"] = edge_candidates.loc[
-        has_executable_quote
-    ].idxmax(axis=1)
-    normalized["signal_label"] = normalized["best_action"].fillna("NO EDGE")
-    normalized.loc[structure, "signal_label"] = "UNVERIFIED"
-    normalized.loc[cso, "signal_label"] = "BLOCKED"
-    single_only = edge_candidates.isna().all(axis=1) & normalized["single_price"].notna() & ~structure
-    normalized.loc[single_only, "signal_label"] = "TRADE"
-    normalized.loc[single_only, "signal_edge_ticks"] = normalized.loc[
-        single_only, "single_edge_ticks"
-    ]
-    normalized["signal_price_edge"] = pd.NA
-    normalized.loc[normalized["signal_side"] == "SELL", "signal_price_edge"] = (
-        normalized.loc[normalized["signal_side"] == "SELL", "bid_sell_edge"]
-    )
-    normalized.loc[normalized["signal_side"] == "BUY", "signal_price_edge"] = (
-        normalized.loc[normalized["signal_side"] == "BUY", "offer_buy_edge"]
-    )
-    normalized.loc[single_only, "signal_price_edge"] = normalized.loc[
-        single_only, "single_deviation"
-    ]
-    normalized["signal_price_edge"] = pd.to_numeric(
-        normalized["signal_price_edge"], errors="coerce"
-    )
-    normalized["signal_iv_edge_pp"] = pd.NA
-    sell_side = normalized["signal_side"] == "SELL"
-    buy_side = normalized["signal_side"] == "BUY"
-    normalized.loc[sell_side, "signal_iv_edge_pp"] = normalized.loc[
-        sell_side, "bid_iv_edge_pp"
-    ]
-    normalized.loc[buy_side, "signal_iv_edge_pp"] = normalized.loc[
-        buy_side, "offer_iv_edge_pp"
-    ]
-    normalized.loc[single_only, "signal_iv_edge_pp"] = normalized.loc[
-        single_only, "single_iv_deviation_pp"
-    ]
-    normalized["signal_iv_edge_pp"] = pd.to_numeric(
-        normalized["signal_iv_edge_pp"], errors="coerce"
-    )
-    # Persisted assessment is authoritative. A structure may have a numeric edge
-    # under an assumption without qualifying for a current action.
-    normalized["edge_confidence"] = None
-    normalized["signal_gross_edge"] = normalized["signal_price_edge"].copy()
-    normalized["signal_price_edge"] = pd.NA
-    normalized["edge_explanation"] = None
-    normalized["edge_fresh_now"] = False
-    current = datetime.now(timezone.utc)
-    for index, row in normalized.iterrows():
-        assessment = row.get("edge_assessment")
-        if not isinstance(assessment, dict) or not assessment:
-            continue
-        confidence = assessment["check_3_confidence"]
-        net_check = assessment["check_2_net_edge"]
-        side, state = confidence.get("best_side"), confidence["status"]
-        net = net_check["net"].get(side)
-        gross = net_check["gross"].get(side)
-        amount = net if net is not None else gross
-        positive = amount is not None and amount > 0
-        labels = {"side_unassigned": "SIDE?", "no_quote": "QUOTE?", "trade": "TRADE", "no_edge": "NO EDGE",
-                  "within_buffer": "BUFFER", "qualified": side,
-                  "provisional": f"{side}*" if positive else "NO EDGE*"}
-        normalized.at[index, "edge_confidence"] = state
-        normalized.at[index, "signal_label"] = labels.get(state, "CHECK")
-        normalized.at[index, "signal_side"] = side
-        normalized.at[index, "signal_price_edge"] = net
-        normalized.at[index, "signal_gross_edge"] = gross
-        normalized.at[index, "signal_edge_ticks"] = net / assessment["tick_size"] if net is not None else None
-        normalized.at[index, "edge_explanation"] = "; ".join(confidence.get("reasons", [])) or "Convention verified; net edge checked against buffer"
-        broker_time = pd.Timestamp(confidence.get("quote_timestamp") or row["observed_at"])
-        normalized.at[index, "edge_fresh_now"] = (
-            pd.notna(row["observed_at"])
-            and -5 <= (current - broker_time.to_pydatetime()).total_seconds() <= confidence["max_quote_age_seconds"]
-        )
-        if not confidence["qualified"]:
-            for field in ("best_action", "best_edge", "best_edge_ticks"):
-                normalized.at[index, field] = None
-    trade_only = (normalized["single_price"].notna() & normalized["bid"].isna()
-                  & normalized["offer"].isna() & normalized["valuation_status"].eq("valued"))
-    normalized.loc[trade_only, "signal_label"] = "TRADE"
-    normalized.loc[trade_only, "edge_confidence"] = "trade"
-    normalized.loc[trade_only, ["signal_side", "signal_price_edge", "signal_gross_edge",
-                                "signal_edge_ticks", "signal_iv_edge_pp"]] = None
-    normalized.loc[trade_only, "edge_explanation"] = "Broker-reported TRADE; comparison to model only; no actionable bid/offer"
-    normalized["signal_gross_edge"] = pd.to_numeric(normalized["signal_gross_edge"], errors="coerce")
     normalized["observed_display"] = normalized["observed_at"].dt.tz_convert(
         "Asia/Dubai"
     ).dt.strftime("%d %b %H:%M:%S")
