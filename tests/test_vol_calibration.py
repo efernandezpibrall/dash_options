@@ -11,11 +11,11 @@ from vol_calibration import jkm_batch, ttf_batch
 from vol_calibration.components import comparison_modal, smile_grid
 from vol_calibration.components.parameter_table import create_parameter_table
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
-from vol_calibration.pages import brent, jkm, ttf
+from vol_calibration.pages import jkm, ttf
 from vol_calibration.session_state import persist_product_table, restore_product_table
 
 
-PRODUCT_MODULES = (brent, ttf, jkm)
+PRODUCT_MODULES = (ttf, jkm)
 
 
 def _walk(component):
@@ -117,12 +117,7 @@ def test_excel_summary_records_model_version(module):
     excel_file = pd.ExcelFile(workbook)
     summary = pd.read_excel(excel_file, sheet_name="Summary")
 
-    expected_version = (
-        brent.BRENT_ADJUSTMENT_MODEL_VERSION
-        if module is brent
-        else DEFAULT_CALIBRATION_MODEL_VERSION
-    )
-    assert summary.loc[0, "Model Version"] == expected_version
+    assert summary.loc[0, "Model Version"] == DEFAULT_CALIBRATION_MODEL_VERSION
     assert excel_file.sheet_names == ["Parameters", "Summary"]
 
 

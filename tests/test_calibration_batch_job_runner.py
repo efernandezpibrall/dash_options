@@ -14,6 +14,7 @@ import pytest
 
 from vol_calibration import jkm_batch, ttf_batch
 from vol_calibration.batch_checkpoints import digest, make_checkpoint
+from vol_calibration import batch_job_runner
 from vol_calibration.batch_job_runner import (
     build_payload,
     changed_source_expiry,
@@ -124,7 +125,12 @@ def test_source_change_finds_first_affected_expiry_without_type_false_positive()
 
 def test_completed_batch_verifies_saved_checkpoint_integrity():
     job_id = uuid4()
-    payload = {"table_data": [{"expiry": "Nov-26", "vr": 0.4}]}
+    payload = {
+        "schema_version": batch_job_runner.JOB_PAYLOAD_SCHEMA_VERSION,
+        "job_type": batch_job_runner.JOB_TYPE,
+        "code_fingerprint": batch_job_runner.code_fingerprint(),
+        "table_data": [{"expiry": "Nov-26", "vr": 0.4}],
+    }
     job = JobRecord(
         job_id=job_id, run_id=None, status=JobStatus.SUCCEEDED,
         payload=payload, attempts=1, max_attempts=3,
@@ -132,7 +138,12 @@ def test_completed_batch_verifies_saved_checkpoint_integrity():
     )
     saved = make_checkpoint(
         expiry="2026-11-01",
-        result_row={"expiry": "2026-11-01", "status": "Success"},
+        result_row={
+            "expiry": "2026-11-01", "status": "Success",
+            "core_tv_rmse": 0.0, "tail_fit_tv_rmse": 0.001,
+            "iv_rmse": 0.01, "blend_width": 0.1, "min_g": 0.01,
+            "method": "test_numeric_checkpoint",
+        },
         updated_row={"expiry": "Nov-26", "vr": 0.5},
         warm_start_after={"vr": 0.5},
         input_fingerprint=digest("input"),
@@ -176,13 +187,13 @@ def test_page_submits_detached_job_without_running_calibration(monkeypatch, page
         cancellation_requested=False, completed_items=0, total_items=1,
     )
     launched = []
-    monkeypatch.setattr(page, "background_jobs_enabled", lambda: True)
+    monkeypatch.setattr(batch_job_runner, "background_jobs_enabled", lambda: True)
     monkeypatch.setattr(page, "ctx", SimpleNamespace(
         triggered_id=f"{product.lower()}-batch-confirm-btn"
     ))
-    monkeypatch.setattr(page, "job_repository", lambda: object())
-    monkeypatch.setattr(page, "submit_batch", lambda *_args, **_kwargs: job)
-    monkeypatch.setattr(page, "start_worker", lambda job_id: launched.append(job_id))
+    monkeypatch.setattr(batch_job_runner, "job_repository", lambda: object())
+    monkeypatch.setattr(batch_job_runner, "submit_batch", lambda *_args, **_kwargs: job)
+    monkeypatch.setattr(batch_job_runner, "start_worker", lambda job_id: launched.append(job_id))
     monkeypatch.setattr(
         jkm_batch if product == 'JKM' else ttf_batch,
         "calibrate_jkm_batch" if product == "JKM" else "calibrate_ttf_batch",
@@ -230,9 +241,9 @@ def test_jkm_page_applies_completed_job_once_and_enables_existing_save_gate(monk
         def get(self, *, job_id):
             return job
 
-    monkeypatch.setattr(jkm, "background_jobs_enabled", lambda: True)
-    monkeypatch.setattr(jkm, "job_repository", Repository)
-    monkeypatch.setattr(jkm, "completed_batch", lambda *_args: {
+    monkeypatch.setattr(batch_job_runner, "background_jobs_enabled", lambda: True)
+    monkeypatch.setattr(batch_job_runner, "job_repository", Repository)
+    monkeypatch.setattr(batch_job_runner, "completed_batch", lambda *_args: {
         "results": result_rows, "table_data": accepted,
         "success_count": 1, "skip_count": 0, "fail_count": 0,
     })
@@ -288,9 +299,9 @@ def test_ttf_page_applies_completed_job_to_existing_save_gate(monkeypatch):
         def get(self, *, job_id):
             return job
 
-    monkeypatch.setattr(ttf, "background_jobs_enabled", lambda: True)
-    monkeypatch.setattr(ttf, "job_repository", Repository)
-    monkeypatch.setattr(ttf, "completed_batch", lambda *_args: {
+    monkeypatch.setattr(batch_job_runner, "background_jobs_enabled", lambda: True)
+    monkeypatch.setattr(batch_job_runner, "job_repository", Repository)
+    monkeypatch.setattr(batch_job_runner, "completed_batch", lambda *_args: {
         "results": result_rows, "table_data": accepted,
         "success_count": 1, "skip_count": 0, "fail_count": 0,
     })

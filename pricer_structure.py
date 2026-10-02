@@ -2398,266 +2398,122 @@ def _implied_contract_volatility(
     return raw_volatility, raw_volatility * factor
 
 
+def _evaluate_model(
+    model: str,
+    context: dict[str, Any],
+    leg: dict[str, Any],
+    *,
+    contract: dict[str, Any] | None = None,
+    volatility: float | None = None,
+    volatility_factor: float | None = None,
+    valuation_date: date | None = None,
+    value_only: bool = False,
+) -> tuple[float, dict[str, float | None] | None]:
+    """One model dispatch for current legs, monthly components and rolled states.
+
+    Callers own scenario/expiry preparation and aggregation. The American and
+    Kirk price-only paths avoid computing Greeks in sensitivity charts.
+    """
+    contract = context if contract is None else contract
+    if model == "kirk":
+        args = (
+            contract["asset_1"], contract["asset_2"], leg["strike"],
+            leg["volatility_asset_1_used"], leg["volatility_asset_2_used"],
+            contract["correlation"], contract["time_to_expiry"],
+            "call" if leg["call_put"] == "C" else "put",
+        )
+        value = kirk_model_with_substitution(*args)
+        if value_only:
+            return value, None
+        raw = kirk_spread_greeks(*args)
+        vega_1 = _json_number(raw.get("vega_sigma1"))
+        vega_2 = _json_number(raw.get("vega_sigma2"))
+        return value, {
+            "delta_s1": raw.get("delta_S1"),
+            "delta_s2": raw.get("delta_S2"),
+            "gamma_s1": raw.get("gamma_S1"),
+            "gamma_s2": raw.get("gamma_S2"),
+            "gamma_s1s2": raw.get("gamma_S1S2"),
+            "vega_sigma1": (
+                None if vega_1 is None else vega_1 * context["asset_1_vol_adjustment_factor"]
+            ),
+            "vega_sigma2": (
+                None if vega_2 is None else vega_2 * context["asset_2_vol_adjustment_factor"]
+            ),
+            "theta": raw.get("theta"),
+            "corr_sensitivity": raw.get("corr_sensitivity"),
+            "vega_equiv": raw.get("vega_equiv"),
+        }
+
+    volatility = leg["volatility_used"] if volatility is None else volatility
+    args = (leg["call_put"], contract["forward"], leg["strike"], contract["time_to_expiry"])
+    if model == "black76":
+        result = (
+            black_76_futures_style(*args, volatility)
+            if context.get("margin_style") == "futures_style"
+            else black_76(*args, context["rate"], volatility)
+        )
+    elif model == "asian76":
+        result = asian_76(
+            *args, contract["time_to_averaging_start"], context["rate"], volatility,
+            fixing_times=_asian_fixing_times(contract, valuation_date),
+            determination_time=_asian_determination_time(contract, valuation_date),
+        )
+    elif model == "american_futures":
+        args = (*args, FlatDiscountCurve(context["rate"]), volatility)
+        kwargs = {"steps": context.get("american_futures_steps", AMERICAN_FUTURES_STEPS)}
+        if value_only:
+            return american_on_futures_equity_style_price(*args, **kwargs), None
+        result = american_on_futures_equity_style(*args, **kwargs)
+    else:
+        raise StructureValidationError(f"Unsupported pricing model: {model}.")
+
+    if value_only:
+        return result[0], None
+    value, delta, gamma, theta, vega, rho = result
+    if model == "asian76" and context.get("margin_style") == "futures_style":
+        rho = 0.0
+    if model == "american_futures" or context["vega_basis"] == "input_vol":
+        factor = (
+            leg.get("expiry_adjustment_factor", context["vol_adjustment_factor"])
+            if volatility_factor is None else volatility_factor
+        )
+        vega *= factor
+    return value, {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega, "rho": rho}
+
+
 def _price_leg(
     model: str,
     context: dict[str, Any],
     leg: dict[str, Any],
 ) -> tuple[float, dict[str, float | None], list[dict[str, Any]]]:
     component_results: list[dict[str, Any]] = []
-    if model == "black76":
-        if context.get("delivery_components"):
-            weighted = {
-                "value": 0.0,
-                "delta": 0.0,
-                "gamma": 0.0,
-                "theta": 0.0,
-                "vega": 0.0,
-                "rho": 0.0,
-            }
-            for component in context["delivery_components"]:
-                component_input_vol, component_pricing_vol, component_vol_factor = (
-                    _component_leg_volatilities(leg, component)
-                )
-                if context.get("margin_style") == "futures_style":
-                    result = black_76_futures_style(
-                        leg["call_put"],
-                        component["forward"],
-                        leg["strike"],
-                        component["time_to_expiry"],
-                        component_pricing_vol,
-                    )
-                else:
-                    result = black_76(
-                        leg["call_put"],
-                        component["forward"],
-                        leg["strike"],
-                        component["time_to_expiry"],
-                        context["rate"],
-                        component_pricing_vol,
-                    )
-                component_value, delta, gamma, theta, vega, rho = result
-                if context["vega_basis"] == "input_vol":
-                    vega *= component_vol_factor
-                component_greeks = {
-                    "delta": delta,
-                    "gamma": gamma,
-                    "theta": theta,
-                    "vega": vega,
-                    "rho": rho,
-                }
-                component_results.append(
-                    {
-                        **component,
-                        "input_volatility": component_input_vol,
-                        "pricing_volatility": component_pricing_vol,
-                        "expiry_adjustment_factor": component_vol_factor,
-                        "unit_value": component_value,
-                        "weighted_unit_value": component["weight"]
-                        * component_value,
-                        "greeks": component_greeks,
-                        "weighted_greeks": {
-                            key: component["weight"] * greek
-                            for key, greek in component_greeks.items()
-                        },
-                    }
-                )
-                weighted["value"] += component["weight"] * component_value
-                for metric, greek in component_greeks.items():
-                    weighted[metric] += component["weight"] * greek
-            value = weighted.pop("value")
-            greeks = weighted
-        else:
-            pricing_function = (
-                black_76_futures_style
-                if context.get("margin_style") == "futures_style"
-                else black_76
+    if context.get("delivery_components"):
+        weighted = {"value": 0.0, "delta": 0.0, "gamma": 0.0, "theta": 0.0, "vega": 0.0, "rho": 0.0}
+        for component in context["delivery_components"]:
+            input_vol, pricing_vol, factor = _component_leg_volatilities(leg, component)
+            component_value, component_greeks = _evaluate_model(
+                model, context, leg, contract=component,
+                volatility=pricing_vol, volatility_factor=factor,
             )
-            if pricing_function is black_76_futures_style:
-                result = pricing_function(
-                    leg["call_put"],
-                    context["forward"],
-                    leg["strike"],
-                    context["time_to_expiry"],
-                    leg["volatility_used"],
-                )
-            else:
-                result = pricing_function(
-                    leg["call_put"],
-                    context["forward"],
-                    leg["strike"],
-                    context["time_to_expiry"],
-                    context["rate"],
-                    leg["volatility_used"],
-                )
-            value, delta, gamma, theta, vega, rho = result
-            greeks = {
-                "delta": delta,
-                "gamma": gamma,
-                "theta": theta,
-                "vega": (
-                    vega
-                    if context["vega_basis"] == "adjusted_pricing_vol"
-                    else vega
-                    * leg.get(
-                        "expiry_adjustment_factor",
-                        context["vol_adjustment_factor"],
-                    )
-                ),
-                "rho": rho,
-            }
-    elif model == "asian76":
-        if context.get("delivery_components"):
-            weighted = {
-                "value": 0.0,
-                "delta": 0.0,
-                "gamma": 0.0,
-                "theta": 0.0,
-                "vega": 0.0,
-                "rho": 0.0,
-            }
-            for component in context["delivery_components"]:
-                component_input_vol, component_pricing_vol, component_vol_factor = (
-                    _component_leg_volatilities(leg, component)
-                )
-                result = asian_76(
-                    leg["call_put"],
-                    component["forward"],
-                    leg["strike"],
-                    component["time_to_expiry"],
-                    component["time_to_averaging_start"],
-                    context["rate"],
-                    component_pricing_vol,
-                    fixing_times=_asian_fixing_times(component),
-                    determination_time=_asian_determination_time(component),
-                )
-                component_value, delta, gamma, theta, vega, rho = result
-                if context.get("margin_style") == "futures_style":
-                    rho = 0.0
-                if context["vega_basis"] == "input_vol":
-                    vega *= component_vol_factor
-                component_greeks = {
-                    "delta": delta,
-                    "gamma": gamma,
-                    "theta": theta,
-                    "vega": vega,
-                    "rho": rho,
-                }
-                component_results.append(
-                    {
-                        **component,
-                        "input_volatility": component_input_vol,
-                        "pricing_volatility": component_pricing_vol,
-                        "expiry_adjustment_factor": component_vol_factor,
-                        "unit_value": component_value,
-                        "weighted_unit_value": component["weight"] * component_value,
-                        "greeks": component_greeks,
-                        "weighted_greeks": {
-                            key: component["weight"] * greek
-                            for key, greek in component_greeks.items()
-                        },
-                    }
-                )
-                weighted["value"] += component["weight"] * component_value
-                for metric, greek in component_greeks.items():
-                    weighted[metric] += component["weight"] * greek
-            value = weighted.pop("value")
-            greeks = weighted
-        else:
-            result = asian_76(
-                leg["call_put"],
-                context["forward"],
-                leg["strike"],
-                context["time_to_expiry"],
-                context["time_to_averaging_start"],
-                context["rate"],
-                leg["volatility_used"],
-                fixing_times=_asian_fixing_times(context),
-                determination_time=_asian_determination_time(context),
-            )
-            value, delta, gamma, theta, vega, rho = result
-            if context.get("margin_style") == "futures_style":
-                rho = 0.0
-            greeks = {
-                "delta": delta,
-                "gamma": gamma,
-                "theta": theta,
-                "vega": (
-                    vega
-                    if context["vega_basis"] == "adjusted_pricing_vol"
-                    else vega
-                    * leg.get(
-                        "expiry_adjustment_factor",
-                        context["vol_adjustment_factor"],
-                    )
-                ),
-                "rho": rho,
-            }
-    elif model == "american_futures":
-        value, delta, gamma, theta, vega, rho = (
-            american_on_futures_equity_style(
-                leg["call_put"],
-                context["forward"],
-                leg["strike"],
-                context["time_to_expiry"],
-                FlatDiscountCurve(context["rate"]),
-                leg["volatility_used"],
-                steps=context.get("american_futures_steps", AMERICAN_FUTURES_STEPS),
-            )
-        )
-        greeks = {
-            "delta": delta,
-            "gamma": gamma,
-            "theta": theta,
-            "vega": vega
-            * leg.get(
-                "expiry_adjustment_factor",
-                context["vol_adjustment_factor"],
-            ),
-            "rho": rho,
-        }
+            component_results.append({
+                **component,
+                "input_volatility": input_vol,
+                "pricing_volatility": pricing_vol,
+                "expiry_adjustment_factor": factor,
+                "unit_value": component_value,
+                "weighted_unit_value": component["weight"] * component_value,
+                "greeks": component_greeks,
+                "weighted_greeks": {
+                    key: component["weight"] * greek for key, greek in component_greeks.items()
+                },
+            })
+            weighted["value"] += component["weight"] * component_value
+            for metric, greek in component_greeks.items():
+                weighted[metric] += component["weight"] * greek
+        value, greeks = weighted.pop("value"), weighted
     else:
-        call_put = "call" if leg["call_put"] == "C" else "put"
-        value = kirk_model_with_substitution(
-            context["asset_1"],
-            context["asset_2"],
-            leg["strike"],
-            leg["volatility_asset_1_used"],
-            leg["volatility_asset_2_used"],
-            context["correlation"],
-            context["time_to_expiry"],
-            call_put,
-        )
-        raw_greeks = kirk_spread_greeks(
-            context["asset_1"],
-            context["asset_2"],
-            leg["strike"],
-            leg["volatility_asset_1_used"],
-            leg["volatility_asset_2_used"],
-            context["correlation"],
-            context["time_to_expiry"],
-            call_put,
-        )
-        volatility_factor_1 = context["asset_1_vol_adjustment_factor"]
-        volatility_factor_2 = context["asset_2_vol_adjustment_factor"]
-        vega_sigma1 = _json_number(raw_greeks.get("vega_sigma1"))
-        vega_sigma2 = _json_number(raw_greeks.get("vega_sigma2"))
-        greeks = {
-            "delta_s1": raw_greeks.get("delta_S1"),
-            "delta_s2": raw_greeks.get("delta_S2"),
-            "gamma_s1": raw_greeks.get("gamma_S1"),
-            "gamma_s2": raw_greeks.get("gamma_S2"),
-            "gamma_s1s2": raw_greeks.get("gamma_S1S2"),
-            "vega_sigma1": (
-                None if vega_sigma1 is None else vega_sigma1 * volatility_factor_1
-            ),
-            "vega_sigma2": (
-                None if vega_sigma2 is None else vega_sigma2 * volatility_factor_2
-            ),
-            "theta": raw_greeks.get("theta"),
-            "corr_sensitivity": raw_greeks.get("corr_sensitivity"),
-            "vega_equiv": raw_greeks.get("vega_equiv"),
-        }
-
+        value, greeks = _evaluate_model(model, context, leg)
     value = _json_number(value)
     if value is None:
         raise StructureValidationError(f"{leg['name']}: pricing returned a non-finite value.")
@@ -2670,101 +2526,18 @@ def _price_leg_value_only(
     context: dict[str, Any],
     leg: dict[str, Any],
 ) -> float:
-    """Price one normalized leg without calculating Greeks for scenario charts."""
-    if model == "black76":
-        if context.get("delivery_components"):
-            if context.get("margin_style") == "futures_style":
-                value = sum(
-                    component["weight"]
-                    * black_76_futures_style(
-                        leg["call_put"],
-                        component["forward"],
-                        leg["strike"],
-                        component["time_to_expiry"],
-                        _component_leg_volatilities(leg, component)[1],
-                    )[0]
-                    for component in context["delivery_components"]
-                )
-            else:
-                value = sum(
-                    component["weight"]
-                    * black_76(
-                        leg["call_put"],
-                        component["forward"],
-                        leg["strike"],
-                        component["time_to_expiry"],
-                        context["rate"],
-                        _component_leg_volatilities(leg, component)[1],
-                    )[0]
-                    for component in context["delivery_components"]
-                )
-        elif context.get("margin_style") == "futures_style":
-            value = black_76_futures_style(
-                leg["call_put"],
-                context["forward"],
-                leg["strike"],
-                context["time_to_expiry"],
-                leg["volatility_used"],
+    """Price one normalized leg without calculating unnecessary scenario Greeks."""
+    if context.get("delivery_components"):
+        value = sum(
+            component["weight"] * _evaluate_model(
+                model, context, leg, contract=component,
+                volatility=_component_leg_volatilities(leg, component)[1],
+                value_only=True,
             )[0]
-        else:
-            value = black_76(
-                leg["call_put"],
-                context["forward"],
-                leg["strike"],
-                context["time_to_expiry"],
-                context["rate"],
-                leg["volatility_used"],
-            )[0]
-    elif model == "asian76":
-        if context.get("delivery_components"):
-            value = sum(
-                component["weight"]
-                * asian_76(
-                    leg["call_put"],
-                    component["forward"],
-                    leg["strike"],
-                    component["time_to_expiry"],
-                    component["time_to_averaging_start"],
-                    context["rate"],
-                    _component_leg_volatilities(leg, component)[1],
-                    fixing_times=_asian_fixing_times(component),
-                    determination_time=_asian_determination_time(component),
-                )[0]
-                for component in context["delivery_components"]
-            )
-        else:
-            value = asian_76(
-                leg["call_put"],
-                context["forward"],
-                leg["strike"],
-                context["time_to_expiry"],
-                context["time_to_averaging_start"],
-                context["rate"],
-                leg["volatility_used"],
-                fixing_times=_asian_fixing_times(context),
-                determination_time=_asian_determination_time(context),
-            )[0]
-    elif model == "american_futures":
-        value = american_on_futures_equity_style_price(
-            leg["call_put"],
-            context["forward"],
-            leg["strike"],
-            context["time_to_expiry"],
-            FlatDiscountCurve(context["rate"]),
-            leg["volatility_used"],
-            steps=context.get("american_futures_steps", AMERICAN_FUTURES_STEPS),
+            for component in context["delivery_components"]
         )
     else:
-        value = kirk_model_with_substitution(
-            context["asset_1"],
-            context["asset_2"],
-            leg["strike"],
-            leg["volatility_asset_1_used"],
-            leg["volatility_asset_2_used"],
-            context["correlation"],
-            context["time_to_expiry"],
-            "call" if leg["call_put"] == "C" else "put",
-        )
+        value, _ = _evaluate_model(model, context, leg, value_only=True)
     normalized_value = _json_number(value)
     if normalized_value is None:
         raise StructureValidationError(
@@ -3147,15 +2920,58 @@ def _snapshot_input(snapshot: dict[str, Any]) -> tuple[str, dict, dict, list, da
     )
 
 
+def _scenario_contract(
+    model: str,
+    context: dict[str, Any],
+    contract: dict[str, Any],
+    valuation_date: date,
+    underlying_value: float,
+    *,
+    strip: bool = False,
+) -> dict[str, Any]:
+    """Roll an unexpired contract's inputs, preserving Asian fixing boundaries."""
+    expiration = _as_date(
+        contract["option_expiration_date"] if strip else contract["expiration_date"],
+        "Component expiration date" if strip else "Expiration date",
+    )
+    denominator = float(
+        context["day_count_denominator"] if strip
+        else context.get("day_count_denominator") or 365.0
+    )
+    time_to_expiry = (expiration - valuation_date).days / denominator
+    rolled = {
+        **contract,
+        "forward": underlying_value,
+        "time_to_expiry": time_to_expiry if strip else max(time_to_expiry, 0.001),
+    }
+    if model == "kirk":
+        rolled["asset_1"] = underlying_value
+    if model == "asian76":
+        averaging_start = _as_date(
+            contract["averaging_start_date"],
+            "Component averaging start date" if strip else "Averaging start date",
+        )
+        if valuation_date > averaging_start:
+            raise StructureValidationError(
+                "JKM Average Price Option strip valuation after a monthly "
+                "averaging period starts requires realized fixings."
+                if strip else
+                "Asian valuation after averaging starts requires realized fixings and an accrued average."
+            )
+        rolled["time_to_averaging_start"] = max(
+            (averaging_start - valuation_date).days / denominator, 0.0
+        )
+    return rolled
+
+
 def _price_at_state(
     snapshot: dict[str, Any],
     valuation_date: date,
     underlying_value: float,
 ) -> float:
-    model = snapshot["model"]
-    context = snapshot["context"]
-    delivery_components = context.get("delivery_components") or []
-    if delivery_components:
+    model, context = snapshot["model"], snapshot["context"]
+    position_scale = snapshot["sizing"]["position_scale"]
+    if context.get("delivery_components"):
         first_expiration = _as_date(
             context["first_expiration_date"], "First component expiration date"
         )
@@ -3163,167 +2979,38 @@ def _price_at_state(
             raise StructureValidationError(
                 "Strip valuation cannot move beyond the first monthly option expiry."
             )
-        position_scale = snapshot["sizing"]["position_scale"]
         total = 0.0
         for leg in snapshot["legs"]:
             leg_value = 0.0
             for component in leg["components"]:
-                component_expiration = _as_date(
-                    component["option_expiration_date"],
-                    "Component expiration date",
-                )
-                if valuation_date >= component_expiration:
+                expiration = _as_date(component["option_expiration_date"], "Component expiration date")
+                if valuation_date >= expiration:
                     value = (
-                        max(underlying_value - leg["strike"], 0.0)
-                        if leg["call_put"] == "C"
+                        max(underlying_value - leg["strike"], 0.0) if leg["call_put"] == "C"
                         else max(leg["strike"] - underlying_value, 0.0)
                     )
                 else:
-                    time_to_expiry = (
-                        component_expiration - valuation_date
-                    ).days / float(context["day_count_denominator"])
-                    component_pricing_vol = float(
-                        component.get(
-                            "pricing_volatility",
-                            leg["volatility_used"],
-                        )
+                    rolled = _scenario_contract(
+                        model, context, component, valuation_date, underlying_value, strip=True,
                     )
-                    if model == "asian76":
-                        averaging_start = _as_date(
-                            component["averaging_start_date"],
-                            "Component averaging start date",
-                        )
-                        if valuation_date > averaging_start:
-                            raise StructureValidationError(
-                                "JKM Average Price Option strip valuation after a "
-                                "monthly averaging period starts requires realized fixings."
-                            )
-                        time_to_averaging_start = max(
-                            (
-                                averaging_start - valuation_date
-                            ).days / float(context["day_count_denominator"]),
-                            0.0,
-                        )
-                        value = asian_76(
-                            leg["call_put"],
-                            underlying_value,
-                            leg["strike"],
-                            time_to_expiry,
-                            time_to_averaging_start,
-                            context["rate"],
-                            component_pricing_vol,
-                            fixing_times=_asian_fixing_times(
-                                component, valuation_date
-                            ),
-                            determination_time=_asian_determination_time(
-                                component, valuation_date
-                            ),
-                        )[0]
-                    elif context.get("margin_style") == "futures_style":
-                        value = black_76_futures_style(
-                            leg["call_put"],
-                            underlying_value,
-                            leg["strike"],
-                            time_to_expiry,
-                            component_pricing_vol,
-                        )[0]
-                    else:
-                        value = black_76(
-                            leg["call_put"],
-                            underlying_value,
-                            leg["strike"],
-                            time_to_expiry,
-                            context["rate"],
-                            component_pricing_vol,
-                        )[0]
+                    value, _ = _evaluate_model(
+                        model, context, leg, contract=rolled,
+                        volatility=float(component.get("pricing_volatility", leg["volatility_used"])),
+                        valuation_date=valuation_date, value_only=True,
+                    )
                 leg_value += component["weight"] * float(value)
             total += leg["weight"] * leg_value * position_scale
         return total
 
-    expiration_date = _as_date(context["expiration_date"], "Expiration date")
-    if valuation_date >= expiration_date:
+    expiration = _as_date(context["expiration_date"], "Expiration date")
+    if valuation_date >= expiration:
         return _payoff_at_underlying(snapshot, underlying_value)
-
-    day_count_denominator = float(context.get("day_count_denominator") or 365.0)
-    time_to_expiry = max(
-        (expiration_date - valuation_date).days / day_count_denominator,
-        0.001,
-    )
-    position_scale = snapshot["sizing"]["position_scale"]
+    rolled = _scenario_contract(model, context, context, valuation_date, underlying_value)
     total = 0.0
-    if model == "asian76":
-        averaging_start = _as_date(
-            context["averaging_start_date"],
-            "Averaging start date",
-        )
-        if valuation_date > averaging_start:
-            raise StructureValidationError(
-                "Asian valuation after averaging starts requires realized fixings "
-                "and an accrued average."
-            )
-        time_to_averaging_start = max(
-            (averaging_start - valuation_date).days / day_count_denominator,
-            0.0,
-        )
-    else:
-        time_to_averaging_start = None
-
     for leg in snapshot["legs"]:
-        if model == "black76":
-            if context.get("margin_style") == "futures_style":
-                value = black_76_futures_style(
-                    leg["call_put"],
-                    underlying_value,
-                    leg["strike"],
-                    time_to_expiry,
-                    leg["volatility_used"],
-                )[0]
-            else:
-                value = black_76(
-                    leg["call_put"],
-                    underlying_value,
-                    leg["strike"],
-                    time_to_expiry,
-                    context["rate"],
-                    leg["volatility_used"],
-                )[0]
-        elif model == "asian76":
-            value = asian_76(
-                leg["call_put"],
-                underlying_value,
-                leg["strike"],
-                time_to_expiry,
-                time_to_averaging_start,
-                context["rate"],
-                leg["volatility_used"],
-                fixing_times=_asian_fixing_times(context, valuation_date),
-                determination_time=_asian_determination_time(
-                    context, valuation_date
-                ),
-            )[0]
-        elif model == "american_futures":
-            value = american_on_futures_equity_style_price(
-                leg["call_put"],
-                underlying_value,
-                leg["strike"],
-                time_to_expiry,
-                FlatDiscountCurve(context["rate"]),
-                leg["volatility_used"],
-                steps=context.get(
-                    "american_futures_steps", AMERICAN_FUTURES_STEPS
-                ),
-            )
-        else:
-            value = kirk_model_with_substitution(
-                underlying_value,
-                context["asset_2"],
-                leg["strike"],
-                leg["volatility_asset_1_used"],
-                leg["volatility_asset_2_used"],
-                context["correlation"],
-                time_to_expiry,
-                "call" if leg["call_put"] == "C" else "put",
-            )
+        value, _ = _evaluate_model(
+            model, context, leg, contract=rolled, valuation_date=valuation_date, value_only=True,
+        )
         total += leg["weight"] * float(value) * position_scale
     return total
 

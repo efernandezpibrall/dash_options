@@ -13,18 +13,15 @@ from vol_calibration import batch_results, batch_adapter
 from options.vol_calibration import api as calibration_inputs
 from datetime import date, timedelta
 from vol_calibration.excel_export import excel_safe_frame
-import getpass
 import hashlib
 from io import StringIO, BytesIO
 import json
-from uuid import UUID
 
 import pandas as pd
 import numpy as np
 import dash_bootstrap_components as dbc
 from dash import html, dcc, callback, clientside_callback, Input, Output, State, no_update, ctx
 from dash.exceptions import PreventUpdate
-from flask import has_request_context, request
 
 from vol_calibration import jkm_batch
 from vol_calibration.batch_results import parse_table_data
@@ -45,10 +42,7 @@ from vol_calibration.data_cache import cached_workspace_callback
 from vol_calibration.components.batch_calibration_modal import (
     create_batch_calibration_confirm_modal,
     create_batch_calibration_progress_modal,
-    create_batch_summary,
-    create_batch_results_table,
 )
-from vol_calibration.auth import resolve_request_identity
 from options.vol_calibration.api import (
     calibration_eligibility_error,
     calibration_readiness,
@@ -58,18 +52,9 @@ from options.vol_calibration.api import (
     JKM_HYBRID_METHOD,
     JKM_HYBRID_POLICY_VERSION,
 )
+from vol_calibration.batch_job_controller import BatchJobController
 from vol_calibration.batch_job_runner import (
-    background_jobs_enabled,
-    build_payload as build_background_payload,
     code_fingerprint as background_code_fingerprint,
-    completed_batch,
-    job_repository,
-    start_worker,
-    submit_batch,
-)
-from vol_calibration.jobs import JobStatus
-from options.vol_calibration.api import (
-    digest as checkpoint_digest,
 )
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
 from vol_calibration.session_state import restore_product_table
@@ -1147,6 +1132,15 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
     return is_open, no_update
 
 
+def _batch_job_controller():
+    return BatchJobController(
+        product=COMMODITY,
+        calibrate=jkm_batch.calibrate_jkm_batch,
+        build_state=_build_batch_state,
+        state_ready=_batch_state_ready,
+    )
+
+
 @callback(
     [Output(f'{COMMODITY_LOWER}-batch-progress-modal', 'is_open'),
      Output(f'{COMMODITY_LOWER}-batch-progress-bar', 'value'),
@@ -1171,100 +1165,11 @@ def toggle_batch_confirm_modal(open_clicks, cancel_clicks, confirm_clicks, table
 def run_batch_calibration(confirm_clicks, close_clicks, market_data_json, table_data,
                           auto_save_opts, skip_good_opts, trade_date_str, is_open,
                           publication_payload=None):
-    """Run batch calibration on all expiries."""
-    triggered_id = ctx.triggered_id
-
-    # Close button pressed
-    if triggered_id == f'{COMMODITY_LOWER}-batch-progress-close-btn':
-        return False, 0, "", [], True, no_update, no_update, no_update, no_update
-
-    # Confirm button pressed - run calibration
-    if triggered_id != f'{COMMODITY_LOWER}-batch-confirm-btn':
-        raise PreventUpdate
-
-    if not market_data_json or not table_data:
-        return (True, 0, "Waiting for market inputs and parameter rows to load.", [], False,
-                None, no_update, no_update, None)
-
-    del auto_save_opts, is_open
-    skip_good = 'skip_good' in (skip_good_opts or [])
-
-    if background_jobs_enabled():
-        try:
-            payload = build_background_payload(
-                product=COMMODITY,
-                trade_date=trade_date_str,
-                market_data_json=market_data_json,
-                table_data=table_data,
-                skip_good=skip_good,
-                publication_payload=publication_payload,
-            )
-            identity = (
-                resolve_request_identity(
-                    request.headers, remote_addr=request.remote_addr,
-                ) if has_request_context() else None
-            )
-            actor = identity.subject if identity and identity.subject else f"local:{getpass.getuser()}"
-            job = submit_batch(job_repository(), payload, created_by=actor)
-            if job.status == JobStatus.QUEUED:
-                start_worker(job.job_id)
-            return (
-                True, 0, "Queued: 0 expiries completed", [], True,
-                None, no_update,
-                dbc.Badge("JKM calibration queued", color="info", pill=True),
-                {"job_id": str(job.job_id), "payload_fingerprint": checkpoint_digest(payload)},
-            )
-        except Exception as exc:
-            return (
-                True, 0, f"Could not start calibration: {exc}", [], False,
-                None, no_update,
-                dbc.Badge("JKM calibration not started", color="danger", pill=True),
-                None,
-            )
-
-    market_data = pd.read_json(StringIO(market_data_json), orient='split')
-    outcome = jkm_batch.calibrate_jkm_batch(
-        market_data,
-        table_data,
-        skip_good=skip_good,
+    """Run the shared batch lifecycle with this product's candidate rules."""
+    return _batch_job_controller().run(
+        ctx.triggered_id, market_data_json, table_data, skip_good_opts,
+        trade_date_str, publication_payload,
     )
-    results = outcome['results']
-    updated_table_data = outcome['table_data']
-    success_count = outcome['success_count']
-    skip_count = outcome['skip_count']
-    fail_count = outcome['fail_count']
-
-    # Create results display
-    results_display = html.Div([
-        create_batch_summary(results),
-        create_batch_results_table(results),
-    ])
-
-    # Create status badge
-    if fail_count == 0:
-        status_badge = dbc.Badge(
-            [html.I(className="fas fa-check me-1"), f"Calibrated {success_count} expiries"],
-            color="success",
-            pill=True,
-        )
-    else:
-        status_badge = dbc.Badge(
-            [html.I(className="fas fa-exclamation-triangle me-1"),
-             f"{success_count} OK, {fail_count} failed"],
-            color="warning",
-            pill=True,
-        )
-
-    batch_state = _build_batch_state(
-        trade_date_str,
-        market_data_json,
-        updated_table_data,
-        publication_payload,
-        results,
-    )
-    return (True, 100, f"Completed: {success_count} calibrated, {skip_count} skipped, {fail_count} failed",
-            results_display, False, batch_state, updated_table_data, status_badge,
-            None)
 
 
 @callback(
@@ -1292,86 +1197,10 @@ def poll_jkm_batch_job(
     _tick, job_reference, market_data_json, table_data, trade_date_str,
     publication_payload, skip_good_opts, is_open, batch_state,
 ):
-    if not background_jobs_enabled() or not job_reference:
-        raise PreventUpdate
-    try:
-        repo = job_repository()
-        job = repo.get(job_id=UUID(job_reference['job_id']))
-    except Exception:
-        return (is_open, no_update, "Waiting for calibration database connection.",
-                no_update, True, no_update, no_update, no_update, True)
-    if job is None:
-        return (is_open, 0, "Calibration job is missing.", [], False,
-                None, no_update, no_update, True)
-    progress = round(100 * job.completed_items / max(job.total_items, 1))
-    if job.status in {JobStatus.QUEUED, JobStatus.RUNNING}:
-        if job.status == JobStatus.QUEUED or (
-            job.lease_expires_at is not None
-            and job.lease_expires_at < pd.Timestamp.now(tz='UTC').to_pydatetime()
-        ):
-            try:
-                start_worker(job.job_id)
-            except OSError as exc:
-                return (
-                    is_open, progress, f"Could not start calibration worker: {exc}",
-                    no_update, True, no_update, no_update, no_update, False,
-                )
-        return (
-            is_open, progress,
-            f"{job.completed_items} of {job.total_items} expiries completed",
-            no_update, True, no_update, no_update,
-            dbc.Badge("JKM calibration running", color="info", pill=True), False,
-        )
-    if job.status != JobStatus.SUCCEEDED:
-        return (
-            is_open, progress, job.last_error or f"Calibration {job.status.value}.",
-            [], False, None, no_update,
-            dbc.Badge("JKM calibration failed", color="danger", pill=True), True,
-        )
-    try:
-        if not market_data_json or not table_data or not trade_date_str or publication_payload is None:
-            return (is_open, 100, "Waiting for page inputs to load.",
-                    no_update, True, no_update, no_update, no_update, True)
-        if isinstance(batch_state, dict) and batch_state.get('background_job_id') == str(job.job_id):
-            ready, _ = _batch_state_ready(
-                batch_state, trade_date_str, market_data_json,
-                table_data, publication_payload,
-            )
-            if ready:
-                return (is_open, 100, "Calibration complete.", no_update, False,
-                        no_update, no_update, no_update, True)
-        current = build_background_payload(
-            product=COMMODITY,
-            trade_date=trade_date_str,
-            market_data_json=market_data_json,
-            table_data=table_data,
-            skip_good='skip_good' in (skip_good_opts or []),
-            publication_payload=publication_payload,
-        )
-        if checkpoint_digest(current) != job_reference['payload_fingerprint']:
-            raise ValueError("Inputs changed while the batch ran; reload and recalibrate.")
-        outcome = completed_batch(repo, job.job_id)
-        results = outcome['results']
-        updated = outcome['table_data']
-        state = _build_batch_state(
-            trade_date_str, market_data_json, updated,
-            publication_payload, results,
-        )
-        state['background_job_id'] = str(job.job_id)
-        state['background_code_fingerprint'] = job.payload['code_fingerprint']
-        return (
-            is_open, 100,
-            f"Completed: {outcome['success_count']} calibrated, {outcome['skip_count']} skipped",
-            html.Div([create_batch_summary(results), create_batch_results_table(results)]),
-            False, state, updated,
-            dbc.Badge("JKM calibration complete", color="success", pill=True), True,
-        )
-    except Exception as exc:
-        return (
-            is_open, progress, f"Cannot apply calibration: {exc}", [], False,
-            None, no_update,
-            dbc.Badge("JKM calibration needs review", color="warning", pill=True), True,
-        )
+    return _batch_job_controller().poll(
+        job_reference, market_data_json, table_data, trade_date_str,
+        publication_payload, skip_good_opts, is_open, batch_state,
+    )
 
 
 @callback(
@@ -1381,14 +1210,4 @@ def poll_jkm_batch_job(
     prevent_initial_call=True,
 )
 def cancel_jkm_batch_job(_clicks, job_reference):
-    if not background_jobs_enabled() or not job_reference:
-        raise PreventUpdate
-    identity = (
-        resolve_request_identity(request.headers, remote_addr=request.remote_addr)
-        if has_request_context() else None
-    )
-    actor = identity.subject if identity and identity.subject else f"local:{getpass.getuser()}"
-    job = job_repository().request_cancel(
-        job_id=UUID(job_reference['job_id']), created_by=actor,
-    )
-    return "Cancellation requested." if job else "Cancellation unavailable."
+    return _batch_job_controller().cancel(job_reference)
