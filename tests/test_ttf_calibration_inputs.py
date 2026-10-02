@@ -7,7 +7,11 @@ import pandas as pd
 import pytest
 from dash.exceptions import PreventUpdate
 
-from vol_calibration import calibration_inputs
+from options.vol_calibration import api as calibration_inputs
+from options.vol_calibration.calibration import ttf_candidates, ttf_batch as engine_batch
+from vol_calibration import batch_adapter
+from dataclasses import replace
+from options.vol_calibration.models.gas_hybrid import HybridFitNoCandidate
 from vol_calibration import ttf_batch
 from vol_calibration.calibration_inputs import (
     UNDISCOUNTED_CALL_DELTA,
@@ -31,7 +35,7 @@ def _valid_ttf_observations():
             "expiry": pd.Timestamp("2026-09-01"),
             "option_expiration_date": pd.Timestamp("2026-08-27"),
             "forward": 50.0,
-            "strike": np.nan,
+            "strike": 50.0 * np.exp(np.linspace(1.0, -0.6, len(deltas))),
             "iv": np.linspace(0.62, 0.52, len(deltas)),
             "delta": deltas,
             "dte": 78.0,
@@ -160,7 +164,7 @@ def test_unavailable_cob_disables_calibration_without_synthetic_data(monkeypatch
 def test_selected_calibration_accepts_sep_26_and_passes_delta_convention(monkeypatch):
     calls = []
 
-    def fake_hybrid(observations, initial_params, *, n_starts, seed):
+    def fake_hybrid(observations, initial_params, *, n_starts, seed, **kwargs):
         calls.append(
             {
                 "observations": observations,
@@ -186,7 +190,7 @@ def test_selected_calibration_accepts_sep_26_and_passes_delta_convention(monkeyp
         "ctx",
         SimpleNamespace(triggered_id="ttf-calibrate-all-btn"),
     )
-    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_candidates, "fit_ttf_hybrid_candidate", fake_hybrid)
     monkeypatch.setattr(ttf, "create_comparison_plot", lambda *args, **kwargs: {})
 
     table_data = [
@@ -276,7 +280,7 @@ def test_manual_node_edit_refits_tail_before_updating_session_final(monkeypatch)
         calls.append((candidate_observations.copy(), initial_params, basis, selected_expiry))
         return fitted
 
-    monkeypatch.setattr(ttf_batch, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(batch_adapter, "fit_ttf_candidate", fake_run)
     node_rows = [
         {
             "delta": float(row.delta),
@@ -317,8 +321,8 @@ def test_invalid_manual_node_edit_is_visibly_restored(monkeypatch):
     node_rows = ttf._ttf_node_editor_rows(observations, "Sep-26")
     node_rows[7]["final_iv_pct"] += 10.0
     monkeypatch.setattr(
-        ttf_batch,
-        "_run_ttf_candidate",
+        batch_adapter,
+        "fit_ttf_candidate",
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid hybrid")),
     )
 
@@ -541,7 +545,7 @@ def _table_row(expiry, basis, vr):
 def test_selected_apr_29_uses_editable_row_and_extrapolated_retry(monkeypatch):
     calls = []
 
-    def fake_hybrid(observations, initial_params, *, n_starts, seed):
+    def fake_hybrid(observations, initial_params, *, n_starts, seed, **kwargs):
         calls.append(
             {
                 "observations": observations,
@@ -551,7 +555,7 @@ def test_selected_apr_29_uses_editable_row_and_extrapolated_retry(monkeypatch):
             }
         )
         if n_starts == 3:
-            raise RuntimeError("first hybrid attempt failed validation")
+            raise HybridFitNoCandidate("first hybrid attempt failed validation", [])
         params = {**initial_params, "vr": 0.41}
         return {
             "params": params,
@@ -570,7 +574,7 @@ def test_selected_apr_29_uses_editable_row_and_extrapolated_retry(monkeypatch):
         "ctx",
         SimpleNamespace(triggered_id="ttf-calibrate-all-btn"),
     )
-    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_candidates, "fit_ttf_hybrid_candidate", fake_hybrid)
     monkeypatch.setattr(ttf, "create_comparison_plot", lambda *args, **kwargs: {})
 
     table_data = [_table_row("Apr-29", "extrapolated", 0.54)]
@@ -612,8 +616,8 @@ def test_copy_candidate_updates_extrapolated_final_in_session(monkeypatch):
         SimpleNamespace(triggered_id="ttf-copy-candidate-btn"),
     )
     monkeypatch.setattr(
-        ttf_batch,
-        "_evaluate_existing_hybrid",
+        calibration_inputs,
+        "evaluate_ttf_parameter_row",
         lambda *args, **kwargs: {
             "core_tv_rmse": 0.0,
             "tail_fit_tv_rmse": 0.001,
@@ -788,7 +792,7 @@ def test_batch_chains_tail_retries_and_continues_after_failure(monkeypatch):
     ]
     calls = []
 
-    def fake_hybrid(observations, initial_params, *, n_starts, seed):
+    def fake_hybrid(observations, initial_params, *, n_starts, seed, **kwargs):
         period = pd.to_datetime(observations["expiry"].iloc[0]).to_period("M")
         calls.append(
             {
@@ -800,7 +804,7 @@ def test_batch_chains_tail_retries_and_continues_after_failure(monkeypatch):
         if str(period) == "2029-05":
             raise RuntimeError("isolated expiry failure")
         if str(period) == "2029-04" and n_starts == 3:
-            raise RuntimeError("three-start hybrid failed validation")
+            raise HybridFitNoCandidate("three-start hybrid failed validation", [])
         params = dict(initial_params)
         if str(period) == "2029-03":
             params["vr"] = 0.31
@@ -826,7 +830,7 @@ def test_batch_chains_tail_retries_and_continues_after_failure(monkeypatch):
         SimpleNamespace(triggered_id="ttf-batch-confirm-btn"),
     )
     monkeypatch.setattr(ttf, "writes_enabled", lambda: False)
-    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(ttf_candidates, "fit_ttf_hybrid_candidate", fake_hybrid)
 
     result = ttf.run_batch_calibration(
         1,
@@ -857,7 +861,6 @@ def test_batch_chains_tail_retries_and_continues_after_failure(monkeypatch):
         ("2029-04", 3),
         ("2029-04", 9),
         ("2029-05", 3),
-        ("2029-05", 9),
         ("2029-06", 3),
     ]
     assert calls[-1]["seed_vr"] == pytest.approx(0.41)
@@ -872,7 +875,7 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
     market_data = _valid_ttf_observations()
     market_json = market_data.to_json(date_format="iso", orient="split")
     table_data = [_table_row("Sep-26", "observed", 0.32)]
-    node_store = {"2026-09": [{"delta": 0.65, "iv": 0.37}]}
+    node_store = {"2026-09": {"0.7000000000": 0.37}}
     publication = {"publication_id": "base-publication"}
     observed_calls = {}
 
@@ -885,7 +888,7 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
         observed_calls["expiry"] = expiry
         return observations.copy()
 
-    def fake_hybrid(observations, initial_params, *, n_starts, seed):
+    def fake_hybrid(observations, initial_params, *, n_starts, seed, **kwargs):
         return {
             "params": dict(initial_params),
             "core_tv_rmse": 0.0,
@@ -903,7 +906,7 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
         "ctx",
         SimpleNamespace(triggered_id="ttf-batch-confirm-btn"),
     )
-    monkeypatch.setattr(ttf_batch, "_settlement_ttf_observations", fake_settlement)
+    monkeypatch.setattr(engine_batch, "_settlement_ttf_observations", fake_settlement)
     monkeypatch.setattr(
         ttf,
         "_base_ttf_observations",
@@ -911,8 +914,8 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
             "batch calibration used the published intraday base"
         ),
     )
-    monkeypatch.setattr(ttf_batch, "_apply_node_edits", fake_node_edits)
-    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_hybrid)
+    monkeypatch.setattr(engine_batch, "_apply_node_edits", fake_node_edits)
+    monkeypatch.setattr(ttf_candidates, "fit_ttf_hybrid_candidate", fake_hybrid)
 
     output = ttf.run_batch_calibration(
         1,
@@ -928,7 +931,7 @@ def test_batch_targets_settlement_nodes_and_tracks_node_edits(monkeypatch):
     )
 
     assert observed_calls["settlement_target"] is True
-    assert observed_calls["node_store"] is node_store
+    assert observed_calls["node_store"]["2026-09"]["nodes"] == node_store["2026-09"]
     assert pd.Timestamp(observed_calls["expiry"]).to_period("M") == pd.Period(
         "2026-09", freq="M"
     )
@@ -970,8 +973,9 @@ def test_batch_uses_ordered_prefitted_observed_results(monkeypatch):
         assert environment_variable == "TTF_OBSERVED_FIT_WORKERS"
         assert len(tasks) == 8
         results = {}
-        for index, (key, _observations, initial) in enumerate(tasks):
+        for index, (key, _observations, initial, _prepared) in enumerate(tasks):
             results[key] = (True, {
+                "fit_diagnostics": {},
                 "params": {**initial, "vr": 0.31 + index / 100},
                 "core_tv_rmse": 0.0,
                 "tail_fit_tv_rmse": 0.001,
@@ -983,13 +987,14 @@ def test_batch_uses_ordered_prefitted_observed_results(monkeypatch):
         return results
 
     monkeypatch.setattr(ttf, "ctx", SimpleNamespace(triggered_id="ttf-batch-confirm-btn"))
-    monkeypatch.setattr(ttf_batch, "prefit_observed_expiries", fake_prefit)
+    monkeypatch.setattr(batch_adapter, "prefit_observed_expiries", fake_prefit)
     seen = []
 
-    def fake_run(_observations, initial, *, basis, selected_expiry):
+    def fake_run(_observations, initial, *, basis, selected_expiry=False, **kwargs):
         seen.append((basis, initial["vr"], selected_expiry))
         assert basis == "extrapolated"
         return {
+            "fit_diagnostics": {},
             "params": {**initial, "vr": 0.40},
             "core_tv_rmse": 0.0,
             "tail_fit_tv_rmse": 0.001,
@@ -999,10 +1004,9 @@ def test_batch_uses_ordered_prefitted_observed_results(monkeypatch):
             "validation": {"is_valid": True, "min_g": 0.01},
         }
 
-    monkeypatch.setattr(ttf_batch, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, fit=fake_run))
     monkeypatch.setattr(
-        ttf_batch, "_evaluate_existing_hybrid",
-        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+        engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("uncalibrated"))),
     )
 
     output = ttf.run_batch_calibration(
@@ -1036,10 +1040,11 @@ def test_ttf_batch_resumes_verified_prefix_and_warm_start(monkeypatch):
     ]
     calls = []
 
-    def fake_run(observations, initial, *, basis, selected_expiry):
+    def fake_run(observations, initial, *, basis, selected_expiry=False, **kwargs):
         month = pd.Timestamp(observations["expiry"].iloc[0]).month
         calls.append((month, basis, float(initial["vr"])))
         return {
+            "fit_diagnostics": {},
             "params": {**initial, "vr": 0.30 + month / 100},
             "core_tv_rmse": 0.0,
             "tail_fit_tv_rmse": 0.001,
@@ -1049,10 +1054,9 @@ def test_ttf_batch_resumes_verified_prefix_and_warm_start(monkeypatch):
             "validation": {"is_valid": True, "min_g": 0.01},
         }
 
-    monkeypatch.setattr(ttf_batch, "_run_ttf_candidate", fake_run)
+    monkeypatch.setattr(engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, fit=fake_run))
     monkeypatch.setattr(
-        ttf_batch, "_evaluate_existing_hybrid",
-        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+        engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("uncalibrated"))),
     )
     saved = {}
     full = ttf_batch.calibrate_ttf_batch(

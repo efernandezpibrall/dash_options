@@ -7,7 +7,9 @@ import pandas as pd
 import pytest
 
 from vol_calibration import calibration_inputs
-from vol_calibration import jkm_batch
+from vol_calibration import jkm_batch, batch_adapter
+from options.vol_calibration.calibration import jkm_candidates, jkm_batch as engine_batch
+from dataclasses import replace
 from options.calibration_engine.config.defaults import get_defaults
 from vol_calibration.pages import jkm
 from vol_calibration.ttf_publication import normalize_ttf_publication_surface
@@ -68,6 +70,7 @@ def _candidate(params, *, valid=True, vr=None):
         fitted["vr"] = vr
     return {
         "params": fitted,
+        "fit_diagnostics": {},
         "core_tv_rmse": 0.0,
         "tail_fit_tv_rmse": 0.001,
         "iv_rmse": 0.002,
@@ -81,12 +84,12 @@ def test_jkm_selected_start_policy_uses_three_then_tail_retry(monkeypatch):
     observations = _market([("2026-10-01", "extrapolated")])
     calls = []
 
-    def fake_fit(data, initial, *, n_starts, seed):
+    def fake_fit(data, initial, *, n_starts, seed, **kwargs):
         del data, seed
         calls.append(n_starts)
         return _candidate(initial, valid=n_starts == 9)
 
-    monkeypatch.setattr(jkm_batch, "fit_jkm_hybrid_candidate", fake_fit)
+    monkeypatch.setattr(jkm_candidates, "fit_jkm_hybrid_candidate", fake_fit)
     result = jkm_batch._run_jkm_candidate(
         calibration_inputs.select_hybrid_expiry_inputs(observations, "Oct-26"),
         get_defaults("JKM"),
@@ -110,18 +113,16 @@ def test_jkm_batch_fits_observed_independently_then_chains_tail(monkeypatch):
     table[1]["vr"] = 0.22
     seeds = []
 
-    def fake_run(observations, initial, *, basis):
+    def fake_run(observations, initial, *, basis, **kwargs):
         seeds.append((basis, float(initial["vr"])))
         target = {0.21: 0.31, 0.22: 0.32, 0.32: 0.33, 0.33: 0.34}[
             round(float(initial["vr"]), 2)
         ]
         return _candidate(get_defaults("JKM"), vr=target)
 
-    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, fit=fake_run))
     monkeypatch.setattr(
-        jkm_batch,
-        "_evaluate_existing_hybrid",
-        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("uncalibrated")),
+        engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, evaluate=lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("uncalibrated"))),
     )
 
     result = jkm_batch.calibrate_jkm_batch(market, table)
@@ -152,16 +153,15 @@ def test_jkm_batch_resumes_verified_prefix_without_refitting(monkeypatch):
     table = _table(expiries)
     calls = []
 
-    def fake_run(observations, initial, *, basis):
+    def fake_run(observations, initial, *, basis, **kwargs):
         calls.append((basis, float(initial["vr"])))
         return _candidate(
             get_defaults("JKM"), vr=0.14 + float(observations["forward"].iloc[0]) / 100
         )
 
-    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, fit=fake_run))
     monkeypatch.setattr(
-        jkm_batch, "_evaluate_existing_hybrid",
-        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+        engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("uncalibrated"))),
     )
     saved = {}
     full = jkm_batch.calibrate_jkm_batch(
@@ -192,15 +192,14 @@ def test_jkm_interrupted_expiry_never_checkpoints_previous_result_as_current(mon
     market = _market(expiries)
     saved = []
 
-    def interrupt_on_second(observations, initial, *, basis):
+    def interrupt_on_second(observations, initial, *, basis, **kwargs):
         if pd.Timestamp(observations["expiry"].iloc[0]).month == 10:
             raise KeyboardInterrupt
         return _candidate(get_defaults("JKM"), vr=0.31)
 
-    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", interrupt_on_second)
+    monkeypatch.setattr(engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, fit=interrupt_on_second))
     monkeypatch.setattr(
-        jkm_batch, "_evaluate_existing_hybrid",
-        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+        engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("uncalibrated"))),
     )
     with pytest.raises(KeyboardInterrupt):
         jkm_batch.calibrate_jkm_batch(
@@ -223,19 +222,18 @@ def test_jkm_batch_consumes_parallel_observed_results_in_expiry_order(monkeypatc
         assert len(tasks) == 8
         return {
             key: (True, _candidate(get_defaults("JKM"), vr=0.31 + index / 100))
-            for index, (key, _observations, _initial) in enumerate(tasks)
+            for index, (key, _observations, _initial, _prepared) in enumerate(tasks)
         }
 
-    def fake_run(_observations, initial, *, basis):
+    def fake_run(_observations, initial, *, basis, **kwargs):
         seen.append((basis, initial["vr"]))
         assert basis == "extrapolated"
         return _candidate(get_defaults("JKM"), vr=0.40)
 
-    monkeypatch.setattr(jkm_batch, "prefit_observed_expiries", fake_prefit)
-    monkeypatch.setattr(jkm_batch, "_run_jkm_candidate", fake_run)
+    monkeypatch.setattr(batch_adapter, "prefit_observed_expiries", fake_prefit)
+    monkeypatch.setattr(engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, fit=fake_run))
     monkeypatch.setattr(
-        jkm_batch, "_evaluate_existing_hybrid",
-        lambda *_args: (_ for _ in ()).throw(ValueError("uncalibrated")),
+        engine_batch, "ADAPTER", replace(engine_batch.ADAPTER, evaluate=lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("uncalibrated"))),
     )
 
     result = jkm_batch.calibrate_jkm_batch(market, table)

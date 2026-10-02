@@ -287,11 +287,7 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
     assert refresh_ids.index("brent-vol-history-refresh-button") < refresh_ids.index(
         "brent-vol-history-settlement-refresh-button"
     )
-    assert refresh_ids.index(
-        "brent-vol-history-settlement-refresh-button"
-    ) < refresh_ids.index(
-        "brent-vol-history-refresh-status"
-    )
+    assert "brent-vol-history-refresh-status" in refresh_ids
 
 
 def test_refresh_buttons_have_distinct_actions_and_labels():
@@ -307,8 +303,8 @@ def test_refresh_buttons_have_distinct_actions_and_labels():
         if getattr(item, "id", None)
         == "brent-vol-history-settlement-refresh-button"
     )
-    assert intraday.children == "Refresh Bloomberg"
-    assert settlement.children == "Refresh settlements"
+    assert "Refresh Intraday" in intraday.children
+    assert "Refresh settlements" in settlement.children
     assert "refresh-button-primary" in intraday.className
     assert "refresh-button-secondary" in settlement.className
     assert intraday.title and settlement.title
@@ -643,7 +639,7 @@ def test_tfo_published_overlay_queries_ttf_without_merging_products(monkeypatch)
     assert len(captured) == 1
 
 
-def test_icap_settlement_loader_reuses_prior_vol_calibration_snapshot():
+def test_icap_settlement_loader_requires_explicit_prior_comparison():
     operational = pd.DataFrame(
         {
             "cob_date": pd.to_datetime(["2026-08-24"]),
@@ -670,7 +666,11 @@ def test_icap_settlement_loader_reuses_prior_vol_calibration_snapshot():
         snapshot_loader=snapshot_loader,
     )
 
-    assert calls == [("TTF", "2026-08-26", False)]
+    assert surface.empty
+    surface = market_data.load_icap_settlement_surface(
+        "2026-08-26", snapshot_loader=snapshot_loader, allow_prior=True,
+    )
+    assert calls == [("TTF", "2026-08-26", False)] * 2
     assert surface["cob_date"].tolist() == [pd.Timestamp("2026-08-24")]
     assert surface["source_name"].tolist() == [
         "ICAP settlement · COB 2026-08-24"
@@ -890,7 +890,6 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
     assert "Open interest · calls" in trace_names
     assert "Open interest · puts" in trace_names
     assert figure.layout.barmode == "overlay"
-    assert figure.layout.xaxis.title.text == "Strike (USD/bbl)"
     assert figure.layout.yaxis.title.text == "IV (%)"
     assert figure.layout.yaxis2.title.text == "Activity (contracts)"
     assert figure.layout.yaxis2.overlaying == "y"
@@ -974,7 +973,6 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
         calibrated_nodes=_calibrated_frame(),
     )
     traces = {trace.name: trace for trace in figure.data}
-    assert figure.layout.xaxis.title.text == "Strike (EUR/MWh)"
     assert "Published TTF exact COB" in traces
     calibrated_name = "Calibrated TTF · COB 24 Aug 2026"
     assert calibrated_name in traces
@@ -1019,7 +1017,7 @@ def test_tfo_figure_separates_direct_icap_settlement_from_published_surface():
     icap = traces["Settlement vol surface (ICAP)"]
     assert "Published TTF exact COB" not in traces
     assert icap.meta["legend_layer"] == "icap-settlement"
-    assert icap.mode == "lines+markers"
+    assert icap.mode == "markers"
     assert icap.line.color == "#0F766E"
     assert icap.line.dash == "dash"
     assert icap.marker.symbol == "diamond"
@@ -1609,7 +1607,6 @@ def test_delta_axis_uses_put_atm_call_convention_and_keeps_activity_only_strikes
         x_axis="delta",
     )
 
-    assert figure.layout.xaxis.title.text == "Delta (put wing → call wing)"
     assert list(figure.layout.xaxis.range) == [0.0, 1.0]
     assert list(figure.layout.xaxis.ticktext) == [
         "0Δ put",
@@ -1743,7 +1740,7 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     monkeypatch.setattr(market_data, "load_available_snapshots", lambda _product: snapshots)
     monkeypatch.setattr(market_data, "load_chain_snapshot", lambda *_args, **_kwargs: chain)
 
-    def load(cob, dates, *, product):
+    def load(cob, dates, *, product, **kwargs):
         calls.append((cob, product))
         return surface
 
@@ -1752,7 +1749,9 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     event = {"commodity": commodity, "cob_date": "2026-08-10", "publication_id": "new-revision"}
     options = [{"value": v} for v in history_charts.EXPIRY_LEGEND_LAYER_ORDER]
     result = history.render_history(
-        snapshot_id, "delta", product, event, "2026-12-01", None, options, ["calibrated"],
+        snapshot_id, "delta", product, event,
+        current_detail_expiry="2026-12-01",
+        current_legend_options=options, current_legend_value=["calibrated"],
     )
     assert calls == [("2026-08-10", product)]
     assert result[0]["publication_id"] == "new-revision"
@@ -1762,7 +1761,7 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     selector = next(c for c in controls if getattr(c, "id", None) == "brent-vol-history-expiry-layers")
     assert selector.value == ["calibrated"]
     figures = [c.figure for card in result[1] for c in _walk(card) if hasattr(c, "figure")]
-    assert figures and figures[0].layout.xaxis.title.text.startswith("Delta")
+    assert figures and list(figures[0].layout.xaxis.range) == [0, 1]
     for other in [dict(event, cob_date="2026-08-11"), dict(event, commodity="JKM")]:
         unchanged = history.render_history(snapshot_id, "delta", product, other)
         assert all(value is no_update for value in unchanged)

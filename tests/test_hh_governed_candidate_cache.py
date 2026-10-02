@@ -9,6 +9,8 @@ import pytest
 
 from dash import no_update
 from snapshot_cache import SnapshotStore
+from options.vol_calibration.products import hh_market
+from options import surface_expiry_metadata
 from vol_calibration import auth as calibration_auth
 from vol_calibration.pages import hh_governed as page
 
@@ -199,9 +201,9 @@ def test_hh_source_recheck_rejects_changed_expiry(monkeypatch):
         resolve_expiries=lambda *_args: expiry,
         validate_expiries=lambda *_args: None,
     )
-    monkeypatch.setattr(page.hh_calibration_module, "_builder_api", lambda: api)
+    monkeypatch.setattr(hh_market, "_builder_api", lambda: api)
     monkeypatch.setattr(
-        page, "resolve_hh_lne_snapshot_reference", lambda *_args, **_kwargs: source
+        hh_market, "resolve_hh_lne_snapshot_reference", lambda *_args, **_kwargs: source
     )
     expiry = pd.DataFrame(
         {
@@ -209,7 +211,7 @@ def test_hh_source_recheck_rejects_changed_expiry(monkeypatch):
             "option_expiration_date": [pd.Timestamp("2026-10-26")],
         }
     )
-    monkeypatch.setattr(page, "resolve_surface_expiry_metadata", lambda *_args: expiry)
+    monkeypatch.setattr(surface_expiry_metadata, "resolve_surface_expiry_metadata", lambda *_args: expiry)
     page._verify_candidate_source(object(), candidate)
 
     options.loc[0, "settlement_price"] = 0.21

@@ -24,7 +24,8 @@ def test_storage_capability_uses_one_schema_probe(monkeypatch):
             ]
         ))
 
-    monkeypatch.setattr(publication, "inspect", inspector)
+    from options.vol_calibration.publication import service
+    monkeypatch.setattr(service, "inspect", inspector)
     assert publication.ttf_publication_storage_available(object())
     assert calls == ["at_lng"]
 

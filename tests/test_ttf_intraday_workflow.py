@@ -7,7 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 from vol_calibration import auth as calibration_auth
-from vol_calibration import calibration_inputs
+from options.vol_calibration import api as calibration_inputs
+from options.vol_calibration.publication import service as publication_service
+from options.vol_calibration.publication import candidates as publication_candidates
+from options.vol_calibration.calibration import ttf_candidates
 from vol_calibration import ttf_publication as publication_data
 from vol_calibration import ttf_batch
 from options.ttf_volatility import STANDARD_CALL_DELTAS, delta_node_to_strike
@@ -180,7 +183,7 @@ def test_publication_candidate_separates_batch_and_manual_targets(monkeypatch):
         calls.append("published")
         return market.assign(iv=market["iv"] + 0.01)
 
-    def fake_evaluate(observations, table_row):
+    def fake_evaluate(observations, table_row, **kwargs):
         del observations
         return {
             "core": core,
@@ -193,11 +196,11 @@ def test_publication_candidate_separates_batch_and_manual_targets(monkeypatch):
             "validation": {"is_valid": True},
         }
 
-    monkeypatch.setattr(ttf_batch, "_settlement_ttf_observations", fake_settlement)
+    monkeypatch.setattr(calibration_inputs, "settlement_ttf_observations", fake_settlement)
     monkeypatch.setattr(ttf_page, "_base_ttf_observations", fake_published)
     monkeypatch.setattr(
-        ttf_batch,
-        "_apply_node_edits",
+        calibration_inputs,
+        "apply_ttf_node_overrides",
         lambda observations, node_store, expiry=None: observations,
     )
     monkeypatch.setattr(
@@ -205,15 +208,15 @@ def test_publication_candidate_separates_batch_and_manual_targets(monkeypatch):
         "select_hybrid_expiry_inputs",
         lambda observations, expiry: observations,
     )
-    monkeypatch.setattr(ttf_batch, "_evaluate_existing_hybrid", fake_evaluate)
+    monkeypatch.setattr(publication_candidates, "evaluate_gas_hybrid_candidate", fake_evaluate)
     monkeypatch.setattr(
-        ttf_page,
+        publication_candidates,
         "hybrid_iv",
         lambda *args, **kwargs: core.iv_nodes.copy(),
     )
     monkeypatch.setattr(
-        ttf_page,
-        "ttf_hybrid_operational_surface_frame",
+        publication_candidates,
+        "operational_surface_frame",
         lambda *args, **kwargs: pd.DataFrame({"iv": [0.5]}),
     )
     table_row = {
@@ -266,13 +269,13 @@ def test_publication_candidate_rejects_node_reproduction_failure(monkeypatch):
         "validation": {"is_valid": True},
     }
     monkeypatch.setattr(
-        ttf_batch,
-        "_settlement_ttf_observations",
+        calibration_inputs,
+        "settlement_ttf_observations",
         lambda market_data, expiry: market.copy(),
     )
     monkeypatch.setattr(
-        ttf_batch,
-        "_apply_node_edits",
+        calibration_inputs,
+        "apply_ttf_node_overrides",
         lambda observations, node_store, expiry=None: observations,
     )
     monkeypatch.setattr(
@@ -281,12 +284,12 @@ def test_publication_candidate_rejects_node_reproduction_failure(monkeypatch):
         lambda observations, expiry: observations,
     )
     monkeypatch.setattr(
-        ttf_batch,
-        "_evaluate_existing_hybrid",
-        lambda observations, table_row: result,
+        publication_candidates,
+        "evaluate_gas_hybrid_candidate",
+        lambda observations, table_row, **kwargs: result,
     )
     monkeypatch.setattr(
-        ttf_page,
+        publication_candidates,
         "hybrid_iv",
         lambda *args, **kwargs: core.iv_nodes + 0.001,
     )
@@ -294,7 +297,7 @@ def test_publication_candidate_rejects_node_reproduction_failure(monkeypatch):
     with pytest.raises(ValueError, match="does not reproduce"):
         ttf_page._publication_candidate_for_expiry(
             market,
-            ttf_page.get_defaults("TTF"),
+            {**ttf_page.get_defaults("TTF"), "left_blend_width": 0.1, "right_blend_width": 0.1},
             "2026-10-01",
             {},
             {},
@@ -391,7 +394,7 @@ def test_post_commit_readback_can_select_historical_publication_by_id(monkeypatc
         }
     )
     monkeypatch.setattr(
-        ttf_publication,
+        publication_service,
         "ttf_publication_storage_available",
         lambda engine: True,
     )
@@ -467,7 +470,7 @@ def test_calibration_review_prefers_active_exact_cob_before_pit_fallback(
         }
     )
     monkeypatch.setattr(
-        ttf_publication,
+        publication_service,
         "ttf_publication_storage_available",
         lambda engine: True,
     )
@@ -510,7 +513,7 @@ def test_ttf_page_requests_exact_cob_publication_for_review(monkeypatch):
     assert captured == {
         "engine": "engine",
         "trading_date": pd.Timestamp("2026-08-21").date(),
-        "kwargs": {"prefer_exact_cob": True},
+        "kwargs": {"prefer_exact_cob": True, "force_refresh": False},
     }
 
 
@@ -746,7 +749,7 @@ def test_extrapolated_tail_accepts_first_valid_fit_regardless_of_diagnostic_rmse
     calls = []
     initial = ttf_page.get_defaults("TTF")
 
-    def fake_fit(observations, initial_params, *, n_starts, seed):
+    def fake_fit(observations, initial_params, *, n_starts, seed, **kwargs):
         del observations, seed
         calls.append(n_starts)
         return {
@@ -759,7 +762,7 @@ def test_extrapolated_tail_accepts_first_valid_fit_regardless_of_diagnostic_rmse
             "validation": {"is_valid": True, "min_g": 0.01},
         }
 
-    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_fit)
+    monkeypatch.setattr(ttf_candidates, "fit_ttf_hybrid_candidate", fake_fit)
     result = ttf_batch._run_ttf_candidate(
         _observations().assign(
             quote_class="extrapolated",
@@ -778,7 +781,7 @@ def test_extrapolated_tail_retries_when_first_fit_fails_complete_gate(monkeypatc
     calls = []
     initial = ttf_page.get_defaults("TTF")
 
-    def fake_fit(observations, initial_params, *, n_starts, seed):
+    def fake_fit(observations, initial_params, *, n_starts, seed, **kwargs):
         del observations, seed
         calls.append(n_starts)
         return {
@@ -794,7 +797,7 @@ def test_extrapolated_tail_retries_when_first_fit_fails_complete_gate(monkeypatc
             },
         }
 
-    monkeypatch.setattr(ttf_batch, "fit_ttf_hybrid_candidate", fake_fit)
+    monkeypatch.setattr(ttf_candidates, "fit_ttf_hybrid_candidate", fake_fit)
     result = ttf_batch._run_ttf_candidate(
         _observations().assign(
             quote_class="extrapolated",
@@ -910,7 +913,7 @@ def test_publication_normalization_requires_full_hybrid_provenance(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "vol_calibration.ttf_publication.ttf_publication_storage_available",
+        "options.vol_calibration.publication.service.ttf_publication_storage_available",
         lambda _engine: True,
     )
     identity = Identity(

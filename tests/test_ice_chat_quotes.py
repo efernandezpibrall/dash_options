@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import uuid
 
 import pandas as pd
+import pytest
 from dash import dcc, html
 from dash._no_update import NoUpdate
 
@@ -254,7 +255,7 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
         "Bid",
         "Offer",
         "Offer qty",
-        "Single",
+        "Trade",
         "Qty",
         "Indication*",
     ]
@@ -320,7 +321,7 @@ def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
     assert bid_trace.marker.color == "#b42318"
     assert list(bid_trace.marker.size) == [13]
     assert figure.layout.height == 320
-    assert figure.layout.yaxis.title.text == "Vol edge vs our mark (vol pts)"
+    assert figure.layout.yaxis.title.text == "Broker IV minus our mark (vol pts)"
     assert figure.layout.xaxis.title.text is None
     assert figure.layout.xaxis.showgrid is False
     assert "yaxis2" not in figure.layout
@@ -335,7 +336,7 @@ def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
     assert float(figure.layout.shapes[-1].y0) == 0.0
 
 
-def test_explicit_quote_convention_controls_single_quote_ticks():
+def test_reported_trade_keeps_tick_deviation_without_executable_edge():
     frame = pd.DataFrame(_rows())
     frame.loc[0, ["product_code", "product_label", "currency_code", "price_unit"]] = [
         "T",
@@ -347,17 +348,17 @@ def test_explicit_quote_convention_controls_single_quote_ticks():
     frame.loc[0, ["bid", "offer", "bid_edge_ticks", "offer_edge_ticks"]] = None
     frame.loc[0, ["single_price", "single_deviation"]] = [1.25, 0.015]
     frame.loc[0, "best_action"] = None
-    # This historical single indication has no persisted executable assessment.
+    # A reported trade retains historical deviation, never an executable edge.
     frame.at[0, "edge_assessment"] = None
     row = quote_data._serialize_frame(frame)[0]
     assert row["product_label"] == "TTF Gas"
     assert row["price_unit_label"] == "EUR/MWh"
     assert row["price_decimals"] == 3
-    assert row["signal_label"] == "SINGLE"
+    assert row["signal_label"] == "TRADE"
     assert row["single_edge_ticks"] == 3.0
     assert row["signal_price_edge"] is None
-    assert row["signal_gross_edge"] == 0.015
-    assert row["edge_confidence"] is None
+    assert row["signal_gross_edge"] is None
+    assert row["edge_confidence"] == "trade"
 
 
 def test_database_uuid_row_ids_are_serialized_for_dash_json():
@@ -516,11 +517,42 @@ def test_grid_selection_does_not_resend_unchanged_tape_or_status(monkeypatch):
     assert result[5] == "Instrument quote history"
 
 
-def test_live_empty_database_contract_loads_without_recalculation():
-    result = quote_data.load_quote_snapshot(
-        "today",
-        now=datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc),
-    )
+@pytest.mark.parametrize("has_rows", [False, True])
+def test_snapshot_loader_reads_persisted_rows_with_bounded_cutoff(monkeypatch, has_rows):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc)
+    statements = []
+    connection = SimpleNamespace()
+
+    def execute(statement, parameters=None):
+        sql = str(statement).strip()
+        assert sql.startswith("SELECT")
+        statements.append(sql)
+        if quote_data.SERVICE_TABLE in sql:
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: {}))
+        return SimpleNamespace(scalar=lambda: "2026-08-16")
+
+    connection.execute = execute
+    engine = SimpleNamespace(connect=lambda: nullcontext(connection))
+
+    def read_sql(statement, actual_connection, *, params):
+        assert actual_connection is connection
+        assert quote_data.QUOTE_VIEW in str(statement)
+        assert "observed_at <= :loaded_at" in str(statement)
+        assert params["cutoff"] < params["loaded_at"] == now
+        assert params["row_limit"] == 2
+        return pd.DataFrame(_rows() * 2) if has_rows else pd.DataFrame()
+
+    monkeypatch.setattr(quote_data, "ROW_LIMIT", 1)
+    monkeypatch.setattr(quote_data.pd, "read_sql", read_sql)
+    monkeypatch.setattr(quote_data, "get_database_engine", lambda **kwargs: pytest.fail("Injected engine ignored"))
+    result = quote_data.load_quote_snapshot("today", engine=engine, now=now)
     assert result.error is None
-    assert isinstance(result.rows, list)
-    assert result.service["surface_cob_date"]
+    assert len(result.rows) == int(has_rows)
+    assert result.truncated is has_rows
+    assert len(statements) == 4
+    assert result.service["surface_cob_date"] == "2026-08-16"
+    if has_rows:
+        assert result.rows[0]["theoretical_price"] == _rows()[0]["theoretical_price"]

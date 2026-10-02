@@ -282,7 +282,14 @@ def test_ttf_export_includes_raw_traded_option_rows(monkeypatch):
     monkeypatch.setattr(ttf, 'date', type('DateStub', (), {
         'today': staticmethod(lambda: pd.Timestamp('2026-08-05').date())
     }))
-    market_json = _market_rows().to_json(date_format='iso', orient='split')
+    deltas = [0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99]
+    market = pd.DataFrame([
+        {**_market_rows().iloc[0].to_dict(), 'delta': delta,
+         'strike': 100.0 - 60.0 * delta, 'iv': 0.84,
+         'source_name': 'official', 'quote_class': 'observed', 'weight': 1.0}
+        for delta in deltas
+    ])
+    market_json = market.to_json(date_format='iso', orient='split')
     download = ttf.export_to_excel(
         1,
         [{'expiry': 'Oct-26', 'vr': 0.84, 'rmse': '2.00%'}],

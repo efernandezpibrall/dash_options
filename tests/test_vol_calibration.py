@@ -8,6 +8,7 @@ from dash.exceptions import PreventUpdate
 import numpy as np
 
 from vol_calibration import jkm_batch, ttf_batch
+from options.vol_calibration.calibration import ttf_candidates
 from vol_calibration.components import comparison_modal, smile_grid
 from vol_calibration.components.parameter_table import create_parameter_table
 from vol_calibration.model_version import DEFAULT_CALIBRATION_MODEL_VERSION
@@ -53,7 +54,7 @@ def test_product_edits_restore_only_for_the_same_session_product_and_cob():
 
 
 def test_all_smile_visuals_pass_wing_v2_explicitly(monkeypatch):
-    from options.calibration_engine.models import wing_model
+    from options.vol_calibration import api as wing_model
 
     model_versions = []
 
@@ -166,7 +167,7 @@ def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch)
         raising=False,
     )
     monkeypatch.setattr(
-        ttf_batch,
+        ttf_candidates,
         "fit_ttf_hybrid_candidate",
         lambda observations, initial_params, **kwargs: {
             "params": initial_params,
@@ -190,7 +191,7 @@ def test_batch_auto_save_cannot_create_a_store_when_writes_disabled(monkeypatch)
             "expiry": expiry,
             "option_expiration_date": pd.Timestamp("2026-08-27"),
             "forward": 1.0,
-            "strike": np.nan,
+            "strike": np.linspace(2.0, 0.5, len(deltas)),
             "iv": np.linspace(0.30, 0.24, len(deltas)),
             "delta": deltas,
             "dte": 50.0,

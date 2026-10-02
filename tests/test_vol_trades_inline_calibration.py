@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-from options.calibration_engine.io import loaders
 
 from pages import brent_vol_history as history
 import vol_trades_data as market_data
@@ -67,7 +66,8 @@ def test_context_mapping_pins_exact_sources_and_one_shared_hh_publication(monkey
     publication_calls = []
     lne_calls = []
 
-    def fake_publication(_engine, cob_date, *, commodity, as_of, require_exact_cob=False):
+    def fake_publication(_engine, cob_date, *, commodity, as_of, require_exact_cob=False, prefer_exact_cob=False, include_surface=True):
+        assert prefer_exact_cob is True and include_surface is False
         publication_calls.append((cob_date, commodity, as_of, require_exact_cob))
         return {
             "publication_id": f"active-{commodity.lower()}",
@@ -163,7 +163,8 @@ def test_jkm_loader_is_exact_cob_and_never_requests_synthetic_fallback(monkeypat
             "last_update": pd.Timestamp("2026-08-28T18:00:00Z"),
         }
 
-    monkeypatch.setattr(loaders, "load_market_data_with_metadata", fake_loader)
+    from options.vol_calibration import api
+    monkeypatch.setattr(api, "load_market_data_with_metadata", fake_loader)
 
     loaded, metadata = market_data.load_jkm_official_market("2026-08-28")
 

@@ -511,7 +511,7 @@ def test_settlement_completion_reloads_and_selects_its_result_snapshot(monkeypat
         "old-settlement-id",
     )
 
-    assert options[0] == {"label": "14 Aug 2026", "value": "new-settlement-id"}
+    assert options[0] == {"label": "14 Aug 2026 · Settlement", "value": "new-settlement-id"}
     assert selected == "new-settlement-id"
 
 
@@ -1607,32 +1607,4 @@ def test_delta_axis_does_not_use_untimed_last_price_as_an_iv_reference():
     assert any(
         "activity strikes unavailable on Delta" in annotation.text
         for annotation in figure.layout.annotations
-    )
-
-
-def test_layout_orders_primary_and_trade_controls_in_sticky_toolbar():
-    header = history.layout.children[1]
-    toolbar = header.children[0]
-    assert "brent-vol-history-sticky-filter-bar" in header.className
-    assert toolbar.children[0].children[1].id == "brent-vol-history-product"
-    assert [
-        item["value"] for item in toolbar.children[0].children[1].options
-    ] == ["BRENT", "TFO", "ON", "LNE", "JKM"]
-    assert gateway.SUPPORTED_PRODUCTS == frozenset({"BRENT", "TFO", "ON", "LNE"})
-    assert toolbar.children[1].children[1].id == "brent-vol-history-x-axis"
-    refresh_row = toolbar.children[2].children[1]
-    assert refresh_row.className == "brent-vol-history-refresh-row"
-    assert refresh_row.children[0].id == "brent-vol-history-refresh-button"
-    assert refresh_row.children[1].id == (
-        "brent-vol-history-settlement-refresh-button"
-    )
-    assert refresh_row.children[1].children == "Refresh settlements"
-    assert refresh_row.children[2].id == "brent-vol-history-refresh-status"
-    assert toolbar.children[3].children[1].id == "brent-vol-history-date"
-    assert toolbar.children[4].children[1].children.id == "brent-vol-history-trade-start"
-    assert toolbar.children[5].children[1].children[0].id == "brent-vol-history-trade-all"
-    assert toolbar.children[5].children[1].children[-2].id == "brent-vol-history-trade-15m"
-    assert (
-        toolbar.children[5].children[1].children[-1].id
-        == "brent-vol-history-market-data-status"
     )

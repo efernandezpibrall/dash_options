@@ -34,6 +34,8 @@ from vol_calibration.ttf_hybrid_surface import (
 )
 from vol_calibration.pages import ttf
 from vol_calibration import ttf_hybrid_surface as hybrid_module
+from vol_calibration import observed_fit_pool
+from options.vol_calibration.models import gas_hybrid_fit, gas_hybrid
 from vol_calibration.components.smile_grid import create_smile_grid_figure
 
 
@@ -77,7 +79,7 @@ def test_expanded_retry_reuses_failed_deterministic_starts(monkeypatch):
             "message": "No finite candidate",
         })()
 
-    monkeypatch.setattr(hybrid_module, "minimize", failed_minimize)
+    monkeypatch.setattr(gas_hybrid_fit, "minimize", failed_minimize)
     observations = _hybrid_observations()
     initial = get_defaults("TTF")
     with pytest.raises(hybrid_module.HybridFitNoCandidate) as first:
@@ -132,8 +134,8 @@ def test_parallel_start_collection_preserves_ordered_retry_attempts(monkeypatch)
         })()
 
     monkeypatch.setenv("GAS_START_WORKERS", "4")
-    monkeypatch.setattr(hybrid_module, "ProcessPoolExecutor", InlinePool)
-    monkeypatch.setattr(hybrid_module, "minimize", failed_minimize)
+    monkeypatch.setattr(observed_fit_pool, "ProcessPoolExecutor", InlinePool)
+    monkeypatch.setattr(gas_hybrid_fit, "minimize", failed_minimize)
     observations = _hybrid_observations()
     initial = get_defaults("TTF")
     with pytest.raises(hybrid_module.HybridFitNoCandidate) as first:
@@ -168,8 +170,8 @@ def test_start_pool_failure_runs_the_original_serial_starts(monkeypatch):
         })()
 
     monkeypatch.setenv("GAS_START_WORKERS", "4")
-    monkeypatch.setattr(hybrid_module, "ProcessPoolExecutor", unavailable_pool)
-    monkeypatch.setattr(hybrid_module, "minimize", failed_minimize)
+    monkeypatch.setattr(observed_fit_pool, "ProcessPoolExecutor", unavailable_pool)
+    monkeypatch.setattr(gas_hybrid_fit, "minimize", failed_minimize)
     with pytest.raises(hybrid_module.HybridFitNoCandidate) as failure:
         hybrid_module.fit_ttf_hybrid_candidate(
             _hybrid_observations(), get_defaults("TTF"), n_starts=3, seed=42
@@ -225,7 +227,7 @@ def test_optional_solver_stage_timing_preserves_fit_output(monkeypatch, caplog):
     monkeypatch.delenv("CALIBRATION_TIMING", raising=False)
     baseline = fit_ttf_hybrid_candidate(observations, initial, n_starts=1)
     monkeypatch.setenv("CALIBRATION_TIMING", "1")
-    with caplog.at_level(logging.INFO, logger=hybrid_module.__name__):
+    with caplog.at_level(logging.INFO, logger=gas_hybrid.__name__):
         timed = fit_ttf_hybrid_candidate(observations, initial, n_starts=1)
 
     assert timed["params"] == baseline["params"]
