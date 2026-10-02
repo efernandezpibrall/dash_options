@@ -1451,8 +1451,8 @@ def update_expiry_layer_visibility(selected_layers, manifest, graph_ids):
     Input("brent-vol-history-expiry-layer-manifest", "data"),
     Input("brent-vol-history-trade-window-state", "data"),
     Input("brent-vol-history-expiry-layers", "value"),
+    Input({"type": "brent-vol-history-expiry-graph", "expiry": ALL, "generation": ALL}, "id"),
     State("brent-vol-history-x-axis", "value"),
-    State({"type": "brent-vol-history-expiry-graph", "expiry": ALL, "generation": ALL}, "id"),
     State({"type": "brent-vol-history-expiry-graph", "expiry": ALL, "generation": ALL}, "relayoutData"),
     State("brent-vol-history-ice-overlay-revisions", "data"),
     prevent_initial_call=True,
@@ -1460,7 +1460,7 @@ def update_expiry_layer_visibility(selected_layers, manifest, graph_ids):
 def render_ice_quote_overlays(
     quote_snapshot, contract, option_type, strike, sender, source_channel,
     status, positive_only, history_snapshot, manifest, window, selected_layers,
-    x_axis, graph_ids, relayout_data, previous_revisions,
+    graph_ids, x_axis, relayout_data, previous_revisions,
 ):
     if not window:
         return [no_update for _ in (graph_ids or [])], "Loading the market window", no_update
@@ -1651,7 +1651,8 @@ def update_trade_window(market_window, detail_expiry, snapshot_reference, figure
                 figure_updates.append(no_update)
                 continue
             payloads = tape_views.trade_trace_payloads(
-                filtered, pd.Timestamp(expiry_value), chart_data._normalize_x_axis(x_axis)
+                filtered, pd.Timestamp(expiry_value), chart_data._normalize_x_axis(x_axis),
+                volume_reference=tape,
             )
             patch = Patch()
             for index, trace in enumerate(figure.get("data") or []):
@@ -1664,6 +1665,7 @@ def update_trade_window(market_window, detail_expiry, snapshot_reference, figure
                 patch["data"][index]["customdata"] = payload["customdata"]
                 patch["data"][index]["marker"]["size"] = payload["size"]
                 patch["data"][index]["marker"]["symbol"] = payload["symbol"]
+                patch["data"][index]["marker"]["opacity"] = payload["opacity"]
                 patch["data"][index]["marker"]["line"]["color"] = payload["line_color"]
                 patch["data"][index]["marker"]["line"]["width"] = payload["line_width"]
             figure_updates.append(patch)

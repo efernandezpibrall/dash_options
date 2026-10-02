@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import vol_trades_data as market_data
+from options.trade_marker_opacity import trade_volume_opacities
 
 
 
@@ -81,11 +82,13 @@ def trade_trace_payloads(
     trade_tape: pd.DataFrame,
     expiry: pd.Timestamp,
     x_axis: str,
+    *,
+    volume_reference: pd.DataFrame | None = None,
 ) -> dict[str, dict[str, Any]]:
     empty = {
         side: {
             "x": [], "y": [], "customdata": [], "size": [], "symbol": [],
-            "line_color": [], "line_width": [],
+            "line_color": [], "line_width": [], "opacity": [],
         }
         for side in ("C", "P")
     }
@@ -106,7 +109,8 @@ def trade_trace_payloads(
     )
     if selected.empty:
         return empty
-    latest_at = pd.to_datetime(selected["trade_at"], errors="coerce", utc=True).max()
+    reference = trade_tape if volume_reference is None else volume_reference
+    reference_sizes = reference.get("trade_size", pd.Series(dtype=float))
     selected["trade_time_gst"] = pd.to_datetime(
         selected["trade_at"], errors="coerce", utc=True
     ).dt.tz_convert("Asia/Dubai").dt.strftime("%H:%M:%S GST")
@@ -116,12 +120,13 @@ def trade_trace_payloads(
         if side.empty:
             continue
         sizes = pd.to_numeric(side["trade_size"], errors="coerce")
-        marker_sizes = (6.0 + 1.8 * np.sqrt(sizes.fillna(0.0).clip(lower=0.0))).clip(
-            upper=14.0
-        )
+        size_labels = [
+            f"{value:,.0f}" if pd.notna(value) and np.isfinite(value) and value > 0
+            else "Size unavailable"
+            for value in sizes
+        ]
         source = side["future_match_source"].fillna("").astype(str).str.upper()
         source_labels = source.map(chart_data._trade_match_source_label)
-        event_times = pd.to_datetime(side["trade_at"], errors="coerce", utc=True)
         future_bid_times = side.get(
             "future_bid_at", pd.Series(pd.NaT, index=side.index)
         )
@@ -134,7 +139,6 @@ def trade_trace_payloads(
                 side["trade_at"], future_bid_times, future_ask_times
             )
         ]
-        most_recent = event_times.eq(latest_at)
         result[put_call] = {
             "x": side["_axis_x"].astype(float).tolist(),
             "y": (100.0 * pd.to_numeric(side["trade_iv"], errors="coerce")).tolist(),
@@ -145,18 +149,14 @@ def trade_trace_payloads(
                     source_labels, side["future_match_lag_ms"],
                     quote_age_labels,
                     side["condition_codes"].fillna("regular"),
+                    size_labels,
                 ]
             ).tolist(),
-            "size": marker_sizes.astype(float).tolist(),
-            "symbol": source.map(
-                {
-                    "QUOTE_MID": "circle",
-                    "PREVAILING_MID": "circle-open",
-                    "TRADE": "diamond-open",
-                }
-            ).fillna("circle-open").tolist(),
-            "line_color": np.where(most_recent, "#F97316", "#FFFFFF").tolist(),
-            "line_width": np.where(most_recent, 2.4, 0.7).astype(float).tolist(),
+            "size": [5 if put_call == "C" else 6] * len(side),
+            "symbol": ["circle" if put_call == "C" else "circle-open"] * len(side),
+            "opacity": trade_volume_opacities(sizes, reference_volumes=reference_sizes),
+            "line_color": ["#FFFFFF" if put_call == "C" else "#0F766E"] * len(side),
+            "line_width": [0.5 if put_call == "C" else 1.0] * len(side),
         }
     return result
 
@@ -241,4 +241,3 @@ def _trade_slider_config(
         for value in mark_values
     }
     return 0, maximum, value, marks, trade_tape is None or trade_tape.empty
-

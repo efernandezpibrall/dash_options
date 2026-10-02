@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from vol_trades_workspace import chart_data, quote_charts
 
-import math
 from html import escape
 import numpy as np
 import pandas as pd
@@ -112,7 +111,6 @@ def ice_quote_overlay_points(
                     omitted += 1
                     diagnostics["missing_delta"] = diagnostics.get("missing_delta", 0) + 1
                     continue
-            age_hours = max(0.0, math.floor((cutoff - observed).total_seconds() / 60.0) / 60.0)
             time_label = observed.tz_convert("Asia/Dubai").strftime("%d %b %Y %H:%M:%S GST")
             sender = escape(str(row.get("sender_handle") or "—"))
             channel = escape(str(row.get("source_channel") or "—"))
@@ -120,11 +118,15 @@ def ice_quote_overlay_points(
             publication = escape(str(row.get("surface_publication_id") or "—"))
             forward_source = escape(str(row.get("forward_source") or "—"))
             label = ICE_QUOTE_LAYERS[layer][0].replace("_", " ").title()
+            size_field = {"bid": "bid_size", "offer": "offer_size", "single_price": "single_size"}[price_field]
+            quoted_size = market_data._numeric_or_none(row.get(size_field))
+            size_label = f"{quoted_size:,.0f}" if quoted_size is not None and quoted_size > 0 else "Size unavailable"
             hover = (
                 f"<b>ICE {label} · {'Call' if side == 'C' else 'Put'}</b>"
                 f"<br>{time_label}<br>Strike {strike:.2f}"
                 f" · Premium {price:.4f} {escape(str(row.get('price_unit_label') or market_data._product_spec(snapshot.get('product'))['price_unit']))}"
                 f"<br>IV {100.0 * iv:.2f}% · Sender {sender}"
+                f"<br>Quoted size {size_label}"
                 f"<br>Channel {channel} · Surface COB {surface}"
                 f"<br>Forward {escape(str(row.get('forward') or '—'))} · {forward_source}"
                 f"<br>Publication {publication} · Quote event {escape(str(row.get('event_id') or '—'))}"
@@ -132,7 +134,7 @@ def ice_quote_overlay_points(
             empty[layer]["x"].append(float(x))
             empty[layer]["y"].append(100.0 * iv)
             empty[layer]["text"].append(hover)
-            empty[layer]["opacity"].append(max(0.70, 0.95 - age_hours / 24.0))
+            empty[layer]["opacity"].append(0.85)
             symbol = {"ice-bid": "triangle-down", "ice-offer": "triangle-up", "ice-single": "diamond"}[layer]
             empty[layer]["symbol"].append(symbol + ("-open" if side == "P" else ""))
     return empty, omitted
@@ -203,7 +205,7 @@ def update_ice_quote_overlays(
                 for symbol in data["symbol"]
             ]
             patch["data"][index]["marker"]["line"]["width"] = [
-                2 if symbol.endswith("-open") else 1
+                1 if symbol.endswith("-open") else 0.5
                 for symbol in data["symbol"]
             ]
             patch["data"][index]["visible"] = layer in selected

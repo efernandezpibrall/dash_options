@@ -319,7 +319,8 @@ def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
     bid_trace = next(trace for trace in figure.data if trace.name == "Sell to bid")
     assert list(bid_trace.y) == [1.0]
     assert bid_trace.marker.color == "#b42318"
-    assert list(bid_trace.marker.size) == [13]
+    assert list(bid_trace.marker.size) == [6]
+    assert bid_trace.marker.opacity == 0.85
     assert figure.layout.height == 320
     assert figure.layout.yaxis.title.text == "Broker IV minus our mark (vol pts)"
     assert figure.layout.xaxis.title.text is None

@@ -114,10 +114,13 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
                 y.append(100 * point["volatility"])
                 symbols.append(symbol + ("-open" if row["option_type"] == "P" else ""))
                 stamp = utc_timestamp(row["observed_at"]).tz_convert("Asia/Dubai").strftime("%d %b %H:%M:%S GST")
+                quoted_size = pd.to_numeric(row.get({"bid": "bid_size", "offer": "offer_size", "single": "single_size"}[side]), errors="coerce")
+                size_label = f"{quoted_size:,.0f}" if pd.notna(quoted_size) and quoted_size > 0 else "Size unavailable"
                 text.append(
                     f"<b>ICE {side} · {escape(label)} · {'Put' if row['option_type'] == 'P' else 'Call'}</b>"
                     f"<br>{stamp} · Strike {float(row['strike']):.2f}"
                     f"<br>Premium {point['price']:.4f} EUR/MWh · Equivalent IV {100 * point['volatility']:.2f}%"
+                    f"<br>Quoted size {size_label}"
                     f"<br>Our equivalent IV {100 * row['our_volatility']:.2f}%"
                     f"<br>Forward {float(row['forward']):.3f} EUR/MWh"
                     f"<br>Sender {escape(str(row.get('sender_handle') or '—'))} · {escape(str(row.get('source_channel') or '—'))}"
@@ -138,11 +141,11 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
                 marker={
                     "color": color,
                     "symbol": symbols,
-                    "size": 8,
-                    "opacity": 0.95,
+                    "size": 6,
+                    "opacity": 0.85,
                     "line": {
                         "color": [color if value.endswith("-open") else "#FFFFFF" for value in symbols],
-                        "width": [2 if value.endswith("-open") else 1 for value in symbols],
+                        "width": [1 if value.endswith("-open") else 0.5 for value in symbols],
                     },
                 },
             )

@@ -10,6 +10,7 @@ import json
 import hashlib
 from html import escape
 from typing import Any
+from uuid import uuid4
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -463,7 +464,7 @@ def build_expiry_figure(
                         if put_call == "C"
                         else "rgba(15,118,110,0.14)"
                     ),
-                    line={"color": side_colors[put_call], "width": 0.7},
+                    line={"color": side_colors[put_call], "width": 0},
                     hoverinfo="skip",
                 ),
                 secondary_y=False,
@@ -543,6 +544,7 @@ def build_expiry_figure(
                             "color": side_colors[put_call],
                             "size": payload["size"],
                             "symbol": payload["symbol"],
+                            "opacity": payload["opacity"],
                             "line": {
                                 "color": payload["line_color"],
                                 "width": payload["line_width"],
@@ -554,7 +556,7 @@ def build_expiry_figure(
                             "<br>Strike %{customdata[0]:.2f}"
                             + axis_hover
                             + " · IV <b>%{y:.2f}%</b>"
-                            "<br>Trade <b>%{customdata[1]:.4f} × %{customdata[2]:,.0f}</b>"
+                            "<br>Trade <b>%{customdata[1]:.4f} × %{customdata[9]}</b>"
                             " · %{customdata[3]}"
                             f"<br>{underlying_hover_label} %{{customdata[4]:.3f}}"
                             " · %{customdata[5]} · %{customdata[6]:.0f} ms"
@@ -605,7 +607,16 @@ def build_expiry_figure(
                         name="New matched trade IV",
                         legendrank=20,
                         meta={"legend_layer": "trades"},
-                        marker={"color": "#F97316", "size": 9, "symbol": "diamond"},
+                        marker={
+                            "color": ["#2563EB" if side == "C" else "#0F766E" for side in matched_trades["put_call"]],
+                            "size": [5 if side == "C" else 6 for side in matched_trades["put_call"]],
+                            "symbol": ["circle" if side == "C" else "circle-open" for side in matched_trades["put_call"]],
+                            "opacity": 0.55,
+                            "line": {
+                                "color": ["#FFFFFF" if side == "C" else "#0F766E" for side in matched_trades["put_call"]],
+                                "width": [0.5 if side == "C" else 1.0 for side in matched_trades["put_call"]],
+                            },
+                        },
                         customdata=np.column_stack(
                             [
                                 matched_trades["strike"],
@@ -637,6 +648,7 @@ def build_expiry_figure(
                             + " · IV <b>%{y:.2f}%</b>"
                             "<br>%{customdata[7]} · Trade %{customdata[1]:.4f}"
                             " · %{customdata[2]}"
+                            "<br>Executed size unavailable"
                             f"<br>{underlying_hover_label} %{{customdata[3]:.3f}}"
                             " · %{customdata[4]} · %{customdata[5]:.0f} ms"
                             "<br>Volume / OI <b>%{customdata[8]} / %{customdata[9]}</b>"
@@ -973,8 +985,9 @@ def build_expiry_figure(
                 go.Scatter(
                     x=[], y=[], mode="markers", name=label,
                     meta={"legend_layer": layer, "role": "ice-chat-quote"},
-                    marker={"color": color, "symbol": symbol, "size": 11,
-                            "line": {"color": "#ffffff", "width": 1}},
+                    marker={"color": color, "symbol": symbol, "size": 6,
+                            "opacity": 0.85,
+                            "line": {"color": "#ffffff", "width": 0.5}},
                     hovertemplate="%{text}<extra></extra>",
                     showlegend=False,
                 ),
@@ -1117,7 +1130,10 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
 
 
 def _stamp_plot_generation(cards, *, snapshot_id, product, x_axis, publication_id, icap_revision=None):
-    identity = json.dumps([snapshot_id, product, x_axis, publication_id, icap_revision])
+    # A rebuilt base figure has empty ICE traces. Give that render a fresh identity
+    # so overlay deduplication cannot reuse a patch applied to the previous figure.
+    # Plotly's uirevision remains the market identity used to retain axis choices.
+    identity = json.dumps([snapshot_id, product, x_axis, publication_id, icap_revision, uuid4().hex])
     generation = hashlib.sha256(identity.encode()).hexdigest()[:20]
     for graph in _plot_card_graphs(cards):
         graph.id = {**dict(graph.id), "generation": generation}
@@ -1224,24 +1240,24 @@ EXPIRY_LEGEND_LAYER_SPECS = {
         "group": "iv",
         "swatch": "brent-vol-history-legend-trade",
         "description": (
-            "Show or hide trade-time volatility; filled markers are exact "
-            "midpoints and hollow markers are prevailing midpoints"
+            "Show or hide Bloomberg trade-time volatility; filled: call · hollow: put · "
+            "darker: larger executed volume. Underlying-price matching is shown in hover."
         ),
     },
     "ice-bid": {
         "label": "ICE bid", "group": "iv",
         "swatch": "brent-vol-history-legend-ice-bid",
-        "description": "Show ICE Chat bid implied volatility quotes",
+        "description": "Show ICE Chat bid implied volatility quotes; filled: call · hollow: put · fixed opacity",
     },
     "ice-offer": {
         "label": "ICE offer", "group": "iv",
         "swatch": "brent-vol-history-legend-ice-offer",
-        "description": "Show ICE Chat offer implied volatility quotes",
+        "description": "Show ICE Chat offer implied volatility quotes; filled: call · hollow: put · fixed opacity",
     },
     "ice-single": {
         "label": "ICE single", "group": "iv",
         "swatch": "brent-vol-history-legend-ice-single",
-        "description": "Show ICE Chat single-price implied volatility quotes",
+        "description": "Show ICE Chat single-price implied volatility quotes; filled: call · hollow: put · fixed opacity",
     },
     "prior-settlement": {
         "label": "Prior settle",

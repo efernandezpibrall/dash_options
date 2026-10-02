@@ -142,12 +142,12 @@ def build_all_quotes_figure(frame: pd.DataFrame) -> go.Figure:
             "triangle-up",
         ),
         (
-            "TRADE",
+            "ICE single price",
             "single_iv_deviation_pp",
             "single_price",
             "single_iv_pct",
             "#6941c6",
-            "circle",
+            "diamond",
         ),
     )
     working = frame.copy()
@@ -158,11 +158,14 @@ def build_all_quotes_figure(frame: pd.DataFrame) -> go.Figure:
             continue
         edge_values = pd.to_numeric(iv_subset[iv_column], errors="coerce")
         visible_edges.extend(edge_values.dropna().astype(float).tolist())
-        observed_times = pd.to_datetime(iv_subset["observed_at"], utc=True, errors="coerce")
-        marker_sizes = [10] * len(iv_subset)
-        if observed_times.notna().any():
-            latest_position = int(observed_times.reset_index(drop=True).idxmax())
-            marker_sizes[latest_position] = 13
+        symbols = [
+            symbol + ("-open" if side == "P" else "")
+            for side in iv_subset["option_type"]
+        ]
+        size_field = {"bid": "bid_size", "offer": "offer_size", "single_price": "single_size"}[quote_column]
+        sizes = iv_subset.get(size_field, pd.Series(index=iv_subset.index, dtype=float))
+        sizes = pd.to_numeric(sizes, errors="coerce")
+        size_labels = sizes.map(lambda value: "Size unavailable" if pd.isna(value) or value <= 0 else f"{value:,.0f}")
         custom = iv_subset[
             [
                 "product_label",
@@ -180,6 +183,7 @@ def build_all_quotes_figure(frame: pd.DataFrame) -> go.Figure:
                 "outbound_status",
             ]
         ].fillna("—")
+        custom["quoted_size"] = size_labels
         figure.add_trace(
             go.Scatter(
                 x=iv_subset["observed_at"],
@@ -188,10 +192,13 @@ def build_all_quotes_figure(frame: pd.DataFrame) -> go.Figure:
                 name=name,
                 marker={
                     "color": color,
-                    "symbol": symbol,
-                    "size": marker_sizes,
-                    "opacity": 0.9,
-                    "line": {"color": "#ffffff", "width": 1.5},
+                    "symbol": symbols,
+                    "size": [6] * len(iv_subset),
+                    "opacity": 0.85,
+                    "line": {
+                        "color": [color if value.endswith("-open") else "#ffffff" for value in symbols],
+                        "width": [1 if value.endswith("-open") else 0.5 for value in symbols],
+                    },
                 },
                 cliponaxis=False,
                 customdata=custom,
@@ -200,6 +207,7 @@ def build_all_quotes_figure(frame: pd.DataFrame) -> go.Figure:
                     "%{x|%d %b %Y · %H:%M:%S UTC}<br><br>"
                     + name + " edge: <b>%{y:+.2f} vol pts</b><br>"
                     "Broker quote: %{customdata[5]} %{customdata[4]} · %{customdata[7]}% IV<br>"
+                    "Quoted size: %{customdata[13]}<br>"
                     "Our mark: %{customdata[6]} %{customdata[4]} · %{customdata[8]}% IV<br>"
                     "Forward: %{customdata[9]} · Sender: %{customdata[11]}<br>"
                     "Surface: %{customdata[10]} · Delivery: %{customdata[12]}"
