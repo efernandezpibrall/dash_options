@@ -693,14 +693,21 @@ def test_source_status_moves_inline_on_current_state_pages_without_weakening_ali
     assert 'dashboard-source-status-banner-hidden' in brent_class.split()
 
     brent_inline = index_options.render_brent_vol_history_source_status(
-        statuses,
-        True,
+        {
+            'business_date': '2026-10-01',
+            'snapshot_kind': 'SETTLEMENT',
+            'calibration_status': 'available',
+            'calibration': {
+                'cob_date': '2026-10-01',
+                'published_at': '2026-10-02T06:19:00Z',
+            },
+        },
     )
-    assert brent_inline.children[1].children == 'Stale data'
-    assert brent_inline.children[2].children[0].children == 'Vol: '
-    assert brent_inline.children[2].children[1] == '30 Jul'
-    assert brent_inline.children[3].children[0].children == 'Curves: '
-    assert 'greeks-source-status-content' in brent_inline.className.split()
+    assert len(brent_inline.children) == 2
+    assert brent_inline.children[0].children[0].children == 'Calibration: '
+    assert brent_inline.children[0].children[1] == '2026-10-01 · 02 Oct 2026 10:19 GST'
+    assert brent_inline.children[1].children[0].children == 'Curves: '
+    assert brent_inline.children[1].children[1] == '2026-10-01 · Settlement'
     assert getattr(brent_inline, 'role') == 'status'
 
     shown_content, shown_class, shown_row_class = (

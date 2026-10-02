@@ -7911,36 +7911,32 @@ button:hover {
     display: none;
 }
 
-.brent-vol-history-market-data-status .greeks-source-status-content {
+.brent-vol-history-source-cards {
+    display: flex;
     flex-wrap: wrap;
-    gap: 6px;
-    width: auto;
-    height: auto;
-    min-height: 24px;
-    padding: 3px 6px;
-    border-radius: 5px;
-    box-sizing: border-box;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
     font-size: 11px;
 }
 
-.brent-vol-history-market-data-status .dashboard-source-status-headline,
-.brent-vol-history-market-data-status .dashboard-source-status-chip {
-    flex: 0 0 auto;
+.brent-vol-history-source-card {
+    flex: 0 1 auto;
+    max-width: 100%;
+    min-width: 0;
     margin: 0;
-    white-space: nowrap;
+    padding: 6px 8px;
+    border: 1px solid #dbe4ef;
+    border-radius: 5px;
+    background: #f8fafc;
+    color: #334155;
+    line-height: 16px;
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
 }
 
 .brent-vol-history-product-options > label.dash-radioitems-inline {
     margin-right: 0;
-}
-
-.brent-vol-history-market-data-status .dashboard-source-status-chip {
-    padding: 2px 4px;
-    font-variant-numeric: tabular-nums;
-}
-
-.brent-vol-history-market-data-status .greeks-source-status-icon {
-    display: none;
 }
 
 .brent-vol-history-detail-header h2 {

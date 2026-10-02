@@ -68,6 +68,42 @@ def source_revision_event(product, cob_date, refresh_source):
     return event
 
 
+def render_toolbar_sources(snapshot: dict[str, Any] | None):
+    """Show the calibration and forward snapshot used by the selected charts."""
+    snapshot = snapshot or {}
+    calibration = snapshot.get('calibration') or {}
+    calibration_cob = _date(calibration.get('cob_date'))
+    publication = pd.to_datetime(calibration.get('published_at'), errors='coerce', utc=True)
+    calibration_detail = 'unavailable'
+    if calibration_cob and snapshot.get('calibration_status') == 'available':
+        published = (publication.tz_convert('Asia/Dubai').strftime('%d %b %Y %H:%M GST')
+                     if not pd.isna(publication) else 'publication time unavailable')
+        calibration_detail = f'{calibration_cob} · {published}'
+    curve_cob = _date(snapshot.get('business_date'))
+    curve_kind = {
+        'SETTLEMENT': 'Settlement',
+        'INTRADAY': 'Intraday',
+        'OFFICIAL_COB': 'Settlement',
+    }.get(snapshot.get('snapshot_kind'), 'source unavailable')
+    curve_detail = f'{curve_cob} · {curve_kind}' if curve_cob else 'unavailable'
+    return html.Div(
+        [
+            html.Div(
+                [html.Strong('Calibration: '), calibration_detail],
+                className='brent-vol-history-source-card',
+                title=f"Publication {calibration.get('publication_id') or 'unavailable'}",
+            ),
+            html.Div(
+                [html.Strong('Curves: '), curve_detail],
+                className='brent-vol-history-source-card',
+            ),
+        ],
+        className='brent-vol-history-source-cards',
+        role='status',
+        **{'aria-live': 'polite'},
+    )
+
+
 def render_provenance(snapshot: dict[str, Any] | None):
     if not snapshot:
         return html.Div('Select a market snapshot to verify source dates.'), {'display': 'none'}

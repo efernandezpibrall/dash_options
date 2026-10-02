@@ -527,13 +527,11 @@ def render_trades_dashboard_source_status(statuses, _mounted):
 
 @app.callback(
     Output('brent-vol-history-market-data-status', 'children'),
-    Input('dashboard-source-status-store', 'data'),
-    Input('brent-vol-history-source-status-mount', 'data'),
+    Input('brent-vol-history-snapshot', 'data'),
 )
-def render_brent_vol_history_source_status(statuses, _mounted):
-    if not statuses:
-        return None
-    return _build_dashboard_source_status(statuses, compact=True)
+def render_brent_vol_history_source_status(snapshot):
+    from vol_trades_provenance import render_toolbar_sources
+    return render_toolbar_sources(snapshot)
 
 # Callback to handle page routing
 @app.callback(

@@ -280,6 +280,7 @@ def build_layout(ice_quotes_layout):
                             html.Div(
                                 id="ice-chat-overlay-status", role="status",
                                 className="brent-vol-history-ice-overlay-status",
+                                hidden=True,
                             ),
                         ],
                         className=(
@@ -288,7 +289,7 @@ def build_layout(ice_quotes_layout):
                             "brent-vol-history-expiry-section-header"
                         ),
                     ),
-                    html.Div(id="vol-trades-provenance", role="status", **{"aria-live": "polite"}),
+                    html.Div(id="vol-trades-provenance", hidden=True),
                     html.Div(
                         dcc.Checklist(id="vol-trades-icap-prior", value=[],
                                       options=[{"label": "Compare prior ICAP date (if selected date is unavailable)",
