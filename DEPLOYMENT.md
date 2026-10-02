@@ -1,5 +1,26 @@
 # Deployment
 
+## Pending volatility refactor candidate
+
+The 1.3.1 candidate completed verification. Its 1.3.2 follow-up cleanup uses the
+same version-3 job/checkpoint schemas and strict database errors in required
+worker paths. Its current acceptance record is
+`options/docs/vol_calibration_cleanup.md`, with separate evidence under
+`options/outputs/vol_calibration_cleanup_20261002/`. Neither candidate has been
+deployed by this refactor task; a rollout must reconcile the current ICE release.
+
+Analytics 1.3.1 is a separate candidate paired with the dashboard job payload/type
+version 3 and numerical checkpoint schema 3. The version-3 input identity retains
+exact floating-point values, row order and schema. Old jobs/checkpoints are rejected
+and require resubmission; before switching a release, finish or cancel old jobs
+through their original owner controls. Persisted publication identifiers are
+unchanged. No production switch is part of the refactor implementation.
+
+Use the candidate wheel digest, source/dependency manifest and rollback record from
+`options/outputs/vol_calibration_refactor_20261001/` after its gates pass; the older
+release digests below identify their recorded releases and must not be reused for
+the new wheel. Refer to `vol_calibration/MIGRATION.md` for coordinated acceptance.
+
 The first supported deployment is read-only calibration, comparison, and
 export. Database writes, approval, publication, and background workers are
 disabled unless their feature flags are explicitly enabled.

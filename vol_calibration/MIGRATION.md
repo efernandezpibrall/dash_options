@@ -1,5 +1,27 @@
 # Vol Calibration migration
 
+## Refactor candidate 1.3.1
+
+Candidate verification is complete for 1.3.1. The 1.3.2 cleanup retains the same
+public operations and job/checkpoint schema 3 while enabling strict database
+errors for required worker setup. Follow
+`options/docs/vol_calibration_cleanup.md` for that artifact's current verification
+status; the earlier reports below retain their original release scope.
+
+The coordinated analytics candidate moves selected-expiry operations to explicit
+owners and shares chronological TTF/JKM orchestration. Public API operations and
+editable-table/export formatting are retained. Numeric checkpoint schema 3 and
+job payload/type version 3 use exact typed input identities; schema-2 checkpoints
+and jobs must be resubmitted under the new implementation. Do not transfer a live
+lease between these versions. Before a later rollout, finish or cancel old jobs
+using their original release and owner controls, then switch the paired artifacts.
+Existing publication identifiers and legacy publication fingerprints stay readable.
+
+The candidate requires complete installed-product replay, isolated publication and
+worker readbacks, hydrated browser/export checks, paired artifact identity and a
+rollback record. It is not a production deployment. Its evidence is kept separately
+in the options repository under `outputs/vol_calibration_refactor_20261001/`.
+
 ## Shared analytics extraction, October 2026
 
 The numerical implementation is consolidated into the separately installed

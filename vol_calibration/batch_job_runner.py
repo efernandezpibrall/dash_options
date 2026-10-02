@@ -39,8 +39,8 @@ from vol_calibration.feature_flags import gas_batch_jobs_enabled
 from vol_calibration.ttf_market_context import load_ttf_trading_context
 
 
-JOB_TYPE = "gas_settlement_batch_v2"
-JOB_PAYLOAD_SCHEMA_VERSION = 2
+JOB_TYPE = "gas_settlement_batch_v3"
+JOB_PAYLOAD_SCHEMA_VERSION = 3
 LEASE_SECONDS = 300
 _DASH_ROOT = Path(__file__).resolve().parents[1]
 _CODE_FILES = (
@@ -68,7 +68,7 @@ def background_jobs_enabled() -> bool:
 
 @lru_cache(maxsize=4)
 def _repository_for_source(_source_fingerprint: str) -> PostgresJobRepository:
-    engine = get_database_engine()
+    engine = get_database_engine(strict=True)
     if engine is None:
         raise RuntimeError("Calibration database is unavailable.")
     return PostgresJobRepository(engine)
@@ -439,7 +439,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Run one durable gas calibration batch")
     parser.add_argument("job_id", type=UUID)
     args = parser.parse_args(argv)
-    engine = get_database_engine()
+    engine = get_database_engine(strict=True)
     if engine is None:
         raise RuntimeError("Calibration database is unavailable.")
     repo = PostgresJobRepository(engine)
