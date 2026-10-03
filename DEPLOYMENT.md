@@ -1,6 +1,22 @@
 # Deployment
 
-## Pending volatility refactor candidate
+## Coordinated 1.3.3 Brent publication release
+
+Use analytics **1.3.3** and ICEchat **0.1.1** with the dashboard artifact at
+`~/.local/share/brent-surface-release/1.3.3-governed-brent-20261003/`.
+Its `staging_manifest.json` records dashboard files, analytics wheel digest,
+dependency lock and release tools. The ICE wheel is recorded separately in the
+same release manifest. `options/docs/governed_brent_quotes.md` defines the new
+Brent reader, forward provenance and historical cutoff contract.
+
+Install the built wheels into the release's dedicated environment. Validate
+installed contents outside the source checkout with the paired-release checker;
+do not reuse wheel digests from the historical build examples below. Use this
+release's start/switch/rollback controls only after its acceptance gates pass.
+Preserve the current feature flags and inspect queued/running jobs before the
+paired switch. This change does not authorize background batch activation.
+
+## Historical volatility refactor candidates
 
 The 1.3.1 candidate completed verification. Its 1.3.2 follow-up cleanup uses the
 same version-3 job/checkpoint schemas and strict database errors in required
@@ -25,7 +41,7 @@ The first supported deployment is read-only calibration, comparison, and
 export. Database writes, approval, publication, and background workers are
 disabled unless their feature flags are explicitly enabled.
 
-## Build
+## Historical 1.2.5 build record
 
 Install the locked deployment environment with
 `at-options-analytics==1.2.5`, built from reviewed `options` commit

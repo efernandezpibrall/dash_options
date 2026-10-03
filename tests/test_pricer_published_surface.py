@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+from datetime import datetime, timezone
+from uuid import uuid4
 
+import numpy as np
 import pandas as pd
 import pytest
 from options.options_library import asian_76, black_76_futures_style
 from options.ttf_volatility import black76_call_delta, delta_node_to_strike
 
 import pricer_surface_reference as surface_reference
+from options.brent_quote_valuation import (
+    BrentOptionSpec, QuotePrices, build_published_brent_market_snapshot, value_brent_quote,
+)
 from pricer_exchange_registry import exchange_option_mapping
 from pricer_structure import (
     build_delivery_month_component,
@@ -24,6 +30,34 @@ from pricer_workspace import pricing as pricer_pricing
 from pricer_workspace import state as pricer_state
 
 AS_OF = date(2026, 7, 30)
+
+
+@pytest.mark.parametrize("forward,strike", [(86.88, 65), (86.88, 90), (95.568, 99), (86.88, 125)])
+def test_brent_chat_and_pricer_share_dense_published_surface(forward, strike):
+    month = date(2026, 10, 1)
+    component = build_delivery_month_component("Brent", "black76", month, AS_OF, forward)
+    publication = {"publication_id": str(uuid4()), "run_id": str(uuid4()),
+                   "commodity": "BRENT", "cob_date": AS_OF,
+                   "published_at": datetime(2026, 7, 30, 12, tzinfo=timezone.utc)}
+    strikes = np.linspace(60, 130, 401)
+    points = pd.DataFrame({**publication, "contract_date": month,
+        "option_expiration_date": component["option_expiration_date"], "strike": strikes,
+        "delta": np.linspace(.99, .01, 401), "put_call": "C",
+        "volatility": .6 + .1 * np.log(strikes / 86.88)**2, "working_forward": 86.88,
+        "source_name": "captured settlement", "calibration_method": "single_svi_actual_strikes",
+        "calibration_policy_version": "brent_single_svi_actual_strikes_v1", "input_fingerprint": "captured"})
+    prepared = surface_reference._prepare_component_surface(
+        points, component, asset="BRENT", valuation_date=AS_OF, current_forward=forward,
+    )
+    pricer = surface_reference._prepared_component_result(
+        prepared, model="black76", current_forward=forward, strike=strike,
+    )
+    spec = BrentOptionSpec(month, "C", strike, datetime(2026, 7, 30, 13, tzinfo=timezone.utc))
+    market = build_published_brent_market_snapshot(
+        spec, points, publication=publication, ice_forward=forward, ice_forward_contract_month=month,
+    )
+    chat = value_brent_quote(spec, QuotePrices(), market)
+    assert chat.our_volatility == pytest.approx(pricer["pricing_volatility"], abs=1e-14)
 
 
 @pytest.fixture(autouse=True)

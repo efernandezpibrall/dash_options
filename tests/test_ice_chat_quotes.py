@@ -479,6 +479,11 @@ def test_snapshot_loader_reads_persisted_rows_with_bounded_cutoff(monkeypatch, h
         statements.append(sql)
         if quote_data.SERVICE_TABLE in sql:
             return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: {}))
+        if "commodity = 'BRENT'" in sql:
+            assert "vol_surface_publications" in sql
+            assert "published_at <= :loaded_at" in sql
+            assert "cob_date <= CAST(:loaded_at AS date)" in sql
+            assert parameters == {"loaded_at": now}
         return SimpleNamespace(scalar=lambda: "2026-08-16")
 
     connection.execute = execute

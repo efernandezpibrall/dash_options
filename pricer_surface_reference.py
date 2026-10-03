@@ -33,6 +33,7 @@ from options.option_expiry_engine import (
     get_surface_calendar_mapping,
 )
 from options.ttf_volatility import black76_call_delta
+from options.vol_calibration.api import interpolate_published_smile
 from pricer_structure import (
     PRODUCT_METADATA_FIELDS,
     SUPPORTED_ASSETS,
@@ -734,13 +735,13 @@ def _prepared_component_result(
             f"{prepared['contract_month_label']}."
         )
     target_log_moneyness = math.log(strike / current_forward)
-    reference_volatility = float(
-        np.interp(
-            target_log_moneyness,
-            np.asarray(prepared["log_moneyness_nodes"], dtype=float),
-            np.asarray(prepared["volatility_nodes"], dtype=float),
+    try:
+        reference_volatility = interpolate_published_smile(
+            prepared["log_moneyness_nodes"], prepared["volatility_nodes"],
+            forward=current_forward, strike=strike,
         )
-    )
+    except ValueError as exc:
+        raise SurfaceReferenceError(str(exc)) from exc
     source_call_delta = float(
         np.interp(
             target_log_moneyness,

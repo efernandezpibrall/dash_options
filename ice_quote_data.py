@@ -419,9 +419,13 @@ def load_quote_snapshot(
     )
     surface_query = text(
         """
-        SELECT max(cob_date) AS surface_cob_date
-        FROM at_lng.implied_volatility_surface_from_prices
-        WHERE upper(product)='BRENT'
+        SELECT cob_date
+        FROM at_lng.vol_surface_publications
+        WHERE commodity = 'BRENT' AND status = 'published' AND is_active
+          AND approved_at IS NOT NULL AND approved_at <= published_at
+          AND cob_date <= CAST(:loaded_at AS date) AND published_at <= :loaded_at
+        ORDER BY cob_date DESC, published_at DESC, created_at DESC
+        LIMIT 1
         """
     )
     ttf_publication_query = text(
@@ -454,7 +458,7 @@ def load_quote_snapshot(
                 },
             )
             service_row = connection.execute(service_query).mappings().first()
-            surface_cob = connection.execute(surface_query).scalar()
+            surface_cob = connection.execute(surface_query, {"loaded_at": loaded_at}).scalar()
             ttf_surface_cob = connection.execute(ttf_publication_query).scalar()
             jkm_surface_cob = connection.execute(jkm_publication_query, {"loaded_at": loaded_at}).scalar()
     except Exception as exc:
