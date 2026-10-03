@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from vol_trades_chart_information import information_children
 from vol_trades_workspace import chart_data, history_charts
 
 from typing import Any
@@ -323,7 +324,7 @@ def build_plot_cards(
         quality = dict(figure.layout.meta or {}).get("quality") or {}
         quality_summary = (
             html.Div(
-                [
+                information_children(quality) if resolved_product == "TFO" else [
                     dbc.Badge(
                         quality["status"],
                         color=quality["color"],
@@ -337,6 +338,7 @@ def build_plot_cards(
                 ],
                 className="brent-vol-history-card-quality",
                 role="status",
+                **({"id": {"type": "brent-vol-history-quality", "expiry": expiry.date().isoformat()}} if resolved_product == "TFO" else {}),
                 title=quality["detail"],
             )
             if quality

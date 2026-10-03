@@ -544,3 +544,144 @@
 .ice-chat-edge-qualified { color: #047857; font-weight: 700; }
 .ice-chat-edge-provisional { color: #92400e !important; font-weight: 700; }
 .ice-chat-edge-neutral { color: #64748b; }
+
+/* Compact quote tape: directional colour belongs to the edge marker only. */
+.ice-chat-tape-context {
+    color: #64748b;
+    font-size: 12px;
+    font-weight: 500;
+    margin-right: auto;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-cell {
+    background: #f1f5f9 !important;
+    color: #475569 !important;
+    border-color: #e2e8f0 !important;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-group-text {
+    color: #475569 !important;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell {
+    background: #ffffff !important;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-header-cell-text {
+    font-size: 11px;
+    font-weight: 600;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ag-cell {
+    font-size: 12px;
+    font-weight: 400;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-theo-cell {
+    color: #1e3a5f;
+    background: #f0f5fa !important;
+    font-weight: 600;
+}
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-row-error .ag-cell,
+.ag-theme-alpine.mckinsey-ag-grid.ice-chat-quote-grid .ice-chat-row-blocked .ag-cell {
+    background: inherit !important;
+}
+.ice-tape-edge { display: inline-flex; gap: 7px; align-items: center; min-width: 0; font-weight: 500; }
+.ice-tape-marker { display: inline-block; flex: 0 0 8px; width: 8px; height: 8px; border-radius: 2px; box-sizing: border-box; }
+.ice-tape-marker-buy { background: #15803d; }
+.ice-tape-marker-sell { background: #b91c1c; }
+.ice-tape-marker-none { background: #ffffff; border: 1px solid #94a3b8; }
+.ice-tape-marker-unpriced { background: #111827; }
+.ice-chat-quote-detail-table { overflow-x: auto; max-width: 100%; margin: 8px 0 12px; }
+.ice-chat-quote-detail-table table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.ice-chat-quote-detail-table th, .ice-chat-quote-detail-table td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; text-align: right; white-space: nowrap; }
+.ice-chat-quote-detail-table th:first-child, .ice-chat-quote-detail-table td:first-child { text-align: left; }
+.ice-chat-quote-detail-table th { font-weight: 600; color: #475569; }
+.ice-chat-quote-detail-source { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+    .ice-chat-section-header { flex-wrap: wrap; gap: 6px; }
+    .ice-chat-tape-context { margin-right: 0; }
+}
+
+/* Quote tape semantic bands: warm broker marks, blue model, violet risk. */
+#ice-chat-quote-grid {
+    --ag-border-color: #dbe3ed;
+    --ag-row-border-color: #e5eaf1;
+    --ag-selected-row-background-color: #eaf2fc;
+    border: 1px solid #dbe3ed;
+    border-radius: 8px;
+    overflow: hidden;
+}
+#ice-chat-quote-grid .ice-tape-band-identity { --tape-ink: #334155; --tape-head: #e9eef5; --tape-fill: #f8fafc; --tape-line: #8091a7; }
+#ice-chat-quote-grid .ice-tape-band-broker { --tape-ink: #765326; --tape-head: #f4ecdd; --tape-fill: #fffbf3; --tape-line: #b49767; }
+#ice-chat-quote-grid .ice-tape-band-valuation { --tape-ink: #214f86; --tape-head: #dfeaf8; --tape-fill: #f0f6ff; --tape-line: #6086b5; }
+#ice-chat-quote-grid .ice-tape-band-inputs { --tape-ink: #46586d; --tape-head: #eaf0f5; --tape-fill: #f8fafc; --tape-line: #91a3b5; }
+#ice-chat-quote-grid .ice-tape-band-greeks { --tape-ink: #614580; --tape-head: #ece5f5; --tape-fill: #f8f5fc; --tape-line: #a18ab9; }
+#ice-chat-quote-grid .ice-tape-band-sender,
+#ice-chat-quote-grid .ice-tape-band-delivery { --tape-ink: #475569; --tape-head: #edf0f4; --tape-fill: #fbfcfe; --tape-line: #a3afbe; }
+#ice-chat-quote-grid .ag-header-group-cell {
+    background: var(--tape-head) !important;
+    border-top: 3px solid var(--tape-line) !important;
+    border-right: 1px solid #ffffff !important;
+}
+#ice-chat-quote-grid .ag-header-group-text {
+    color: var(--tape-ink) !important;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .025em;
+}
+#ice-chat-quote-grid .ag-header-cell {
+    background: var(--tape-fill) !important;
+    color: var(--tape-ink) !important;
+    padding-left: 6px;
+    padding-right: 6px;
+    border-bottom: 1px solid #ccd7e4 !important;
+}
+#ice-chat-quote-grid .ag-header-cell-text { color: var(--tape-ink) !important; font-weight: 650; }
+#ice-chat-quote-grid .ag-header-cell.ice-tape-band-sender {
+    background: var(--tape-head) !important;
+    border-top: 3px solid var(--tape-line) !important;
+}
+#ice-chat-quote-grid .ag-cell {
+    background: var(--tape-fill) !important;
+    color: var(--tape-ink);
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid #e6ebf2;
+}
+#ice-chat-quote-grid .ag-row-odd .ag-cell { background-image: linear-gradient(#182f4c03, #182f4c03) !important; }
+#ice-chat-quote-grid .ice-tape-band-start { border-left: 1px solid #dbe3ed !important; }
+#ice-chat-quote-grid .ag-cell[col-id="observed_at"] { color: #64748b; font-size: 11px; }
+#ice-chat-quote-grid .ag-cell[col-id="contract_label"] { color: #172b46; font-weight: 650; }
+#ice-chat-quote-grid .ag-cell[col-id="strategy_display"] { color: #283e58; font-weight: 500; }
+#ice-chat-quote-grid .ag-cell[col-id="broker_display"] { font-weight: 600; }
+#ice-chat-quote-grid .ag-cell[col-id="model_sort_value"] { color: #173f70; font-weight: 700; background: #e8f1ff !important; }
+#ice-chat-quote-grid .ag-cell[col-id="our_iv_pct"] { color: #214f86; font-weight: 600; }
+#ice-chat-quote-grid .ag-cell[col-id="forward_source_display"],
+#ice-chat-quote-grid .ag-cell[col-id="surface_published_at"],
+#ice-chat-quote-grid .ag-cell[col-id="sender_handle"] { font-size: 11px; }
+#ice-chat-quote-grid .ag-cell[col-id="signal_price_edge"] { background: #ffffff !important; }
+#ice-chat-quote-grid .ag-cell.ice-tape-edge-cell-buy { background: #f0f9f3 !important; }
+#ice-chat-quote-grid .ag-cell.ice-tape-edge-cell-sell { background: #fff3f3 !important; }
+#ice-chat-quote-grid .ice-tape-edge { font-size: 11px; font-weight: 650; gap: 6px; }
+#ice-chat-quote-grid .ice-tape-edge-buy { color: #166534; }
+#ice-chat-quote-grid .ice-tape-edge-sell { color: #991b1b; }
+#ice-chat-quote-grid .ice-tape-edge-none { color: #526174; font-weight: 500; }
+#ice-chat-quote-grid .ice-tape-edge-unpriced { color: #111827; }
+#ice-chat-quote-grid .ice-tape-delivery {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #dce3ec;
+    border-radius: 4px;
+    padding: 3px 6px;
+    background: #f4f6f9;
+    color: #526174;
+    font-size: 10.5px;
+    font-weight: 550;
+    line-height: 1;
+}
+#ice-chat-quote-grid .ice-tape-delivery-sent { background: #edf3fb; border-color: #ceddef; color: #355b83; }
+#ice-chat-quote-grid .ice-tape-delivery-failed { border-style: dashed; color: #172b46; font-weight: 700; }
+#ice-chat-quote-grid .ag-row-hover .ag-cell { background-image: linear-gradient(#214f860a, #214f860a) !important; }
+#ice-chat-quote-grid .ag-row-selected .ag-cell { box-shadow: inset 0 1px 0 #80a5d1, inset 0 -1px 0 #80a5d1; }
+#ice-chat-quote-grid .ag-cell-focus { box-shadow: inset 0 0 0 2px #2563eb !important; }

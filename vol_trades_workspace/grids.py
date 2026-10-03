@@ -663,7 +663,7 @@ TRADE_TAPE_COLUMN_DEFS = [
         "vol-trades-group-contract",
         [
             _grid_column(
-                "Time GST", "trade_time_gst", pinned="left", width=116,
+                "Executed GST", "execution_time_gst", pinned="left", width=128,
                 cell_class="vol-trades-time-cell",
             ),
             _grid_column(
@@ -704,6 +704,8 @@ TRADE_TAPE_COLUMN_DEFS = [
                 formatter=_GRID_INTEGER, numeric=True,
             ),
             _grid_column("Condition", "condition_codes", min_width=112),
+            _grid_column("Trade type", "trade_type_label", min_width=190),
+            _grid_column("Reported GST", "reported_time_gst", width=128),
         ],
     ),
     _grid_group(
@@ -734,12 +736,11 @@ TRADE_TAPE_COLUMN_DEFS = [
             ),
             _grid_column(
                 "Status",
-                "trade_iv_status",
-                width=104,
-                cell_rules=_GRID_STATUS_RULES,
+                "trade_iv_label",
+                min_width=205,
             ),
             _grid_column(
-                "Exclusion reason",
+                "Reason / diagnostics",
                 "trade_iv_exclusion_reason",
                 min_width=250,
                 flex=1,
@@ -747,4 +748,3 @@ TRADE_TAPE_COLUMN_DEFS = [
         ],
     ),
 ]
-

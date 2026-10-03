@@ -12,6 +12,7 @@ from dash import dcc, html
 from options.ttf_strip_charts import project_strip_quotes
 from options.ttf_strip_settlements import project_strip_settlements
 from vol_trades_ice_quotes import prepare_strip_events
+from vol_trades_quote_ranges import empty_range_trace, quote_age_label, range_visible
 from vol_trades_market_window import history_identity, utc_timestamp
 from vol_trades_strip_data import load_strip_inputs, load_strip_settlement_inputs
 from vol_trades_workspace import chart_data, quote_charts
@@ -77,7 +78,7 @@ def _settlement_projection(inputs, months):
     )
 
 
-def build_strip_figure(label, months, projection, *, x_axis, selected_layers, identity, settlement=None):
+def build_strip_figure(label, months, projection, *, x_axis, selected_layers, identity, settlement=None, cutoff_at=None):
     figure = go.Figure()
     delta_mode = chart_data._normalize_x_axis(x_axis) == chart_data.X_AXIS_DELTA
     selected = None if selected_layers is None else set(selected_layers)
@@ -104,6 +105,23 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
                 ),
             )
         )
+    interval = empty_range_trace()
+    range_x, range_y, range_text = [], [], []
+    for row in projection.get("quotes", []):
+        paired = {point["side"]: point for point in row["points"]}
+        bid, offer = paired.get("bid"), paired.get("offer")
+        if not bid or not offer or not (0 < bid["price"] <= offer["price"] and 0 < bid["volatility"] <= offer["volatility"]):
+            continue
+        observed = utc_timestamp(row["observed_at"])
+        text = (f"<b>ICE broker bid–offer · {escape(label)} · {'Put' if row['option_type'] == 'P' else 'Call'}</b>"
+                f"<br>Strike {float(row['strike']):.2f} · Equivalent IV {100 * bid['volatility']:.2f}–{100 * offer['volatility']:.2f}%"
+                f"<br>{observed.tz_convert('Asia/Dubai'):%d %b %H:%M:%S} GST · {quote_age_label(observed, cutoff_at)}"
+                f"<br>Sender {escape(str(row.get('sender_handle') or '—'))} · {escape(str(row.get('source_channel') or '—'))}")
+        range_x.extend([bid["delta"] if delta_mode else float(row["strike"]), offer["delta"] if delta_mode else float(row["strike"]), None])
+        range_y.extend([100 * bid["volatility"], 100 * offer["volatility"], None])
+        range_text.extend([text, text, None])
+    interval.update(x=range_x, y=range_y, text=range_text, visible=selected is None or range_visible(selected))
+    figure.add_trace(interval)
     for side, (layer, color, symbol) in _MARKERS.items():
         x, y, text, symbols = [], [], [], []
         for row in projection.get("quotes", []):
@@ -118,7 +136,7 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
                 size_label = f"{quoted_size:,.0f}" if pd.notna(quoted_size) and quoted_size > 0 else "Size unavailable"
                 text.append(
                     f"<b>ICE {side} · {escape(label)} · {'Put' if row['option_type'] == 'P' else 'Call'}</b>"
-                    f"<br>{stamp} · Strike {float(row['strike']):.2f}"
+                    f"<br>{stamp} · {quote_age_label(row['observed_at'], cutoff_at)} · Strike {float(row['strike']):.2f}"
                     f"<br>Premium {point['price']:.4f} EUR/MWh · Equivalent IV {100 * point['volatility']:.2f}%"
                     f"<br>Quoted size {size_label}"
                     f"<br>Our equivalent IV {100 * row['our_volatility']:.2f}%"
@@ -218,7 +236,7 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
         title=None,
         height=308,
         showlegend=False,
-        margin={"l": 47, "r": 14, "t": 12, "b": 32},
+        margin={"l": 8, "r": 14, "t": 12, "b": 32},
         hovermode="closest",
         font={"family": "Segoe UI, -apple-system, BlinkMacSystemFont, sans-serif", "size": 11},
         hoverlabel={"bgcolor": "#0F172A", "font": {"color": "#F8FAFC", "size": 11}, "namelength": 0},
@@ -231,13 +249,15 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
             "period_kind": "strip",
         },
     )
-    figure.update_yaxes(title="Equivalent strip IV (%)")
+    figure.update_yaxes(
+        title_text="", title_font_size=1, title_standoff=0, tickformat="~g", ticksuffix="%", automargin="left"
+    )
     if delta_mode:
         figure.update_xaxes(
             range=[0, 1],
             tickmode="array",
             tickvals=[0, 0.1, 0.25, 0.5, 0.75, 0.9, 1],
-            ticktext=["0Δ put", "10Δ put", "25Δ put", "ATM", "25Δ call", "10Δ call", "0Δ call"],
+            ticktext=["0ΔP", "10ΔP", "25ΔP", "ATM", "25ΔC", "10ΔC", "0ΔC"],
         )
     else:
         figure.update_xaxes(title=None)
@@ -327,6 +347,7 @@ def render_strip_charts(
             selected_layers=selected_layers,
             identity=identity,
             settlement=settlement,
+            cutoff_at=window.get("cutoff_at"),
         )
         plots.append(
             html.Section(

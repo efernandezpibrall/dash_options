@@ -269,12 +269,22 @@ def build_layout(ice_quotes_layout):
                 [
                     html.Div(
                         [
-                            html.H2(
-                                "Expiry panels",
-                                className=(
-                                    "section-title-inline greeks-monitor-title "
-                                    "brent-vol-history-section-title"
-                                ),
+                            html.Div(
+                                [
+                                    html.H2(
+                                        "Expiry panels",
+                                        className=(
+                                            "section-title-inline greeks-monitor-title "
+                                            "brent-vol-history-section-title"
+                                        ),
+                                    ),
+                                    html.Span(
+                                        id="vol-trades-icap-date-warning",
+                                        role="alert",
+                                        className="vol-trades-icap-date-warning",
+                                    ),
+                                ],
+                                className="vol-trades-expiry-heading",
                             ),
                             history_charts.build_expiry_legend(),
                             html.Div(
@@ -290,12 +300,6 @@ def build_layout(ice_quotes_layout):
                         ),
                     ),
                     html.Div(id="vol-trades-provenance", hidden=True),
-                    html.Div(
-                        dcc.Checklist(id="vol-trades-icap-prior", value=[],
-                                      options=[{"label": "Compare prior ICAP date (if selected date is unavailable)",
-                                                "value": "allow"}]),
-                        id="vol-trades-icap-prior-control", style={"display": "none"},
-                    ),
                     dcc.Loading(
                         type="circle",
                         children=html.Div(
@@ -340,7 +344,7 @@ def build_layout(ice_quotes_layout):
                                         ),
                                         **{"aria-hidden": "true"},
                                     ),
-                                    "Latest print only",
+                                    "Exact reported records",
                                 ],
                                 className="brent-vol-history-table-context",
                             ),

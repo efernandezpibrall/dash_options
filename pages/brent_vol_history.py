@@ -57,6 +57,7 @@ from vol_trades_market_window import (
     MARKET_TIMEZONE, PRESET_SECONDS, filter_event_window, history_identity,
     market_context, select_market_window, utc_timestamp,
 )
+from vol_trades_quote_ranges import RANGE_LAYER, range_visible
 from vol_trades_ice_quotes import prepare_overlay_events
 import vol_trades_data as market_data
 import ice_quote_data as quote_data
@@ -1086,7 +1087,6 @@ def _render_jkm_history(
     Input("brent-vol-history-product", "value"),
     Input("vol-trades-publication-revision", "data"),
     Input("vol-trades-source-revision", "data"),
-    Input("vol-trades-icap-prior", "value"),
     State("brent-vol-history-detail-expiry", "value"),
     State("brent-vol-history-trade-window-state", "data"),
     State("brent-vol-history-expiry-layers", "options"),
@@ -1098,7 +1098,6 @@ def render_history(
     product=market_data.PRODUCT,
     _published_revision=None,
     _source_revision=None,
-    allow_prior_icap=None,
     current_detail_expiry=None,
     current_trade_window=None,
     current_legend_options=None,
@@ -1243,7 +1242,7 @@ def render_history(
         if product in market_data.EXACT_COB_SURFACE_PRODUCTS or snapshot_kind == "INTRADAY":
             published = pd.DataFrame()
         elif product == "TFO":
-            published = market_data.load_icap_settlement_surface(selected_date, allow_prior="allow" in (allow_prior_icap or []))
+            published = market_data.load_icap_settlement_surface(selected_date, allow_prior=True)
             if (_source_revision or {}).get("product") == product and (_source_revision or {}).get("cob_date") == selected_date and (_source_revision or {}).get("error"):
                 from vol_trades_provenance import prepare_icap_layer
                 published = prepare_icap_layer(None, selected_date)
@@ -1425,7 +1424,7 @@ def update_expiry_layer_visibility(selected_layers, manifest, graph_ids):
         patch = Patch()
         for entry in graph_contract.get("traces") or []:
             patch["data"][int(entry["index"])]["visible"] = (
-                entry["layer"] in selected
+                range_visible(selected) if entry["layer"] == RANGE_LAYER else entry["layer"] in selected
             )
         for entry in graph_contract.get("shapes") or []:
             patch["layout"]["shapes"][int(entry["index"])]["visible"] = (
@@ -1728,9 +1727,21 @@ def poll_market_source_revision(_tick, product, snapshot, previous):
 
 @callback(
     Output("vol-trades-provenance", "children"),
-    Output("vol-trades-icap-prior-control", "style"),
+    Output("vol-trades-icap-date-warning", "children"),
     Input("brent-vol-history-snapshot", "data"),
 )
 def render_market_provenance(snapshot):
     from vol_trades_provenance import render_provenance
     return render_provenance(snapshot)
+
+
+@callback(
+    Output({"type": "brent-vol-history-quality", "expiry": ALL}, "children"),
+    Output({"type": "brent-vol-history-quality", "expiry": ALL}, "title"),
+    Input("brent-vol-history-trade-window-state", "data"),
+    Input("brent-vol-history-snapshot", "data"),
+    Input({"type": "brent-vol-history-quality", "expiry": ALL}, "id"),
+)
+def update_expiry_information(window, snapshot, ids):
+    from vol_trades_chart_information import expiry_information_updates
+    return expiry_information_updates(snapshot, window, ids)

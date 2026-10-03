@@ -17,6 +17,7 @@ import pandas as pd
 from sqlalchemy import text
 
 from options.ice_quote_interpretation import interpret_quote_record
+from ice_quote_tape import enrich_rows
 
 from runtime_config import get_database_engine
 from vol_trades_market_window import market_context, utc_timestamp
@@ -359,6 +360,7 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     normalized["observed_display"] = normalized["observed_at"].dt.tz_convert(
         "Asia/Dubai"
     ).dt.strftime("%d %b %H:%M:%S")
+    normalized = enrich_rows(normalized)
     return json.loads(normalized.to_json(orient="records", date_format="iso"))
 
 
@@ -383,9 +385,19 @@ def load_quote_snapshot(
         )
     quote_query = text(
         f"""
-        SELECT {", ".join(QUOTE_COLUMNS)},
+        SELECT {", ".join("quote_row." + field for field in QUOTE_COLUMNS)},
+               quote_row.components, quote_row.structure_legs,
+               saved.delta AS saved_delta, saved.gamma AS saved_gamma, saved.vega AS saved_vega,
+               publication.published_at AS surface_published_at,
                {", ".join(QUOTE_METADATA_EXPRESSIONS)}
         FROM {QUOTE_VIEW} AS quote_row
+        LEFT JOIN LATERAL (
+            SELECT delta, gamma, vega FROM at_lng.ice_chat_quote_valuations
+            WHERE market_event_id = quote_row.event_id
+            ORDER BY valuation_version DESC LIMIT 1
+        ) saved ON true
+        LEFT JOIN at_lng.vol_surface_publications publication
+          ON publication.publication_id = quote_row.surface_publication_id
         WHERE (observed_at >= :cutoff AND observed_at <= :loaded_at)
            OR (CAST(:market_start AS timestamptz) IS NOT NULL AND observed_at >= :market_start
                AND observed_at <= :market_cutoff)
@@ -487,11 +499,19 @@ def load_quote_reply(
     try:
         with db_engine.connect() as connection:
             record = connection.execute(text(f"""
-                SELECT outbound_status, outbound_attempted_at, outbound_acknowledged_at,
-                       outbound_error_message, outbound_message_text, outbound_batch_reference,
-                       edge_assessment, quote_context, surface_cob_date,
-                       surface_publication_id, pricing_model, single_price, bid, offer
-                FROM {QUOTE_VIEW}
+                SELECT quote_row.outbound_status, quote_row.outbound_attempted_at, quote_row.outbound_acknowledged_at,
+                       quote_row.outbound_error_message, quote_row.outbound_message_text, quote_row.outbound_batch_reference,
+                       quote_row.edge_assessment, quote_row.quote_context, quote_row.surface_cob_date,
+                       quote_row.surface_publication_id, quote_row.pricing_model, quote_row.single_price, quote_row.bid, quote_row.offer,
+                       quote_row.components, quote_row.structure_legs,
+                       publication.published_at AS surface_published_at,
+                       COALESCE(event.raw_payload #>> '{{message,messageString}}',
+                                event.raw_payload #>> '{{message,text}}',
+                                event.raw_payload #>> '{{market,description}}') AS original_market_text
+                FROM {QUOTE_VIEW} quote_row
+                LEFT JOIN at_lng.vol_surface_publications publication
+                  ON publication.publication_id = quote_row.surface_publication_id
+                LEFT JOIN at_lng.ice_chat_market_events event ON event.id = quote_row.event_id
                 WHERE event_id = CAST(:event_id AS uuid) AND product_code = :product_code
             """), {"event_id": str(event_id),
                      "product_code": {"TFO": "TFM", "JKM": "JKM"}.get(_selected_product(product), "B")}).mappings().first()

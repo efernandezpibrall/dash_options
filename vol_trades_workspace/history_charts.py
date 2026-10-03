@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from vol_trades_quote_ranges import RANGE_LAYER, range_visible
 from vol_trades_workspace import trade_tape as tape_views
 
 from vol_trades_workspace import chart_data
@@ -277,8 +278,9 @@ def build_expiry_figure(
         figure.add_trace(
             go.Bar(
                 x=axis_values,
-                y=values,
-                base=base,
+                # Axis coordinates use thousands; hover details retain exact counts.
+                y=values / 1000.0,
+                base=base / 1000.0,
                 width=width,
                 name=f"{metric_label} · {option_label}",
                 legendgroup=f"{metric_label.lower().replace(' ', '-')}-{put_call}",
@@ -557,11 +559,12 @@ def build_expiry_figure(
                             + axis_hover
                             + " · IV <b>%{y:.2f}%</b>"
                             "<br>Trade <b>%{customdata[1]:.4f} × %{customdata[9]}</b>"
-                            " · %{customdata[3]}"
+                            " · %{customdata[13]} %{customdata[3]}"
                             f"<br>{underlying_hover_label} %{{customdata[4]:.3f}}"
                             " · %{customdata[5]} · %{customdata[6]:.0f} ms"
                             "<br>Quote ages %{customdata[7]}"
-                            "<br>Condition %{customdata[8]}<extra></extra>"
+                            "<br>%{customdata[10]} · %{customdata[12]}"
+                            "<br>Reported %{customdata[11]} · Condition %{customdata[8]}<extra></extra>"
                         ),
                     ),
                     secondary_y=False,
@@ -609,7 +612,7 @@ def build_expiry_figure(
                         meta={"legend_layer": "trades"},
                         marker={
                             "color": ["#2563EB" if side == "C" else "#0F766E" for side in matched_trades["put_call"]],
-                            "size": [5 if side == "C" else 6 for side in matched_trades["put_call"]],
+                            "size": 6,
                             "symbol": ["circle" if side == "C" else "circle-open" for side in matched_trades["put_call"]],
                             "opacity": 0.55,
                             "line": {
@@ -914,7 +917,10 @@ def build_expiry_figure(
             range=[max(0.0, focus_low - focus_padding), focus_high + focus_padding]
         )
 
-    figure.update_yaxes(title_text="IV (%)", secondary_y=False)
+    figure.update_yaxes(
+        title_text="", title_font_size=1, title_standoff=0, tickformat="~g", ticksuffix="%",
+        automargin="left", secondary_y=False
+    )
     if is_intraday and trade_tape is not None:
         # Keep the executable smile visually fixed while the trade window moves.
         # Plotly otherwise autoranges the primary axis after every trade-trace
@@ -939,7 +945,10 @@ def build_expiry_figure(
                 secondary_y=False,
             )
     figure.update_yaxes(
-        title_text="Activity (contracts)",
+        title_text="Contracts",
+        title_standoff=4,
+        tickformat="~g",
+        ticksuffix="k",
         rangemode="tozero",
         showgrid=False,
         secondary_y=True,
@@ -951,13 +960,13 @@ def build_expiry_figure(
             tickmode="array",
             tickvals=[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0],
             ticktext=[
-                "0Δ put",
-                "10Δ put",
-                "25Δ put",
+                "0ΔP",
+                "10ΔP",
+                "25ΔP",
                 "ATM",
-                "25Δ call",
-                "10Δ call",
-                "0Δ call",
+                "25ΔC",
+                "10ΔC",
+                "0ΔC",
             ],
         )
     else:
@@ -996,7 +1005,7 @@ def build_expiry_figure(
     figure.update_layout(
         template="plotly_white",
         height=308,
-        margin={"l": 58, "r": 44, "t": 18, "b": 4},
+        margin={"l": 8, "r": 8, "t": 18, "b": 4},
         barmode="overlay",
         hovermode="closest",
         hoverdistance=36,
@@ -1187,7 +1196,7 @@ def _apply_expiry_layer_selection(
         graph_contract = graph_contracts.get(expiry) or {}
         for entry in graph_contract.get("traces") or []:
             graph.figure.data[int(entry["index"])].visible = (
-                entry["layer"] in selected
+                range_visible(selected) if entry["layer"] == RANGE_LAYER else entry["layer"] in selected
             )
         for entry in graph_contract.get("shapes") or []:
             graph.figure.layout.shapes[int(entry["index"])].visible = (
@@ -1240,8 +1249,8 @@ EXPIRY_LEGEND_LAYER_SPECS = {
         "group": "iv",
         "swatch": "brent-vol-history-legend-trade",
         "description": (
-            "Show or hide Bloomberg trade-time volatility; filled: call · hollow: put · "
-            "darker: larger executed volume. Underlying-price matching is shown in hover."
+            "Show or hide Bloomberg execution-time volatility; filled: call · hollow: put · "
+            "darker: larger executed volume. Trade type and underlying-price matching are shown in hover."
         ),
     },
     "ice-bid": {

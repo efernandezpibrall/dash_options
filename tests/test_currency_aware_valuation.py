@@ -7,16 +7,7 @@ from openpyxl import load_workbook
 from pages import pnl_explain, scenarios, valuation
 
 
-def _walk(component):
-    yield component
-    children = getattr(component, 'children', None)
-    if children is None:
-        return
-    if not isinstance(children, (list, tuple)):
-        children = [children]
-    for child in children:
-        if child is not None:
-            yield from _walk(child)
+from component_helpers import walk_components as _walk
 
 
 def _valuation_rows():

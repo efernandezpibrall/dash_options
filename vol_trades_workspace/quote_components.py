@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from vol_trades_workspace import quote_charts
+from ice_quote_tape_components import QUOTE_COLUMN_DEFS, quote_details
 from options.ice_quote_interpretation import assessment_summary
 
 import dash_ag_grid as dag
@@ -95,145 +96,8 @@ SIZE_FORMATTER = {
 ACTION_FORMATTER = {"function": "params.value == null ? 'NO EDGE' : params.value"}
 
 
-QUOTE_COLUMN_DEFS = [
-    {
-        "headerName": "Instrument",
-        "headerClass": "ice-chat-group-header ice-chat-group-instrument",
-        "children": [
-            {
-                "headerName": "Product",
-                "field": "product_label",
-                "pinned": "left",
-                "lockPinned": True,
-                "width": 72,
-                "headerClass": "ice-chat-text-header",
-                "cellClass": "ice-chat-text-cell ice-chat-product-cell ice-chat-instrument-cell",
-            },
-            {
-                "headerName": "Contract",
-                "field": "contract_label",
-                "pinned": "left",
-                "lockPinned": True,
-                "width": 94,
-                "tooltipField": "edge_explanation",
-                "headerClass": "ice-chat-text-header",
-                "cellClass": "ice-chat-text-cell ice-chat-instrument-cell",
-            },
-            {
-                "headerName": "Type",
-                "field": "option_label",
-                "pinned": "left",
-                "lockPinned": True,
-                "width": 80,
-                "tooltipField": "option_label",
-                "headerClass": "ice-chat-text-header",
-                "cellClass": "ice-chat-text-cell ice-chat-instrument-cell",
-            },
-            {
-                "headerName": "Strike",
-                "field": "strike_label",
-                "tooltipField": "structure_label",
-                "pinned": "left",
-                "lockPinned": True,
-                "width": 116,
-                "headerClass": "ice-chat-number-header",
-                "cellClass": "ice-chat-number-cell ice-chat-instrument-cell",
-            },
-        ],
-    },
-    {
-        "headerName": "Context",
-        "headerClass": "ice-chat-group-header ice-chat-group-context",
-        "children": [
-            {
-                "headerName": "Time (GST)",
-                "field": "observed_display",
-                "width": 112,
-                "headerClass": "ice-chat-text-header",
-                "cellClass": "ice-chat-text-cell ice-chat-time-cell",
-            },
-            {
-                "headerName": "Quote unit",
-                "field": "price_unit_label",
-                "width": 72,
-                "headerClass": "ice-chat-text-header",
-                "cellClass": "ice-chat-text-cell ice-chat-unit-cell",
-            },
-        ],
-    },
-    {
-        "headerName": "Market",
-        "headerClass": "ice-chat-group-header ice-chat-group-market",
-        "children": [
-            {"headerName": "Bid qty", "field": "bid_size", "valueFormatter": SIZE_FORMATTER, "width": 56, "type": "rightAligned", "headerClass": "ice-chat-number-header ice-chat-group-start", "cellClass": "ice-chat-number-cell ice-chat-size-cell ice-chat-group-start"},
-            {"headerName": "Bid", "field": "bid", "valueFormatter": PRICE_FORMATTER, "width": 56, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
-            {"headerName": "Offer", "field": "offer", "valueFormatter": PRICE_FORMATTER, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
-            {"headerName": "Offer qty", "field": "offer_size", "valueFormatter": SIZE_FORMATTER, "width": 64, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-size-cell"},
-            {"headerName": "Trade", "field": "single_price", "valueFormatter": PRICE_FORMATTER, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-market-price-cell"},
-            {"headerName": "Qty", "field": "single_size", "valueFormatter": SIZE_FORMATTER, "width": 48, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-size-cell"},
-            {"headerName": "Indication*", "field": "broker_indication_display", "width": 106, "headerClass": "ice-chat-text-header", "cellClass": "ice-chat-text-cell ice-chat-market-price-cell"},
-        ],
-    },
-    {
-        "headerName": "Market IV (%)",
-        "headerClass": "ice-chat-group-header ice-chat-group-iv",
-        "children": [
-            {"headerName": "Bid", "field": "bid_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 56, "type": "rightAligned", "headerClass": "ice-chat-number-header ice-chat-group-start", "cellClass": "ice-chat-number-cell ice-chat-group-start"},
-            {"headerName": "Offer", "field": "offer_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
-            {"headerName": "Trade", "field": "single_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 58, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
-        ],
-    },
-    {
-        "headerName": "Our valuation",
-        "headerClass": "ice-chat-group-header ice-chat-group-valuation",
-        "children": [
-            {"headerName": "Theo", "field": "theoretical_display", "width": 94, "headerClass": "ice-chat-number-header ice-chat-group-start", "cellClass": "ice-chat-number-cell ice-chat-theo-cell ice-chat-group-start"},
-            {"headerName": "Reason", "field": "display_error", "tooltipField": "display_error", "width": 182, "headerClass": "ice-chat-text-header", "cellClass": "ice-chat-text-cell"},
-            {"headerName": "Ind. gap*", "field": "broker_indication_gap", "valueFormatter": PRICE_FORMATTER, "width": 74, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
-            {"headerName": "IV %", "field": "our_iv_pct", "valueFormatter": NUMBER_FORMATTER_2, "width": 52, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-our-iv-cell"},
-        ],
-    },
-    {
-        "headerName": "Edge",
-        "headerClass": "ice-chat-group-header ice-chat-group-edge",
-        "children": [
-            {
-                "headerName": "Action",
-                "field": "signal_label",
-                "valueFormatter": ACTION_FORMATTER,
-                "width": 66,
-                "headerClass": "ice-chat-text-header ice-chat-group-start",
-                "cellClass": "ice-chat-action-cell ice-chat-group-start",
-                "cellClassRules": {
-                    "ice-chat-cell-buy": "params.value === 'BUY' && params.data.edge_confidence === 'qualified'",
-                    "ice-chat-cell-sell": "params.value === 'SELL' && params.data.edge_confidence === 'qualified'",
-                    "ice-chat-edge-provisional": "params.data.edge_confidence === 'provisional' || params.data.edge_confidence === 'side_unassigned' || params.data.edge_confidence === 'within_buffer'",
-                    "ice-chat-cell-neutral": "params.value === 'NO EDGE' || params.value === 'TRADE' || params.value === 'UNVERIFIED'",
-                },
-            },
-            {"headerName": "Gross", "field": "signal_gross_edge", "valueFormatter": PRICE_FORMATTER, "width": 62, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell"},
-            {"headerName": "Net", "field": "signal_price_edge", "valueFormatter": PRICE_FORMATTER, "width": 62, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-edge-metric", "cellClassRules": {"ice-chat-edge-positive": "Number(params.value) > 0 && params.data.edge_confidence === 'qualified'", "ice-chat-edge-provisional": "Number(params.value) > 0 && params.data.edge_confidence !== 'qualified'", "ice-chat-edge-negative": "Number(params.value) < 0", "ice-chat-edge-flat": "params.value != null && Number(params.value) === 0"}},
-            {"headerName": "Vol pts", "field": "signal_iv_edge_pp", "valueFormatter": NUMBER_FORMATTER_2, "width": 64, "type": "rightAligned", "headerClass": "ice-chat-number-header", "cellClass": "ice-chat-number-cell ice-chat-edge-metric", "cellClassRules": {"ice-chat-edge-positive": "Number(params.value) > 0", "ice-chat-edge-negative": "Number(params.value) < 0", "ice-chat-edge-flat": "Number(params.value) === 0"}},
-        ],
-    },
-    {
-        "headerName": "Workflow",
-        "headerClass": "ice-chat-group-header ice-chat-group-workflow",
-        "children": [
-            {"headerName": "Sender", "field": "sender_handle", "width": 110, "headerClass": "ice-chat-text-header ice-chat-group-start", "cellClass": "ice-chat-text-cell ice-chat-group-start"},
-            {"headerName": "Delivery", "field": "outbound_status", "width": 108, "headerClass": "ice-chat-text-header", "cellClass": "ice-chat-text-cell", "cellClassRules": {"ice-chat-cell-delivered": "params.value === 'acknowledged'", "ice-chat-cell-delivery-error": "params.value === 'explicit_failure' || params.value === 'ambiguous_timeout'"}},
-        ],
-    },
-    {
-        "headerName": "Reference",
-        "headerClass": "ice-chat-group-header ice-chat-group-reference",
-        "children": [
-            {"headerName": "Forward", "field": "forward", "valueFormatter": PRICE_FORMATTER, "width": 68, "type": "rightAligned", "headerClass": "ice-chat-number-header ice-chat-group-start", "cellClass": "ice-chat-number-cell ice-chat-group-start"},
-            {"headerName": "Forward source", "field": "forward_source", "width": 132, "headerClass": "ice-chat-text-header", "cellClass": "ice-chat-text-cell"},
-            {"headerName": "Surface COB", "field": "surface_cob_date", "width": 90, "headerClass": "ice-chat-text-header", "cellClass": "ice-chat-text-cell"},
-        ],
-    },
-]
+
+
 
 
 def build_layout():
@@ -350,18 +214,20 @@ def build_layout():
                     html.Div(
                         [
                             html.H3("Quote tape"),
+                            html.Span(id="ice-chat-tape-context", className="ice-chat-tape-context"),
                             html.Div(id="ice-chat-table-status", role="status", **{"aria-live": "polite"}),
                         ],
                         className="ice-chat-section-header",
                     ),
                     html.Small(
-                        "* Fence prices are positive amounts. To-call or to-put is inferred from the calibrated "
-                        "leg values; it is not a broker-confirmed trade side. Indication gap is not executable edge.",
+                        "Edges and Greeks are saved at valuation time. * Convention or inputs need review. "
+                        "Fence cash-flow direction is inferred. Select a row for full terms and delivery evidence.",
                         className="ice-chat-indication-note",
                     ),
                     html.Div(
                         dag.AgGrid(
                             id="ice-chat-quote-grid",
+                            eventListeners={"gridSizeChanged": ["IceTapeResponsive(params)"]},
                             rowData=[],
                             columnDefs=QUOTE_COLUMN_DEFS,
                             defaultColDef={
@@ -403,7 +269,7 @@ def build_layout():
                         className="ice-chat-grid-shell",
                     ),
                     html.Details(
-                        [html.Summary("Edge assessment & reply delivery"), html.Div(
+                        [html.Summary("Quote details · assessment · reply"), html.Div(
                             "Select a quote to inspect the three edge checks, sent message and acknowledgment.",
                             id="ice-chat-reply-audit", role="status",
                         )],

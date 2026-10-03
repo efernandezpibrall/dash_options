@@ -12,16 +12,7 @@ from pages import ice_chat_quotes as quotes
 import ice_quote_data as quote_data
 
 
-def _walk(component):
-    yield component
-    children = getattr(component, "children", None)
-    if children is None:
-        return
-    if not isinstance(children, (list, tuple)):
-        children = [children]
-    for child in children:
-        if child is not None:
-            yield from _walk(child)
+from component_helpers import walk_components as _walk
 
 
 def _column_fields(column_defs):
@@ -141,7 +132,11 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert len(details) == 1
     assert details[0].id == "ice-chat-reply-audit-details"
     assert details[0].open is False
-    assert details[0].children[0].children == "Edge assessment & reply delivery"
+    summary = details[0].children[0]
+    assert isinstance(summary, html.Summary)
+    assert all(word in summary.children.lower() for word in ("assessment", "reply"))
+    audit_status = next(item for item in _walk(details[0]) if getattr(item, "id", None) == "ice-chat-reply-audit")
+    assert audit_status.role == "status"
     assert "More filters" not in {
         item for item in items if isinstance(item, str)
     }
@@ -195,87 +190,38 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert "processUnpinnedColumns" not in grid.dashGridOptions
     assert grid.dashGridOptions["rowSelection"]["checkboxes"] is False
     fields = _column_fields(grid.columnDefs)
-    assert fields[:10] == [
-        "product_label",
-        "contract_label",
-        "option_label",
-        "strike_label",
-        "observed_display",
-        "price_unit_label",
-        "bid_size",
-        "bid",
-        "offer",
-        "offer_size",
-    ]
-    by_field = _columns_by_field(quote_components.QUOTE_COLUMN_DEFS)
-    assert by_field["product_label"]["pinned"] == "left"
-    assert by_field["contract_label"]["pinned"] == "left"
-    assert by_field["option_label"]["pinned"] == "left"
-    assert by_field["strike_label"]["pinned"] == "left"
+    assert len(fields) == len(set(fields))
+    assert {
+        "observed_at", "contract_label", "strategy_display", "broker_display", "broker_iv_display",
+        "model_sort_value", "our_iv_pct", "signal_price_edge", "forward", "forward_source_display",
+        "surface_published_at", "tape_delta", "tape_gamma", "tape_vega", "sender_handle", "reply_display",
+    } <= set(fields)
+    assert {"source_channel", "processing_status", "surface_business_day_age"}.isdisjoint(fields)
+    by_field = _columns_by_field(grid.columnDefs)
     assert all(
-        "pinned" not in by_field[field]
-        for field in ("observed_display", "price_unit_label")
+        by_field[field].get("pinned") == "left" and by_field[field]["lockPinned"]
+        for field in ("observed_at", "contract_label", "strategy_display")
     )
-    assert fields.index("bid_size") < fields.index("bid") < fields.index("offer")
-    assert fields.index("offer") < fields.index("offer_size") < fields.index("single_price")
-    assert fields.index("offer") < fields.index("bid_iv_pct")
-    assert "surface_business_day_age" not in fields
-    assert {"source_channel", "processing_status"}.isdisjoint(fields)
-    assert "display_error" in fields
-    market = next(
-        definition for definition in quote_components.QUOTE_COLUMN_DEFS
-        if definition.get("headerName") == "Market"
-    )
-    assert all("USD/bbl" not in definition.get("headerName", "") for definition in quote_components.QUOTE_COLUMN_DEFS)
-    assert by_field["product_label"]["width"] == 72
-    assert by_field["contract_label"]["width"] == 94
-    assert by_field["observed_display"]["width"] == 112
-    assert by_field["sender_handle"]["width"] == 110
-    assert by_field["product_label"].get("pinned") == "left"
-    assert by_field["contract_label"].get("pinned") == "left"
-    assert by_field["option_label"].get("pinned") == "left"
-    assert by_field["strike_label"].get("pinned") == "left"
+    assert fields.index("broker_display") < fields.index("model_sort_value") < fields.index("signal_price_edge")
     assert all(
-        by_field[field].get("width")
-        for field in ("bid", "bid_size", "offer", "offer_size", "single_price", "single_size")
+        by_field[field].get("tooltipField")
+        for field in ("strategy_display", "broker_display", "broker_iv_display", "our_iv_pct",
+                      "signal_price_edge", "forward_source_display", "surface_published_at", "reply_display")
     )
-    assert {"product_label", "contract_label", "option_label", "strike_label", "price_unit_label", "signal_price_edge"}.issubset(fields)
-    assert [definition["headerName"] for definition in quote_components.QUOTE_COLUMN_DEFS] == [
-        "Instrument",
-        "Context",
-        "Market",
-        "Market IV (%)",
-        "Our valuation",
-        "Edge",
-        "Workflow",
-        "Reference",
-    ]
-    assert [definition["headerName"] for definition in market["children"]] == [
-        "Bid qty",
-        "Bid",
-        "Offer",
-        "Offer qty",
-        "Trade",
-        "Qty",
-        "Indication*",
-    ]
+    assert by_field["broker_display"]["sortable"] is False
+    assert by_field["broker_iv_display"]["sortable"] is False
+    assert by_field["broker_iv_display"]["headerName"] == "IV %"
+    assert by_field["our_iv_pct"]["headerName"] == "IV %"
+    assert by_field["model_sort_value"]["valueFormatter"] == {"function": "params.data.model_display"}
+    assert by_field["forward"]["valueFormatter"] == {"function": "params.data.forward_display"}
+    assert all("USD/bbl" not in definition.get("headerName", "") for definition in grid.columnDefs)
     assert "ice-chat-row-blocked" in grid.dashGridOptions["rowClassRules"]
-    signal_group = next(
-        definition for definition in quote_components.QUOTE_COLUMN_DEFS
-        if definition.get("headerName") == "Edge"
-    )
-    assert [definition["headerName"] for definition in signal_group["children"]] == [
-        "Action",
-        "Gross",
-        "Net",
-        "Vol pts",
-    ]
-    assert "signal_edge_ticks" not in fields
-    action_column = next(
-        definition for definition in signal_group["children"]
-        if definition.get("field") == "signal_label"
-    )
-    assert "ice-chat-cell-buy" in action_column["cellClassRules"]
+    edge_column = by_field["signal_price_edge"]
+    assert edge_column["cellRenderer"] == "IceTapeEdge"
+    assert set(edge_column["cellClassRules"]) == {
+        "ice-tape-edge-cell-buy", "ice-tape-edge-cell-sell", "ice-tape-edge-cell-none", "ice-tape-edge-cell-unpriced",
+    }
+    assert by_field["reply_display"]["cellRenderer"] == "IceTapeDelivery"
 
 
 def test_route_redirects_to_embedded_section_and_navigation_is_retired():

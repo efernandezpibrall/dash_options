@@ -9233,3 +9233,22 @@ button:hover {
 .vol-trades-source-warning { margin-top: 6px; padding: 8px; background: #fff3cd; color: #664d03; border-left: 3px solid #b7791f; font-weight: 600; }
 .vol-trades-source-aligned { margin-top: 4px; font-size: 11px; color: #166534; }
 #vol-trades-icap-prior-control { margin: 6px 0 12px; font-size: 12px; }
+
+
+/* ICAP fallback date belongs beside the expiry heading, above the chart layers. */
+.vol-trades-expiry-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    min-width: 0;
+}
+.vol-trades-icap-date-warning {
+    color: #92400e;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+}
+.vol-trades-icap-date-warning:empty {
+    display: none;
+}

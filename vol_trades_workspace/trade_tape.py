@@ -11,6 +11,41 @@ import vol_trades_data as market_data
 from options.trade_marker_opacity import trade_volume_opacities
 
 
+_TRADE_TYPE_LABELS = {
+    "regular": "Regular trade", "block": "Block trade",
+    "system_priced": "System-priced trade", "split_leg": "Vertical split leg",
+    "block_split_leg": "Block trade · vertical split leg", "unknown": "Unclassified trade",
+}
+
+
+def _trade_type_label(row):
+    classification = row.get("trade_classification")
+    if classification is None or pd.isna(classification):
+        return str(row.get("condition_codes") or "Regular trade")
+    return _TRADE_TYPE_LABELS.get(classification, str(classification))
+
+
+def _trade_iv_label(row):
+    lifecycle = row.get("trade_lifecycle")
+    audit_labels = {"cancelled": "Cancelled", "cancellation": "Cancellation record",
+                    "superseded": "Superseded", "unverified_correction": "Correction pending"}
+    if lifecycle in audit_labels:
+        return audit_labels[lifecycle]
+    status = row.get("trade_iv_status")
+    if status == "resolved":
+        return {"system_priced": "System-priced IV", "split_leg": "Split-leg IV",
+                "block_split_leg": "Split-leg IV", "block": "Block trade IV"}.get(
+                    row.get("trade_classification"), "IV calculated")
+    reason = str(row.get("trade_iv_exclusion_reason") or "").lower()
+    if "future mid" in reason:
+        return "Underlying match unavailable"
+    if "execution timestamp" in reason:
+        return "Execution time unavailable"
+    if "condition" in reason and row.get("policy_version") == "tfo-execution-trade-iv-v1":
+        return "Condition review"
+    return "IV unavailable" if status == "unresolved" else "Excluded (legacy policy)"
+
+
 
 
 
@@ -114,6 +149,14 @@ def trade_trace_payloads(
     selected["trade_time_gst"] = pd.to_datetime(
         selected["trade_at"], errors="coerce", utc=True
     ).dt.tz_convert("Asia/Dubai").dt.strftime("%H:%M:%S GST")
+    selected["reported_time_gst"] = pd.to_datetime(
+        selected.get("reported_at", selected["trade_at"]), errors="coerce", utc=True
+    ).dt.tz_convert("Asia/Dubai").dt.strftime("%H:%M:%S GST")
+    selected["trade_type_label"] = selected.apply(_trade_type_label, axis=1)
+    selected["trade_iv_label"] = selected.apply(_trade_iv_label, axis=1)
+    selected["time_basis_label"] = selected.get(
+        "execution_at", pd.Series(pd.NaT, index=selected.index)
+    ).map(lambda value: "Executed" if pd.notna(value) else "Reported (legacy)")
     result = dict(empty)
     for put_call in ("C", "P"):
         side = selected.loc[selected["put_call"].eq(put_call)].copy()
@@ -150,9 +193,11 @@ def trade_trace_payloads(
                     quote_age_labels,
                     side["condition_codes"].fillna("regular"),
                     size_labels,
+                    side["trade_type_label"], side["reported_time_gst"], side["trade_iv_label"],
+                    side["time_basis_label"],
                 ]
             ).tolist(),
-            "size": [5 if put_call == "C" else 6] * len(side),
+            "size": [6] * len(side),
             "symbol": ["circle" if put_call == "C" else "circle-open"] * len(side),
             "opacity": trade_volume_opacities(sizes, reference_volumes=reference_sizes),
             "line_color": ["#FFFFFF" if put_call == "C" else "#0F766E"] * len(side),
@@ -176,6 +221,8 @@ def _trade_tape_rows(
     rows = []
     for row in selected.itertuples(index=False):
         trade_at = pd.Timestamp(row.trade_at).tz_convert("Asia/Dubai")
+        reported = pd.to_datetime(getattr(row, "reported_at", row.trade_at), errors="coerce", utc=True)
+        executed = pd.to_datetime(getattr(row, "execution_at", None), errors="coerce", utc=True)
         quote_age_label = _trade_quote_age_label(
             row.trade_at,
             getattr(row, "future_bid_at", None),
@@ -185,6 +232,10 @@ def _trade_tape_rows(
             {
                 "event_id": f"{row.event_fingerprint}:{int(row.occurrence_ordinal)}",
                 "trade_time_gst": trade_at.strftime("%H:%M:%S.%f")[:-3],
+                "execution_time_gst": None if pd.isna(executed) else executed.tz_convert("Asia/Dubai").strftime("%H:%M:%S.%f")[:-3],
+                "reported_time_gst": None if pd.isna(reported) else reported.tz_convert("Asia/Dubai").strftime("%H:%M:%S.%f")[:-3],
+                "trade_type_label": _trade_type_label(row._asdict()),
+                "trade_iv_label": _trade_iv_label(row._asdict()),
                 "option_security": row.option_security,
                 "put_call": row.put_call,
                 "strike": market_data._numeric_or_none(row.strike),
@@ -206,38 +257,3 @@ def _trade_tape_rows(
             }
         )
     return rows
-
-
-def _trade_slider_config(
-    trade_tape: pd.DataFrame,
-    observed_at: Any,
-    *,
-    preserve_lookback: bool = False,
-    previous_start: Any = None,
-    previous_max: Any = None,
-) -> tuple[int, int, int, dict[int, str], bool]:
-    cutoff = pd.to_datetime(observed_at, errors="coerce", utc=True)
-    if trade_tape is not None and not trade_tape.empty:
-        tape_cutoff = pd.to_datetime(
-            trade_tape["cutoff_at"], errors="coerce", utc=True
-        ).dropna()
-        if not tape_cutoff.empty:
-            cutoff = tape_cutoff.max()
-    if pd.isna(cutoff):
-        return 0, 1, 0, {0: "00:00", 1: "Latest"}, True
-    local = cutoff.tz_convert("Asia/Dubai")
-    maximum = max(1, int(local.hour * 3600 + local.minute * 60 + local.second))
-    value = 0
-    if preserve_lookback and previous_start is not None and previous_max is not None:
-        lookback = max(0, int(float(previous_max) - float(previous_start)))
-        value = max(0, maximum - lookback)
-    mark_values = sorted({0, maximum, *(value for value in (21600, 43200, 64800) if value < maximum)})
-    marks = {
-        value: (
-            "Latest"
-            if value == maximum
-            else f"{value // 3600:02d}:{(value % 3600) // 60:02d}"
-        )
-        for value in mark_values
-    }
-    return 0, maximum, value, marks, trade_tape is None or trade_tape.empty

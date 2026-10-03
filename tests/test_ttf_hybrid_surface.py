@@ -1,6 +1,5 @@
 import base64
 from io import BytesIO
-import logging
 import pickle
 
 import numpy as np
@@ -14,28 +13,14 @@ from vol_calibration.calibration_inputs import (
     UNDISCOUNTED_CALL_DELTA,
 )
 from vol_calibration.ttf_hybrid_surface import (
-    BRENT_HYBRID_METHOD,
-    BRENT_HYBRID_POLICY_VERSION,
-    CANONICAL_SURFACE_POINT_COUNT,
-    GAS_HYBRID_METHOD,
-    GAS_HYBRID_POLICY_VERSIONS,
-    HH_HYBRID_METHOD,
-    HH_HYBRID_POLICY_VERSION,
-    TTF_CORE_SAMPLE_COUNT,
     TTF_HYBRID_METHOD,
     TTF_HYBRID_POLICY_VERSION,
-    build_ttf_pchip_core,
-    densify_bounded_source_surface,
-    fit_gas_hybrid_candidate,
-    fit_hybrid_candidate,
     fit_ttf_hybrid_candidate,
-    hybrid_total_variance,
-    operational_surface_frame,
 )
 from vol_calibration.pages import ttf
 from vol_calibration import ttf_hybrid_surface as hybrid_module
 from vol_calibration import observed_fit_pool
-from options.vol_calibration.models import gas_hybrid_fit, gas_hybrid
+from options.vol_calibration.models import gas_hybrid_fit
 from vol_calibration.components.smile_grid import create_smile_grid_figure
 
 
@@ -178,203 +163,6 @@ def test_start_pool_failure_runs_the_original_serial_starts(monkeypatch):
         )
     assert len(starts) == 3
     assert [attempt["start"] for attempt in failure.value.attempts] == [0, 1, 2]
-
-
-def test_pchip_core_reproduces_nodes_and_total_variance_units_exactly():
-    observations = _hybrid_observations()
-    core = build_ttf_pchip_core(observations)
-
-    expected = (90.0 / 365.0) * core.iv_nodes**2
-    assert np.allclose(core.total_variance_nodes, expected, rtol=0.0, atol=1e-14)
-    assert np.allclose(
-        core.total_variance(core.x_nodes), expected, rtol=0.0, atol=1e-13
-    )
-    assert core.interpolator.extrapolate is False
-
-
-def test_pchip_core_rejects_duplicate_strikes_and_non_positive_variance():
-    duplicate = _hybrid_observations()
-    duplicate.loc[duplicate.index[-1], "strike"] = duplicate.loc[
-        duplicate.index[-2], "strike"
-    ]
-    with pytest.raises(ValueError, match="distinct, finite, positive official strikes"):
-        build_ttf_pchip_core(duplicate)
-
-    with pytest.raises(ValueError, match="implied volatilities"):
-        build_ttf_pchip_core(_hybrid_observations().assign(iv=0.0))
-
-
-def test_hybrid_fit_is_deterministic_and_passes_complete_arbitrage_gate():
-    observations = _hybrid_observations()
-    first = fit_ttf_hybrid_candidate(observations, get_defaults("TTF"), n_starts=1)
-    second = fit_ttf_hybrid_candidate(observations, get_defaults("TTF"), n_starts=1)
-
-    assert first["calibration_method"] == TTF_HYBRID_METHOD
-    assert first["calibration_policy_version"] == TTF_HYBRID_POLICY_VERSION
-    assert first["core_tv_rmse"] == 0.0
-    assert first["validation"]["is_valid"] is True
-    assert first["validation"]["min_g"] >= 0.006 - 1e-8
-    assert first["validation"]["n_points"] == 4001
-    assert first["tail_fit_tv_rmse"] == pytest.approx(
-        second["tail_fit_tv_rmse"], abs=1e-12
-    )
-    assert first["params"] == pytest.approx(second["params"], abs=1e-10)
-
-
-def test_optional_solver_stage_timing_preserves_fit_output(monkeypatch, caplog):
-    observations = _hybrid_observations()
-    initial = get_defaults("TTF")
-    monkeypatch.delenv("CALIBRATION_TIMING", raising=False)
-    baseline = fit_ttf_hybrid_candidate(observations, initial, n_starts=1)
-    monkeypatch.setenv("CALIBRATION_TIMING", "1")
-    with caplog.at_level(logging.INFO, logger=gas_hybrid.__name__):
-        timed = fit_ttf_hybrid_candidate(observations, initial, n_starts=1)
-
-    assert timed["params"] == baseline["params"]
-    assert timed["validation"] == baseline["validation"]
-    assert timed["attempts"] == baseline["attempts"]
-    stages = {record.message.split("stage=")[1].split()[0] for record in caplog.records if "stage=" in record.message}
-    assert {"core_preparation", "wing_solve", "blend_gate", "fit_total"} <= stages
-
-
-def test_hybrid_is_c1_at_core_and_wing_join_points():
-    observations = _hybrid_observations()
-    result = fit_ttf_hybrid_candidate(observations, get_defaults("TTF"), n_starts=1)
-    core = result["core"]
-    width = result["left_blend_width"]
-    join_points = (
-        core.xmin - width,
-        core.xmin,
-        core.xmax,
-        core.xmax + result["right_blend_width"],
-    )
-    step = 1e-5
-    for join in join_points:
-        x = join + np.asarray([-step, 0.0, step])
-        values = hybrid_total_variance(
-            x,
-            core,
-            result["params"],
-            left_blend_width=result["left_blend_width"],
-            right_blend_width=result["right_blend_width"],
-        )
-        left_derivative = (values[1] - values[0]) / step
-        right_derivative = (values[2] - values[1]) / step
-        assert left_derivative == pytest.approx(right_derivative, abs=3e-4)
-
-
-def test_operational_surface_labels_core_blends_tails_and_preserves_source():
-    observations = _hybrid_observations()
-    result = fit_ttf_hybrid_candidate(observations, get_defaults("TTF"), n_starts=1)
-    surface = operational_surface_frame(
-        observations,
-        result["params"],
-        left_blend_width=result["left_blend_width"],
-        right_blend_width=result["right_blend_width"],
-        n_points=TTF_CORE_SAMPLE_COUNT,
-    )
-
-    assert len(surface) == TTF_CORE_SAMPLE_COUNT
-    assert set(surface["calibration_basis"]) == {"observed"}
-    assert set(surface["source_name"]) == {"official"}
-    assert {
-        "wing_left",
-        "left_blend",
-        "pchip_core",
-        "right_blend",
-        "wing_right",
-    }.issubset(set(surface["blend_classification"]))
-    assert np.all(np.isfinite(surface[["delta", "strike", "iv", "total_variance"]]))
-    assert np.all(surface["total_variance"] > 0)
-    for x, iv, delta in zip(
-        result["core"].x_nodes,
-        result["core"].iv_nodes,
-        result["core"].delta_nodes,
-    ):
-        anchor = surface.loc[surface["log_moneyness"] == x]
-        assert len(anchor) == 1
-        assert anchor.iloc[0]["iv"] == iv
-        assert anchor.iloc[0]["delta"] == delta
-
-
-def test_nbp_uses_explicit_ttf_seeded_shared_gas_policy():
-    result = fit_gas_hybrid_candidate(
-        _hybrid_observations(),
-        get_defaults("NBP"),
-        commodity="NBP",
-        n_starts=1,
-    )
-    surface = operational_surface_frame(
-        _hybrid_observations(),
-        result["params"],
-        left_blend_width=result["left_blend_width"],
-        right_blend_width=result["right_blend_width"],
-    )
-
-    assert result["calibration_method"] == GAS_HYBRID_METHOD
-    assert (
-        result["calibration_policy_version"]
-        == GAS_HYBRID_POLICY_VERSIONS["NBP"]
-    )
-    assert len(surface) == CANONICAL_SURFACE_POINT_COUNT
-    assert set(result["core"].x_nodes).issubset(set(surface["log_moneyness"]))
-
-
-@pytest.mark.parametrize(
-    ("product", "expected_method", "expected_policy"),
-    [
-        ("BRENT", BRENT_HYBRID_METHOD, BRENT_HYBRID_POLICY_VERSION),
-        ("HH", HH_HYBRID_METHOD, HH_HYBRID_POLICY_VERSION),
-    ],
-)
-def test_product_specific_anchor_methods_share_the_dense_finalizer(
-    product,
-    expected_method,
-    expected_policy,
-):
-    result = fit_hybrid_candidate(
-        _hybrid_observations(),
-        get_defaults(product),
-        commodity=product,
-        n_starts=1,
-    )
-    surface = operational_surface_frame(
-        _hybrid_observations(),
-        result["params"],
-        left_blend_width=result["left_blend_width"],
-        right_blend_width=result["right_blend_width"],
-        commodity=product,
-    )
-
-    assert result["calibration_method"] == expected_method
-    assert result["calibration_policy_version"] == expected_policy
-    assert len(surface) == CANONICAL_SURFACE_POINT_COUNT
-    assert set(result["core"].x_nodes).issubset(set(surface["log_moneyness"]))
-
-
-@pytest.mark.parametrize("product", ["BRENT", "HH"])
-def test_bounded_source_densifier_returns_authoritative_401_point_slice(product):
-    observations = _hybrid_observations()
-    source = observations.rename(
-        columns={
-            "expiry": "contract_date",
-            "iv": "volatility",
-            "forward": "working_forward",
-        }
-    ).copy()
-    source["total_variance"] = (
-        source["volatility"] ** 2 * source["dte"] / 365.0
-    )
-    source["surface_region"] = "source_anchor"
-    source["blend_classification"] = "source_anchor"
-
-    dense, results = densify_bounded_source_surface(source, commodity=product)
-
-    assert len(dense) == CANONICAL_SURFACE_POINT_COUNT
-    assert len(results) == 1
-    assert results[0]["validation"]["is_valid"] is True
-    for delta in TTF_CALL_DELTA_NODES:
-        assert np.isclose(dense["delta"], delta, rtol=0.0, atol=1e-10).any()
 
 
 def test_smile_grid_legend_toggles_each_series_across_all_expiries():

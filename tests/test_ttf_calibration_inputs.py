@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from dash.exceptions import PreventUpdate
 
+import surface_data
 from options.vol_calibration import api as calibration_inputs
 from options.vol_calibration.calibration import ttf_candidates, ttf_batch as engine_batch
 from vol_calibration import batch_adapter
@@ -140,17 +141,24 @@ def test_missing_exact_forward_and_option_expiry_fail_closed():
 
 def test_unavailable_cob_disables_calibration_without_synthetic_data(monkeypatch):
     clear_workspace_load_cache()
+    snapshot_calls = []
+
+    def unavailable_snapshot(product, requested, *, refresh):
+        snapshot_calls.append((product, requested, refresh))
+        return {
+            "actual_cob": None,
+            "source": "unavailable",
+            "error": "No official TTF settlement exists on or before 2026-06-10",
+        }
+
+    def forbidden_market_load(*args, **kwargs):
+        pytest.fail("Unavailable settlement must not load synthetic or market inputs")
+
+    monkeypatch.setattr(surface_data, "get_operational_surface_snapshot", unavailable_snapshot)
     monkeypatch.setattr(
         ttf,
         "load_market_data_with_metadata",
-        lambda *args, **kwargs: {
-            "data": pd.DataFrame(),
-            "source": "unavailable",
-            "is_synthetic": False,
-            "last_update": None,
-            "message": "No eligible TTF market data for 2026-06-10",
-            "error": "No unified TTF volatility surface for exact COB 2026-06-10",
-        },
+        forbidden_market_load,
     )
 
     result = ttf.load_data("2026-06-10", 0)
@@ -159,6 +167,9 @@ def test_unavailable_cob_disables_calibration_without_synthetic_data(monkeypatch
     assert result[6] is True
     assert "No exact-COB TTF volatility surface" in result[5]
     assert "2026-06-10" in result[3]
+    assert snapshot_calls == [("TTF", pd.Timestamp("2026-06-10").date(), False)]
+    assert result[8]["settlement_cob"] is None
+    assert result[8]["market_row_count"] == 0
 
 
 def test_selected_calibration_accepts_sep_26_and_passes_delta_convention(monkeypatch):

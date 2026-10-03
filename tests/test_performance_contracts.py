@@ -1,6 +1,7 @@
 import json
 
 import pandas as pd
+import pytest
 
 import market_data
 import surface_data
@@ -24,24 +25,60 @@ def test_prices_query_transfers_only_the_five_cobs_the_chart_can_render(monkeypa
     assert captured['params']['from_cob'] == pd.Timestamp('2026-06-01').date()
 
 
-def test_price_period_grouping_matches_scalar_labels():
-    maturities = pd.date_range('2026-01-01', periods=18, freq='MS')
+@pytest.mark.parametrize(
+    ('grouping', 'ttf_first', 'hh', 'ttf_next'),
+    [
+        (
+            'monthly',
+            {"Apr'26": 10, "May'26": 20, "Sep'26": 40, "Oct'26": 60, "Dec'26": 80, "Jan'27": 100},
+            {"Apr'26": 110, "May'26": 120},
+            {"Apr'26": 210, "May'26": 220},
+        ),
+        ('quarterly', {"Q2'26": 15, "Q3'26": 40, "Q4'26": 70, "Q1'27": 100},
+         {"Q2'26": 115}, {"Q2'26": 215}),
+        # Preserve this page's existing May-September summer convention.
+        ('season', {"Win'26": 50, "Sum'26": 30, "Win'27": 100},
+         {"Win'26": 110, "Sum'26": 120}, {"Win'26": 210, "Sum'26": 220}),
+        ('calendar', {'2026': 42, '2027': 100}, {'2026': 115}, {'2026': 215}),
+    ],
+)
+def test_price_period_grouping_preserves_labels_averages_and_source_groups(
+    grouping, ttf_first, hh, ttf_next,
+):
     frame = pd.DataFrame(
-        {
-            'contract': 'JKM',
-            'trade_date': pd.Timestamp('2026-08-27'),
-            'maturity_date': maturities,
-            'settlement_price': range(len(maturities)),
-        }
+        [
+            ('TTF', '2026-07-30', '2026-04-01', 10),
+            ('TTF', '2026-07-30', '2026-05-01', 20),
+            ('TTF', '2026-07-30', '2026-09-01', 40),
+            ('TTF', '2026-07-30', '2026-10-01', 60),
+            ('TTF', '2026-07-30', '2026-12-01', 80),
+            ('TTF', '2026-07-30', '2027-01-01', 100),
+            ('TTF', '2026-07-30', 'invalid maturity', 999),
+            ('HH', '2026-07-30', '2026-04-01', 110),
+            ('HH', '2026-07-30', '2026-05-01', 120),
+            ('TTF', '2026-07-31', '2026-04-01', 210),
+            ('TTF', '2026-07-31', '2026-05-01', 220),
+        ],
+        columns=['contract', 'trade_date', 'maturity_date', 'settlement_price'],
     )
+    before = frame.copy(deep=True)
 
-    for grouping in ('monthly', 'quarterly', 'season', 'calendar'):
-        expected_labels = {
-            prices._price_period_label(value, grouping)
-            for value in maturities
-        }
-        result = prices.group_data_by_period(frame, grouping)
-        assert set(result['period']) == expected_labels
+    result = prices.group_data_by_period(frame, grouping)
+
+    expected = {}
+    for contract, cob, values in (
+        ('TTF', '2026-07-30', ttf_first),
+        ('HH', '2026-07-30', hh),
+        ('TTF', '2026-07-31', ttf_next),
+    ):
+        expected.update({(contract, cob, period): value for period, value in values.items()})
+    actual = {
+        (row.contract, row.trade_date, row.period): row.settlement_price
+        for row in result.itertuples()
+    }
+    assert len(result) == len(expected)
+    assert actual == pytest.approx(expected)
+    pd.testing.assert_frame_equal(frame, before)
 
 
 def test_greeks_browser_reference_preserves_payload_and_is_small():

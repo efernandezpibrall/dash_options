@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import dialect
 
 from options.option_contract_conventions import CONTRACT_CONVENTIONS
 
@@ -50,24 +51,53 @@ def test_fractional_quantity_migration_follows_existing_head():
     assert migration.down_revision == "20260831_03"
 
 
-def test_upgrade_changes_only_valuation_quantity_to_numeric_30_6(monkeypatch):
-    migration = _load_migration()
-    calls = []
+class _QueryResult:
+    def __init__(self, value):
+        self.value = value
 
-    class RecordingOperations:
-        def get_bind(self):
-            return object()
+    def mappings(self):
+        return self
 
-        def alter_column(self, *args, **kwargs):
-            calls.append((args, kwargs))
+    def first(self):
+        return self.value
 
-    monkeypatch.setattr(migration, "_dependent_view_snapshot", lambda bind: None)
-    monkeypatch.setattr(migration, "_restore_dependent_view", lambda bind, snapshot: None)
-    monkeypatch.setattr(migration, "op", RecordingOperations())
-    migration.upgrade()
+    def all(self):
+        return self.value
 
-    assert len(calls) == 1
-    args, kwargs = calls[0]
+    def scalar_one(self):
+        return self.value
+
+
+class _MigrationRecorder:
+    """Record executed migration operations without replacing its view helpers."""
+
+    dialect = dialect()
+
+    def __init__(self, query_results):
+        self.query_results = iter(query_results)
+        self.executions = []
+        self.changes = []
+        self.alterations = []
+
+    def get_bind(self):
+        return self
+
+    def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        self.executions.append((sql, params))
+        if sql.startswith("SELECT"):
+            return _QueryResult(next(self.query_results))
+        self.changes.append(sql)
+        return _QueryResult(None)
+
+    def alter_column(self, *args, **kwargs):
+        self.alterations.append((args, kwargs))
+        self.changes.append("ALTER valuation quantity")
+
+
+def _assert_fractional_alteration(operations):
+    assert len(operations.alterations) == 1
+    args, kwargs = operations.alterations[0]
     assert args == ("trades_options_valuation", "quantity")
     assert kwargs["schema"] == "at_lng"
     assert isinstance(kwargs["existing_type"], sa.BigInteger)
@@ -77,6 +107,20 @@ def test_upgrade_changes_only_valuation_quantity_to_numeric_30_6(monkeypatch):
     assert kwargs["postgresql_using"] == "quantity::numeric(30,6)"
 
 
+def test_upgrade_changes_only_valuation_quantity_when_current_view_is_absent(monkeypatch):
+    migration = _load_migration()
+    operations = _MigrationRecorder([None])
+    monkeypatch.setattr(migration, "op", operations)
+
+    migration.upgrade()
+
+    _assert_fractional_alteration(operations)
+    assert operations.changes == ["ALTER valuation quantity"]
+    assert operations.executions[0][1] == {
+        "schema": "at_lng", "view_name": "trades_options_valuation_current",
+    }
+
+
 def test_fractional_quantity_migration_has_no_lossy_downgrade():
     migration = _load_migration()
 
@@ -84,13 +128,67 @@ def test_fractional_quantity_migration_has_no_lossy_downgrade():
         migration.downgrade()
 
 
-def test_fractional_quantity_migration_preserves_dependent_current_view():
-    source = MIGRATION_PATH.read_text()
+def test_fractional_quantity_migration_preserves_current_view_metadata_and_order(monkeypatch):
+    migration = _load_migration()
+    operations = _MigrationRecorder([
+        {
+            "view_definition": "SELECT quantity FROM at_lng.trades_options_valuation",
+            "owner_name": "pricing owner",
+            "comment": "trader's audit",
+        },
+        True,
+        [],
+        [
+            {"grantee": "PUBLIC", "privilege_type": "SELECT", "is_grantable": "NO"},
+            {"grantee": "risk desk", "privilege_type": "SELECT", "is_grantable": "YES"},
+        ],
+    ])
+    monkeypatch.setattr(migration, "op", operations)
 
-    assert "pg_get_viewdef" in source
-    assert "role_table_grants" in source
-    assert "ALTER VIEW" in source
-    assert "dependent views" in source
+    migration.upgrade()
+
+    _assert_fractional_alteration(operations)
+    view = "at_lng.trades_options_valuation_current"
+    assert operations.changes == [
+        'DROP VIEW "at_lng"."trades_options_valuation_current"',
+        "ALTER valuation quantity",
+        f"CREATE VIEW {view} AS SELECT quantity FROM at_lng.trades_options_valuation",
+        f"GRANT SELECT ON {view} TO PUBLIC",
+        f'GRANT SELECT ON {view} TO "risk desk" WITH GRANT OPTION',
+        f"COMMENT ON VIEW {view} IS 'trader''s audit'",
+        f'ALTER VIEW {view} OWNER TO "pricing owner"',
+    ]
+    assert [params for sql, params in operations.executions if sql.startswith("SELECT")] == [
+        {"schema": "at_lng", "view_name": "trades_options_valuation_current"},
+        {"owner_name": "pricing owner"},
+        {"qualified_view": view},
+        {"schema": "at_lng", "view_name": "trades_options_valuation_current"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("may_manage", "dependants", "message"),
+    [
+        (False, [], "must run as owner"),
+        (True, [("at_lng", "risk_report")], "found dependent views"),
+    ],
+)
+def test_fractional_migration_refuses_unsafe_view_change_before_mutation(
+    monkeypatch, may_manage, dependants, message,
+):
+    migration = _load_migration()
+    operations = _MigrationRecorder([
+        {"view_definition": "SELECT quantity", "owner_name": "owner", "comment": None},
+        may_manage,
+        dependants,
+    ])
+    monkeypatch.setattr(migration, "op", operations)
+
+    with pytest.raises(RuntimeError, match=message):
+        migration.upgrade()
+
+    assert operations.changes == []
+    assert operations.alterations == []
 
 
 def test_generic_option_family_migration_follows_fractional_quantities():

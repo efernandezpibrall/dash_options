@@ -47,7 +47,7 @@ def test_bloomberg_symbols_follow_option_side_and_retain_price_matching_provenan
     payload = trade_tape.trade_trace_payloads(frame, pd.Timestamp("2027-01-01"), "strike")
     assert payload["C"]["symbol"] == ["circle", "circle"]
     assert payload["P"]["symbol"] == ["circle-open"]
-    assert payload["C"]["size"] == [5, 5]
+    assert payload["C"]["size"] == [6, 6]
     assert payload["P"]["size"] == [6]
     assert payload["C"]["x"] == [75, 75]
     assert payload["C"]["y"] == [65, 65]

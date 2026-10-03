@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 from typing import Any
 import numpy as np
+from vol_trades_chart_information import expiry_information
 import pandas as pd
 from options.vol_calibration.api import strike_to_delta
 from options.vol_calibration.api import (
@@ -789,7 +790,7 @@ def _intraday_expiry_quality(
     elif not executable_count and parity["status"] in {"insufficient", "unverifiable"}:
         detail += " · Bloomberg LAST_PRICE timing cannot be verified"
 
-    return {
+    return expiry_information({
         "status": label,
         "color": color,
         "detail": detail,
@@ -798,7 +799,7 @@ def _intraday_expiry_quality(
         "prior_settlement_count": prior_count,
         "prior_settlement_date": prior_label,
         "last_price_parity": parity,
-    }
+    }, raw, trade_tape)
 
 
 def _settlement_chart_exclusions(

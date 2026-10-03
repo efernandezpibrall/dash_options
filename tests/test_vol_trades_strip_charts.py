@@ -102,7 +102,7 @@ def test_shared_layers_and_delta_mode_apply_to_strip_charts():
     figure = render([row()], x_axis="delta", layers=["ice-bid"])[0].children[1].figure
     assert list(figure.layout.xaxis.range) == [0, 1]
     assert all(trace.visible == (trace.meta["legend_layer"] == "ice-bid") for trace in figure.data)
-    assert all(0 <= value <= 1 for trace in figure.data for value in trace.x)
+    assert all(0 <= value <= 1 for trace in figure.data for value in trace.x if value is not None)
 
 
 def test_latest_blocked_update_cannot_resurrect_previous_quote():
@@ -114,14 +114,21 @@ def test_latest_blocked_update_cannot_resurrect_previous_quote():
         )
         == {}
     )
-    assert (
-        len(
-            prepare_strip_events([row(), row(event_id="other", sender_handle="other")], "TFO", WINDOW)[
-                "quarter:2027-Q1"
-            ]
-        )
-        == 2
-    )
+    assert len(prepare_strip_events([row(), row(event_id="other", sender_handle="other")], "TFO", WINDOW)["quarter:2027-Q1"]) == 2
+
+
+def test_paired_strip_interval_keeps_event_source_age_and_shared_visibility():
+    panels = render([row()])
+    figure = panels[0].children[1].figure
+    interval = next(trace for trace in figure.data if trace.meta["legend_layer"] == "ice-range")
+    bid = next(trace for trace in figure.data if trace.meta["legend_layer"] == "ice-bid")
+    offer = next(trace for trace in figure.data if trace.meta["legend_layer"] == "ice-offer")
+    assert list(interval.x) == [75, 75, None]
+    assert list(interval.y) == [bid.y[0], offer.y[0], None]
+    assert "6h 00m old" in interval.text[0]
+    assert "Sender broker · chat" in interval.text[0]
+    hidden = render([row()], layers=["ice-offer"])[0].children[1].figure
+    assert not next(trace for trace in hidden.data if trace.meta["legend_layer"] == "ice-range").visible
 
 
 def test_structures_monthlies_wrong_product_and_wrong_window_do_not_become_strip_points():

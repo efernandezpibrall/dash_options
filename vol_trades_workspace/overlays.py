@@ -16,6 +16,7 @@ from vol_trades_market_window import (
     market_context, select_market_window, utc_timestamp,
 )
 from vol_trades_ice_quotes import prepare_overlay_events
+from vol_trades_quote_ranges import RANGE_LAYER, quote_age_label, range_visible
 import vol_trades_data as market_data
 import ice_quote_data as quote_data
 
@@ -38,6 +39,7 @@ def ice_quote_overlay_points(
     """Project persisted IVs using the shared market window and quote-time inputs."""
     empty = {layer: {"x": [], "y": [], "text": [], "opacity": [], "symbol": []}
              for layer in ICE_QUOTE_LAYERS}
+    empty[RANGE_LAYER] = {"x": [], "y": [], "text": []}
     product_code = {"BRENT": "B", "TFO": "TFM"}.get((snapshot or {}).get("product"))
     if product_code is None:
         return empty, 0
@@ -85,6 +87,7 @@ def ice_quote_overlay_points(
         if strike is None or side not in {"C", "P"}:
             omitted += 1
             continue
+        row_points = {}
         for layer, (price_field, iv_field) in ICE_QUOTE_LAYERS.items():
             price = market_data._numeric_or_none(row.get(price_field))
             iv = market_data._numeric_or_none(row.get(iv_field))
@@ -123,7 +126,7 @@ def ice_quote_overlay_points(
             size_label = f"{quoted_size:,.0f}" if quoted_size is not None and quoted_size > 0 else "Size unavailable"
             hover = (
                 f"<b>ICE {label} · {'Call' if side == 'C' else 'Put'}</b>"
-                f"<br>{time_label}<br>Strike {strike:.2f}"
+                f"<br>{time_label} · {quote_age_label(observed, cutoff)}<br>Strike {strike:.2f}"
                 f" · Premium {price:.4f} {escape(str(row.get('price_unit_label') or market_data._product_spec(snapshot.get('product'))['price_unit']))}"
                 f"<br>IV {100.0 * iv:.2f}% · Sender {sender}"
                 f"<br>Quoted size {size_label}"
@@ -131,12 +134,24 @@ def ice_quote_overlay_points(
                 f"<br>Forward {escape(str(row.get('forward') or '—'))} · {forward_source}"
                 f"<br>Publication {publication} · Quote event {escape(str(row.get('event_id') or '—'))}"
             )
+            row_points[layer] = (float(x), 100.0 * iv, hover)
             empty[layer]["x"].append(float(x))
             empty[layer]["y"].append(100.0 * iv)
             empty[layer]["text"].append(hover)
             empty[layer]["opacity"].append(0.85)
             symbol = {"ice-bid": "triangle-down", "ice-offer": "triangle-up", "ice-single": "diamond"}[layer]
             empty[layer]["symbol"].append(symbol + ("-open" if side == "P" else ""))
+        if product_code == "TFM" and {"ice-bid", "ice-offer"}.issubset(row_points):
+            bid_point, offer_point = row_points["ice-bid"], row_points["ice-offer"]
+            bid_price, offer_price = market_data._numeric_or_none(row.get("bid")), market_data._numeric_or_none(row.get("offer"))
+            if bid_point[1] <= offer_point[1] and 0 < bid_price <= offer_price:
+                hover = (f"<b>ICE broker bid–offer · {'Call' if side == 'C' else 'Put'}</b>"
+                         f"<br>Strike {strike:.2f} · IV {bid_point[1]:.2f}–{offer_point[1]:.2f}%"
+                         f"<br>{time_label} · {quote_age_label(observed, cutoff)}"
+                         f"<br>Sender {sender} · {channel}")
+                empty[RANGE_LAYER]["x"].extend([bid_point[0], offer_point[0], None])
+                empty[RANGE_LAYER]["y"].extend([bid_point[1], offer_point[1], None])
+                empty[RANGE_LAYER]["text"].extend([hover, hover, None])
     return empty, omitted
 
 
@@ -190,6 +205,12 @@ def update_ice_quote_overlays(
         patch = Patch()
         for entry in graph_contract.get("traces") or []:
             layer = entry["layer"]
+            if layer == RANGE_LAYER:
+                index, data = int(entry["index"]), points[layer]
+                for key in ("x", "y", "text"):
+                    patch["data"][index][key] = data[key]
+                patch["data"][index]["visible"] = range_visible(selected)
+                continue
             if layer not in ICE_QUOTE_LAYERS:
                 continue
             index, data = int(entry["index"]), points[layer]
@@ -217,7 +238,7 @@ def update_ice_quote_overlays(
             manual = (f"{axis}.range" in relayout or f"{axis}.range[0]" in relayout) and not relayout.get(f"{axis}.autorange", False)
             base = graph_contract.get(range_key)
             if base and not manual:
-                values = [v for layer, data in points.items() if layer in selected for v in data[coordinate]]
+                values = [v for layer, data in points.items() if layer in selected for v in data[coordinate] if v is not None]
                 margin = max(0.5 if axis == "yaxis" else 0.1, (max(values) - min(values)) * 0.05) if values else 0
                 patch["layout"][axis]["range"] = [
                     max(0.0, min(base[0], min(values) - margin)) if values else base[0],

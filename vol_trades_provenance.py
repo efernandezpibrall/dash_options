@@ -104,13 +104,32 @@ def render_toolbar_sources(snapshot: dict[str, Any] | None):
     )
 
 
+def render_icap_date_warning(snapshot: dict[str, Any] | None):
+    """Explain the ICAP date actually plotted beside the expiry section title."""
+    snapshot = snapshot or {}
+    if snapshot.get('product') != 'TFO' or snapshot.get('snapshot_kind') != 'SETTLEMENT':
+        return None
+    icap = snapshot.get('icap') or {}
+    status = icap.get('status')
+    selected = _date(snapshot.get('business_date'))
+    if status == 'aligned':
+        return None
+    if status == 'prior_comparison':
+        actual = pd.Timestamp(icap['actual_cob']).strftime('%d %b %Y')
+        requested = pd.Timestamp(selected).strftime('%d %b %Y')
+        return f'⚠ ICAP {actual} · prior date (selected {requested})'
+    if status == 'refresh_required':
+        return '⚠ ICAP freshness unavailable · marks hidden'
+    requested = pd.Timestamp(selected).strftime('%d %b %Y') if selected else 'selected date'
+    return f'⚠ ICAP unavailable on or before {requested} · marks hidden'
+
+
 def render_provenance(snapshot: dict[str, Any] | None):
     if not snapshot:
-        return html.Div('Select a market snapshot to verify source dates.'), {'display': 'none'}
+        return html.Div('Select a market snapshot to verify source dates.'), None
     selected = _date(snapshot.get('business_date'))
     product = snapshot.get('product')
     is_tfo_settlement = product == 'TFO' and snapshot.get('snapshot_kind') == 'SETTLEMENT'
-    comparison_style = {} if is_tfo_settlement else {'display': 'none'}
     calibration = snapshot.get('calibration') or {}
     calibration_cob = _date(calibration.get('cob_date'))
     publication = pd.to_datetime(calibration.get('published_at'), errors='coerce', utc=True)
@@ -148,4 +167,4 @@ def render_provenance(snapshot: dict[str, Any] | None):
         html.Div(labels, className='vol-trades-source-dates'),
         html.Div(' '.join(issues), role='alert', className='vol-trades-source-warning') if issues else
         html.Div('Source dates aligned', className='vol-trades-source-aligned'),
-    ], className='vol-trades-source-provenance'), comparison_style
+    ], className='vol-trades-source-provenance'), render_icap_date_warning(snapshot)

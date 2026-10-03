@@ -569,6 +569,10 @@ def _read_trade_tape(
                e.put_call,
                e.strike,
                e.trade_at,
+               e.execution_at,
+               e.iv_eligible,
+               e.trade_classification,
+               e.source_event -> '_collection' ->> 'lifecycle' AS trade_lifecycle,
                e.trade_price,
                e.trade_size,
                e.condition_codes,
@@ -624,12 +628,12 @@ def _read_trade_tape(
         return frame
     for column in (
         "business_date", "underlying_contract_month", "option_expiration_date",
-        "trade_at", "future_bid_at", "future_ask_at", "future_match_at",
+        "trade_at", "execution_at", "future_bid_at", "future_ask_at", "future_match_at",
         "window_start", "cutoff_at",
     ):
         frame[column] = pd.to_datetime(frame[column], errors="coerce", utc=(
             column in {
-                "trade_at", "future_bid_at", "future_ask_at", "future_match_at",
+                "trade_at", "execution_at", "future_bid_at", "future_ask_at", "future_match_at",
                 "window_start", "cutoff_at",
             }
         ))
@@ -639,6 +643,10 @@ def _read_trade_tape(
         "occurrence_ordinal",
     ):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    # UI windows and quote ages use execution time. Retain source report time
+    # separately; legacy snapshots continue to show their original timestamps.
+    frame["reported_at"] = frame["trade_at"]
+    frame["trade_at"] = frame["execution_at"].combine_first(frame["reported_at"])
     return frame
 
 
@@ -1562,4 +1570,3 @@ def read_preceding_brent_settlement(engine, trading_date: date, as_of) -> dict[s
     if row is None:
         raise ValueError("No point-in-time Brent settlement precedes this intraday snapshot.")
     return dict(row)
-

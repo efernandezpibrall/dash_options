@@ -6,17 +6,38 @@ from vol_calibration.components.comparison_modal import create_comparison_plot
 from vol_calibration.components.smile_grid import delta_curve_to_strike_iv
 from options.calibration_engine.converters.delta import strike_to_delta
 from options.calibration_engine.models.wing_model import wing_model_iv
+from options.vol_calibration import api as calibration_api
 
 
-@pytest.mark.parametrize("x_axis", ("log_moneyness", "moneyness", "delta"))
-def test_comparison_plot_propagates_expiry_dte_to_wing_v2(x_axis):
+@pytest.mark.parametrize(
+    ("x_axis", "dte", "expected_deep_call_iv_pct"),
+    [
+        ("log_moneyness", 45.0, 69.90422739296535),
+        ("log_moneyness", 180.0, 41.316406569931175),
+        ("moneyness", 45.0, 33.377235638018085),
+        ("moneyness", 180.0, 27.638834358723347),
+        ("delta", 45.0, 136.67808942273334),
+        ("delta", 180.0, 76.81049013348635),
+    ],
+)
+def test_comparison_plot_propagates_actual_dte_and_preserves_deep_call_values(
+    monkeypatch, x_axis, dte, expected_deep_call_iv_pct,
+):
+    calls = []
+    real_model = calibration_api.wing_model_iv
+
+    def recorded_model(*args, **kwargs):
+        calls.append((kwargs.get("dte"), kwargs.get("model_version")))
+        return real_model(*args, **kwargs)
+
+    monkeypatch.setattr(calibration_api, "wing_model_iv", recorded_model)
     market_data = pd.DataFrame(
         {
             "forward": [100.0, 100.0, 100.0],
             "strike": [80.0, 100.0, 120.0],
             "iv": [0.32, 0.25, 0.29],
             "delta": [-0.25, 0.50, 0.25],
-            "dte": [45.0, 45.0, 45.0],
+            "dte": [dte, dte, dte],
         }
     )
     params = {
@@ -45,9 +66,16 @@ def test_comparison_plot_propagates_expiry_dte_to_wing_v2(x_axis):
         model_version="wing_v2",
     )
 
-    assert len(figure.data) == 4
+    assert [trace.name for trace in figure.data] == ["Market", "Current", "Candidate", "Final"]
+    assert len(calls) >= 3
+    assert set(calls) == {(dte, "wing_v2")}
+    # Frozen independently from the specified deep-call equation: boundary
+    # x=0.22, sigma=0.2544, scale=0.02 and total-variance slope=0.2.
+    # Delta-axis values solve Black-76 call delta=0.005 using that equation.
+    tolerance = 1e-4 if x_axis == "delta" else 1e-11
     for trace in figure.data[1:]:
         assert np.isfinite(np.asarray(trace.y, dtype=float)).all()
+        assert trace.y[-1] == pytest.approx(expected_deep_call_iv_pct, rel=tolerance)
 
 
 def test_feb27_extreme_call_delta_is_not_clipped_at_five_forwards():

@@ -276,7 +276,8 @@ def render_reply_audit(selected_rows, snapshot, product="BRENT"):
                 html.Span(f"Acknowledged {gst(record['outbound_acknowledged_at'])}")]
     if record["outbound_batch_reference"]:
         metadata.append(html.Span(f"Ref {record['outbound_batch_reference']}"))
-    children = quote_components._edge_audit(record["edge_assessment"], record["quote_context"], record)
+    children = quote_components.quote_details(selected, record)
+    children.extend(quote_components._edge_audit(record["edge_assessment"], record["quote_context"], record))
     children.append(html.Div(metadata, className="ice-chat-reply-metadata"))
     if record["outbound_error_message"]:
         children.append(html.P(record["outbound_error_message"]))
@@ -286,3 +287,12 @@ def render_reply_audit(selected_rows, snapshot, product="BRENT"):
         children.append(html.P("Exact text was not retained for this earlier reply." if state
                                else "No outbound message has been sent for this quote."))
     return children, True
+
+
+@callback(
+    Output("ice-chat-tape-context", "children"),
+    Input("brent-vol-history-product", "value"),
+)
+def render_tape_context(product):
+    selected = quote_data._selected_product(product)
+    return {"TFO": "TTF · EUR/MWh", "JKM": "JKM · USD/MMBtu", "BRENT": "Brent · USD/bbl"}.get(selected, "No quote feed")

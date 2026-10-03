@@ -350,9 +350,11 @@ load and pin its immutable payload for the request. Expired or unavailable
 snapshots require a rebuild or an explicit refresh-required state; an initialized
 worker is not evidence that its source revision remains current.
 
-TFO settlement charts require the selected ICAP COB by default. Missing dates
-hide the ICAP diamonds. The explicit prior-date comparison control permits an
-older COB only with a visible warning. Source receipts above the expiry panels
+TFO settlement charts use the selected ICAP COB when available and automatically
+use the nearest prior ICAP COB otherwise. A warning beside the Expiry panels
+title identifies the actual ICAP date and selected market date. If no usable
+ICAP COB exists on or before the selected date, or freshness cannot be verified,
+the marks stay hidden with an explicit header warning. Source receipts above the expiry panels
 show Bloomberg COB, actual ICAP COB, calibrated COB and publication time; they
 are derived from the chart's inputs rather than the global source summary.
 
@@ -363,3 +365,38 @@ freshness check hides the ICAP layer with an explicit refresh-required warning.
 The chart generation includes the ICAP revision so obsolete overlay callbacks
 cannot modify replacement charts. The local release stages only these safeguards
 over the existing runtime artifact, preserving routes, assets and feature flags.
+
+## ICE quote tape display
+
+The quote tape uses 16 columns: quote identity; broker premium and IV;
+model premium, IV and net edge; forward/reference and exact calibration
+publication timestamp; option-package Greeks; sender; and reply delivery. Quantity
+fields remain in persisted rows and selected-quote details.
+
+`ice_quote_tape.py` projects saved values for display;
+`ice_quote_tape_components.py` owns columns and leg details. The deployed
+monolithic page adapts these same helpers until the modular page refactor is
+released. SQL joins the exact saved publication ID and latest valuation version
+for Greeks. It never substitutes the current active surface for an earlier quote.
+A legacy surface without a publication timestamp is explicitly labelled Legacy.
+
+Operational readback on 2 October reconciled 158 saved records with no changes
+to prior fields and matched Greeks in 12 retained chat replies. No automated
+tests were added or run. Evidence is under
+`options/outputs/quote_tape_20261002/`. The first tape release was
+`1.3.0-quote-tape-20261002`; later releases must retain these scoped files.
+
+The table colour bands distinguish broker marks (warm neutral), model marks
+(blue), inputs (slate) and Greeks (violet). Sender sits immediately before
+Delivery. Edge markers keep the agreed green BUY, red SELL, white no edge
+and black unpriced meanings; reply badges use neutral/blue styling. The
+`1.3.0-quote-tape-style-20261002` release changes only column presentation,
+scoped CSS and renderers. Prices, formatting precision and loaders are unchanged.
+
+The 2 October diagonal update displays independently saved monthly leg prices,
+IVs, forwards and signed Greeks in contract order when the package quantity
+basis is unassigned. The aggregate price/risk and all package edges remain
+NULL. The tape states `BASIS REQUIRED`; selected details show each month’s
+delivery hours and clarify that these are separate leg values. An acknowledged
+reply older than the valuation is labelled `Prior reply`. ICEchat owns the
+leg valuation and fresh reply text; no historical message is resent.

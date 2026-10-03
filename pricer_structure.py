@@ -36,7 +36,6 @@ from options.option_expiry_engine import (
     PLATTS_ASIA_LNG_PUBLICATION_VERSION,
     UnsupportedCalendarError,
     business_days_between,
-    get_business_calendar,
     get_surface_calendar_mapping,
     resolve_asian_averaging_schedule,
     resolve_option_expiry,
@@ -505,14 +504,6 @@ def _legacy_jkm_product_metadata(model: str) -> dict[str, Any]:
             ),
         }
     return {}
-
-
-def _roll_following(calendar_code: str, value: date) -> date:
-    calendar = get_business_calendar(calendar_code)
-    result = value
-    while not calendar.is_business_day(result):
-        result += timedelta(days=1)
-    return result
 
 
 def _jkm_apo_averaging_start(contract_month: date) -> date:

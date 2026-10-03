@@ -13,16 +13,7 @@ from pages import brent_vol_history as history
 import vol_trades_data as market_data
 
 
-def _walk(component):
-    yield component
-    children = getattr(component, "children", None)
-    if children is None:
-        return
-    if not isinstance(children, (list, tuple)):
-        children = [children]
-    for child in children:
-        if child is not None:
-            yield from _walk(child)
+from component_helpers import walk_components as _walk
 
 
 def _column_leaves(column_defs):
@@ -890,13 +881,27 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
     assert "Open interest · calls" in trace_names
     assert "Open interest · puts" in trace_names
     assert figure.layout.barmode == "overlay"
-    assert figure.layout.yaxis.title.text == "IV (%)"
-    assert figure.layout.yaxis2.title.text == "Activity (contracts)"
+    assert figure.layout.yaxis.ticksuffix == "%"
+    assert figure.layout.yaxis2.title.text == "Contracts"
+    assert figure.layout.yaxis2.ticksuffix == "k"
     assert figure.layout.yaxis2.overlaying == "y"
     assert figure.layout.height == 308
-    assert figure.layout.margin.r == 44
     assert figure.layout.showlegend is False
     traces = {trace.name: trace for trace in figure.data}
+    assert list(traces["Bloomberg settlement IV"].y) == pytest.approx([31.0, 29.0])
+    for name, expected in (
+        ("Volume · calls", {90.0: 0.0}),
+        ("Volume · puts", {70.0: 0.020}),
+        ("Open interest · calls", {90.0: 0.180}),
+        ("Open interest · puts", {50.0: 0.010, 70.0: 0.250}),
+    ):
+        # Activity coordinates are thousands of contracts; hover retains counts.
+        actual = {
+            float(details[0]): float(value)
+            for details, value in zip(traces[name].customdata, traces[name].y)
+            if pd.notna(value)
+        }
+        assert actual == pytest.approx(expected)
     assert traces["Open interest · calls"].width > traces["Volume · calls"].width
     assert traces["Open interest · calls"].opacity < traces["Volume · calls"].opacity
     assert traces["Open interest · calls"].yaxis == "y2"
@@ -1322,7 +1327,7 @@ def test_expiry_quality_summary_is_inside_the_contract_header():
     assert header.children[0].className == "brent-vol-history-card-title"
     assert header.children[1].className == "brent-vol-history-card-quality"
     assert header.children[1].role == "status"
-    assert header.children[1].children[0].children == "Prior settle · 17 Aug 2026"
+    assert header.children[1].children[0].children == "No bid/ask"
     assert header.children[1].children[1].className == (
         "brent-vol-history-quality-detail"
     )
@@ -1556,8 +1561,9 @@ def test_apr27_last_prices_are_audit_only_and_prior_settlement_drives_delta():
         product="TFO",
     )
     visible_text = " ".join(item for item in _walk(cards[0]) if isinstance(item, str))
-    assert "Prior settle · 17 Aug 2026" in visible_text
-    assert "FJS last-price parity implies TZT 48.3330" in visible_text
+    assert "No bid/ask" in visible_text
+    assert "48.333" in cards[0].children[0].children[1].title
+    assert "FJS last-price parity implies TZT 48.3330" in cards[0].children[0].children[1].title
 
 
 def test_expiry_figure_keeps_extreme_activity_but_focuses_on_smile():
@@ -1608,14 +1614,15 @@ def test_delta_axis_uses_put_atm_call_convention_and_keeps_activity_only_strikes
     )
 
     assert list(figure.layout.xaxis.range) == [0.0, 1.0]
-    assert list(figure.layout.xaxis.ticktext) == [
-        "0Δ put",
-        "10Δ put",
-        "25Δ put",
+    assert list(figure.layout.xaxis.tickvals) == [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0]
+    assert ["".join(label.split()) for label in figure.layout.xaxis.ticktext] == [
+        "0ΔP",
+        "10ΔP",
+        "25ΔP",
         "ATM",
-        "25Δ call",
-        "10Δ call",
-        "0Δ call",
+        "25ΔC",
+        "10ΔC",
+        "0ΔC",
     ]
     for trace in figure.data:
         if len(trace.x):

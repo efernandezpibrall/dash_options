@@ -7,6 +7,7 @@ import pytest
 from dash._callback import GLOBAL_CALLBACK_LIST
 from openpyxl import load_workbook
 
+from app import app
 from pages import greeks
 from runtime_config import clear_runtime_config_cache
 
@@ -405,95 +406,47 @@ def test_all_selectors_and_actions_share_one_toolbar_row():
     ) == 'Export Workbook'
 
 
-def test_strategy_filter_uses_compact_debounced_multi_picker():
-    strategy_filter = next(
-        component
-        for component in _walk(greeks.layout)
-        if getattr(component, 'id', None) == 'strategy-selector'
+@pytest.mark.parametrize(
+    ('selector_id', 'count_label', 'search_label', 'specific_class', 'labels_script', 'all_label'),
+    [
+        ('strategy-selector', '{num_selected} strategies selected', 'Search strategies',
+         'greeks-strategy-dropdown', greeks.STRATEGY_DROPDOWN_LABELS_CLIENTSIDE, 'All strategies selected'),
+        ('risk-bucket-selector', '{num_selected} assets / pairs', 'Search assets and pairs',
+         'greeks-risk-bucket-dropdown', greeks.RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE, 'All assets / pairs'),
+        ('trade-type-selector', '{num_selected} trade types selected', 'Search trade types',
+         'greeks-trade-type-dropdown', greeks.TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE, 'All trade types selected'),
+    ],
+    ids=['strategy', 'assets-and-pairs', 'trade-types'],
+)
+def test_filters_share_compact_debounced_multi_picker_contract(
+    selector_id, count_label, search_label, specific_class, labels_script, all_label,
+):
+    selector = next(
+        component for component in _walk(greeks.layout)
+        if getattr(component, 'id', None) == selector_id
     )
 
-    assert strategy_filter.multi is True
-    assert strategy_filter.closeOnSelect is False
-    assert strategy_filter.debounce is True
-    assert strategy_filter.optionHeight == 40
-    assert strategy_filter.maxHeight == 360
-    assert strategy_filter.labels['selected_count'] == '{num_selected} strategies selected'
-    assert strategy_filter.labels['search'] == 'Search strategies'
-    assert 'greeks-compact-multi-dropdown' in strategy_filter.className.split()
-    assert 'greeks-strategy-dropdown' in strategy_filter.className.split()
-    assert 'All strategies selected' in greeks.STRATEGY_DROPDOWN_LABELS_CLIENTSIDE
-    assert 'availableValues.every' in greeks.STRATEGY_DROPDOWN_LABELS_CLIENTSIDE
+    assert selector.multi is True
+    assert selector.closeOnSelect is False
+    assert selector.debounce is True
+    assert selector.optionHeight == 40
+    assert selector.maxHeight == 360
+    assert selector.labels['selected_count'] == count_label
+    assert selector.labels['search'] == search_label
+    assert {'greeks-compact-multi-dropdown', specific_class} <= set(selector.className.split())
+    assert all_label in labels_script
 
-    label_callback = next(
-        item
-        for item in GLOBAL_CALLBACK_LIST
-        if item.get('output') == 'strategy-selector.labels'
-    )
-    assert label_callback['inputs'] == [
-        {'id': 'strategy-selector', 'property': 'options'},
-        {'id': 'strategy-selector', 'property': 'value'},
+    # Dash transfers module-level registrations when the host server is set up;
+    # inspect both owners so navigation tests cannot change this contract's result.
+    label_callbacks = [
+        item for item in (*GLOBAL_CALLBACK_LIST, *app._callback_list)
+        if item.get('output') == f'{selector_id}.labels'
     ]
-    assert label_callback['clientside_function']
-
-
-def test_asset_pair_filter_uses_compact_debounced_multi_picker():
-    risk_filter = next(
-        component
-        for component in _walk(greeks.layout)
-        if getattr(component, 'id', None) == 'risk-bucket-selector'
-    )
-
-    assert risk_filter.multi is True
-    assert risk_filter.closeOnSelect is False
-    assert risk_filter.debounce is True
-    assert risk_filter.optionHeight == 40
-    assert risk_filter.maxHeight == 360
-    assert risk_filter.labels['selected_count'] == '{num_selected} assets / pairs'
-    assert risk_filter.labels['search'] == 'Search assets and pairs'
-    assert 'greeks-compact-multi-dropdown' in risk_filter.className.split()
-    assert 'greeks-risk-bucket-dropdown' in risk_filter.className.split()
-    assert 'All assets / pairs' in greeks.RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE
-    assert 'availableValues.every' in greeks.RISK_BUCKET_DROPDOWN_LABELS_CLIENTSIDE
-
-    label_callback = next(
-        item
-        for item in GLOBAL_CALLBACK_LIST
-        if item.get('output') == 'risk-bucket-selector.labels'
-    )
+    assert len(label_callbacks) == 1
+    label_callback = label_callbacks[0]
     assert label_callback['inputs'] == [
-        {'id': 'risk-bucket-selector', 'property': 'options'},
-        {'id': 'risk-bucket-selector', 'property': 'value'},
-    ]
-    assert label_callback['clientside_function']
-
-
-def test_trade_type_filter_uses_compact_debounced_multi_picker():
-    trade_type_filter = next(
-        component
-        for component in _walk(greeks.layout)
-        if getattr(component, 'id', None) == 'trade-type-selector'
-    )
-
-    assert trade_type_filter.multi is True
-    assert trade_type_filter.closeOnSelect is False
-    assert trade_type_filter.debounce is True
-    assert trade_type_filter.optionHeight == 40
-    assert trade_type_filter.maxHeight == 360
-    assert trade_type_filter.labels['selected_count'] == '{num_selected} trade types selected'
-    assert trade_type_filter.labels['search'] == 'Search trade types'
-    assert 'greeks-compact-multi-dropdown' in trade_type_filter.className.split()
-    assert 'greeks-trade-type-dropdown' in trade_type_filter.className.split()
-    assert 'All trade types selected' in greeks.TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE
-    assert 'availableValues.every' in greeks.TRADE_TYPE_DROPDOWN_LABELS_CLIENTSIDE
-
-    label_callback = next(
-        item
-        for item in GLOBAL_CALLBACK_LIST
-        if item.get('output') == 'trade-type-selector.labels'
-    )
-    assert label_callback['inputs'] == [
-        {'id': 'trade-type-selector', 'property': 'options'},
-        {'id': 'trade-type-selector', 'property': 'value'},
+        {'id': selector_id, 'property': 'options'},
+        {'id': selector_id, 'property': 'value'},
     ]
     assert label_callback['clientside_function']
 
