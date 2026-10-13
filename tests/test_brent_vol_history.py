@@ -296,8 +296,6 @@ def test_refresh_buttons_have_distinct_actions_and_labels():
     )
     assert "Refresh Intraday" in intraday.children
     assert "Refresh settlements" in settlement.children
-    assert "refresh-button-primary" in intraday.className
-    assert "refresh-button-secondary" in settlement.className
     assert intraday.title and settlement.title
 
 
@@ -360,8 +358,6 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
     assert "No exact trades" in trade_grid.dashGridOptions[
         "overlayNoRowsTemplate"
     ]
-    assert "vol-trades-trade-grid" in trade_grid.className
-    assert "vol-trades-chain-grid" in chain_grid.className
     assert "Bloomberg exact option trade tape" in trade_grid.eventListeners[
         "modelUpdated"
     ][0]
@@ -370,7 +366,6 @@ def test_trade_and_chain_tables_use_grouped_trader_focused_format():
     ][0]
     assert trade_grid.defaultColDef["suppressHeaderFilterButton"] is True
     assert chain_grid.defaultColDef["suppressHeaderFilterButton"] is True
-    assert trade_grid.style["height"] == chain_grid.style["height"] == "560px"
 
     subtitles = [
         item.children
@@ -885,7 +880,6 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
     assert figure.layout.yaxis2.title.text == "Contracts"
     assert figure.layout.yaxis2.ticksuffix == "k"
     assert figure.layout.yaxis2.overlaying == "y"
-    assert figure.layout.height == 308
     assert figure.layout.showlegend is False
     traces = {trace.name: trace for trace in figure.data}
     assert list(traces["Bloomberg settlement IV"].y) == pytest.approx([31.0, 29.0])
@@ -930,8 +924,6 @@ def test_expiry_figure_overlays_smile_volume_and_open_interest():
         assert "Volume / OI" in traces[trace_name].hovertemplate
     assert "Underlying" in traces["Published Brent exact COB"].hovertemplate
     assert figure.layout.hovermode == "closest"
-    assert figure.layout.hoverlabel.bgcolor == "#0F172A"
-    assert figure.layout.hoverlabel.font.color == "#F8FAFC"
     assert set(traces["Open interest · calls"].customdata[:, 4]) == {80.0}
     assert list(traces["Bloomberg settlement IV"].customdata[:, 5]) == [80.0, 80.0]
     assert list(traces["Bloomberg settlement IV"].customdata[:, 6]) == [
@@ -981,7 +973,6 @@ def test_tfo_figure_uses_tzt_hovers_eur_units_and_separate_ttf_overlay():
     assert "Published TTF exact COB" in traces
     calibrated_name = "Calibrated TTF · COB 24 Aug 2026"
     assert calibrated_name in traces
-    assert traces[calibrated_name].line.color == "#7C3AED"
     assert traces[calibrated_name].line.dash == "dash"
     assert "Revision 9572ae7f-90ca-4c8f-aecd-fbaff1ed081d" in (
         traces[calibrated_name].hovertemplate
@@ -1023,7 +1014,6 @@ def test_tfo_figure_separates_direct_icap_settlement_from_published_surface():
     assert "Published TTF exact COB" not in traces
     assert icap.meta["legend_layer"] == "icap-settlement"
     assert icap.mode == "markers"
-    assert icap.line.color == "#0F766E"
     assert icap.line.dash == "dash"
     assert icap.marker.symbol == "diamond"
     assert list(icap.customdata[:, 3]) == [
@@ -1123,7 +1113,6 @@ def test_settlement_smile_never_substitutes_intrinsic_itm_option_for_unresolved_
     )
     note = cards[-1]
     note_text = " ".join(item for item in _walk(note) if isinstance(item, str))
-    assert note.className == "brent-vol-history-settlement-exclusion-note"
     assert note.role == "note"
     assert "Excluded from settlement IV charts" in note_text
     assert "2 excluded" in note_text
@@ -1144,11 +1133,6 @@ def test_settlement_smile_never_substitutes_intrinsic_itm_option_for_unresolved_
     ]
     assert [item.children for item in strike_chips] == ["50", "200"]
     assert [item.title for item in strike_chips] == ["50P", "200C"]
-    assert any(
-        "brent-vol-history-exclusion-metric-primary"
-        in str(getattr(item, "className", "")).split()
-        for item in note_items
-    )
 
 
 def test_expiry_section_uses_one_shared_chart_legend():
@@ -1322,15 +1306,9 @@ def test_expiry_quality_summary_is_inside_the_contract_header():
     card = cards[0]
     header = card.children[0]
 
-    assert header.className == "brent-vol-history-card-header"
     assert header.children[0].children == "Apr-27"
-    assert header.children[0].className == "brent-vol-history-card-title"
-    assert header.children[1].className == "brent-vol-history-card-quality"
     assert header.children[1].role == "status"
     assert header.children[1].children[0].children == "No bid/ask"
-    assert header.children[1].children[1].className == (
-        "brent-vol-history-quality-detail"
-    )
     assert header.children[1].title.startswith("No reliable current IV")
     assert len(card.children) == 2
 
@@ -1346,13 +1324,6 @@ def test_expiry_legend_tracks_new_volume_edge_by_option_side():
     )
 
     assert contract["new_volume_layers"] == ["volume-puts"]
-
-
-def test_bloomberg_settlement_legend_uses_plain_label_and_source_tooltip():
-    option = history_charts._expiry_legend_options(["bloomberg-settlement"])[0]
-
-    assert option["label"].children[1].children == "Settlement"
-    assert option["label"].title == "Settlement from Bloomberg"
 
 
 def test_icap_settlement_legend_is_a_distinct_default_visible_layer():

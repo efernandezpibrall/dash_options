@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ice_quote_tape_components import QUOTE_COLUMN_DEFS, quote_details
+from ice_quote_tape_components import QUOTE_COLUMN_DEFS, quote_details as quote_details
 from options.ice_quote_interpretation import assessment_summary
 
 import dash_ag_grid as dag

@@ -2,7 +2,6 @@
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
-import shutil
 import time
 from uuid import uuid4
 
@@ -18,22 +17,7 @@ from options.vol_calibration import api
 from vol_calibration import settlement_worker as worker
 from vol_calibration import settlement_operations as operations
 from vol_calibration.jobs import PostgresJobRepository
-from integration.verify_settlement_pipeline import temporary_postgres, apply_migrations, fixture_inputs, verify, load, ROOT
-
-
-@pytest.fixture
-def blank_database(forbid_live_postgres_connections):
-    if not shutil.which("initdb") or not shutil.which("pg_ctl"):
-        pytest.skip("Local PostgreSQL binaries are required for persistence verification")
-    with temporary_postgres() as engine:
-        forbid_live_postgres_connections.add(engine.url.port)
-        yield engine
-
-
-@pytest.fixture
-def database(blank_database):
-    apply_migrations(blank_database)
-    return blank_database
+from integration.verify_settlement_pipeline import fixture_inputs, verify, load, ROOT
 
 
 @pytest.fixture

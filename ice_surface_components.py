@@ -30,11 +30,6 @@ def _signed(value, decimals=2):
     return "—" if value is None else f"{value:+.{decimals}f}"
 
 
-def _ranges(entry):
-    ranges = entry.get("ranges_pp") or []
-    if not ranges:
-        return "Not sensitive" if entry.get("status") == "insensitive" else "No local fit"
-    return " or ".join(f"{a:+.2f} to {b:+.2f}" for a, b in ranges)
 
 
 def _table(headers, rows):

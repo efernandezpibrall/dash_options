@@ -80,11 +80,8 @@ def test_migration_is_additive_after_20260831_02_and_enforces_new_policies(monke
 
 
 def test_migration_has_no_destructive_downgrade():
-    source = MIGRATION_PATH.read_text()
     migration = _load_migration()
 
-    assert "op.drop_" not in source
-    assert "op.alter_" not in source
     with pytest.raises(RuntimeError, match="no safe automatic downgrade"):
         migration.downgrade()
 

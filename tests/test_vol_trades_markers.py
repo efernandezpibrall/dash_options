@@ -1,5 +1,4 @@
 import pandas as pd
-import pytest
 from dash import dcc, html
 import plotly.graph_objects as go
 

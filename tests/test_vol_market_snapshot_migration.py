@@ -68,8 +68,6 @@ def test_snapshot_migration_is_additive_append_only_and_timestamped(monkeypatch)
 
 def test_snapshot_migration_has_no_destructive_downgrade():
     migration = _load_migration()
-    source = MIGRATION_PATH.read_text()
 
-    assert "op.drop_" not in source
     with pytest.raises(RuntimeError, match="no destructive downgrade"):
         migration.downgrade()

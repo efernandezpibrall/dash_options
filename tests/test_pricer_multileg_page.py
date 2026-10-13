@@ -591,10 +591,6 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert structure_header.children[0].children == "S1"
     assert structure_header.children[1].children[0] is header_controls
     assert context_row in list(walk(structure_header))
-    assert not any(
-        getattr(item, "className", None) == "pricer-market-sizing-layout"
-        for item in walk(pricing_components)
-    )
     config_body = next(
         item
         for item in walk(pricing_components)
@@ -610,11 +606,6 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
         "type": "pricer-unit-results-container",
         "structure_id": pricer_constants.DEFAULT_STRUCTURE_ID,
     }
-    assert not any(
-        getattr(item, "className", None)
-        == "pricer-section pricer-output-section"
-        for item in walk(pricing_components)
-    )
     assert [component_id["type"] for component_id in heading_ids] == [
         "pricer-add-leg",
         "pricer-duplicate-leg",
@@ -695,34 +686,6 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     assert quote_input_column["headerName"] == "Quote input"
     assert "43.20" in quote_input_column["headerTooltip"]
     assert "unsigned unit price" in quote_input_column["headerTooltip"]
-    compact_widths = {
-        column["field"]: column["width"]
-        for column in leaf_columns(grid.columnDefs)
-        if column.get("field")
-    }
-    assert compact_widths == {
-        "name": 104,
-        "side": 72,
-        "ratio": 64,
-        "call_put": 82,
-        "strike": 84,
-        "quote_basis": 94,
-        "quote_value": 94,
-        "raw_volatility": 88,
-        "volatility_used": 82,
-        "trade_value": 88,
-        "trade_delta": 82,
-        "trade_gamma": 82,
-        "trade_theta": 82,
-        "trade_vega": 82,
-        "trade_rho": 82,
-        "unit_value": 72,
-        "unit_delta": 72,
-        "unit_gamma": 72,
-        "unit_theta": 72,
-        "unit_vega": 72,
-        "unit_rho": 72,
-    }
     assert grid.rowData[0]["quote_basis"] == "VOL"
     assert grid.rowData[0]["quote_value"] == 0.2
     kirk_columns = {
@@ -733,21 +696,6 @@ def test_layout_has_semantic_heading_session_stores_and_editable_leg_grid():
     kirk_fields = set(kirk_columns)
     assert "quote_basis" not in kirk_fields
     assert "quote_value" not in kirk_fields
-    assert kirk_columns["volatility_asset_1"]["width"] == 118
-    assert kirk_columns["volatility_asset_2"]["width"] == 118
-    assert kirk_columns["trade_gamma_s1s2"]["width"] == 96
-    assert kirk_columns["trade_corr_sensitivity"]["width"] == 88
-    assert kirk_columns["trade_vega_equiv"]["width"] == 92
-
-
-def test_pricing_model_dropdown_uses_compact_model_names():
-    field = pricer_controls._build_pricing_model_field()
-    dropdown = component_by_pattern("pricer-option-type", root=field)
-    assert dropdown.options == [
-        {"label": "Black-76", "value": "black76"},
-        {"label": "Asian-76", "value": "asian76"},
-        {"label": "Kirk", "value": "kirk"},
-    ]
 
 
 def test_signed_lot_grid_removes_side_and_preserves_legacy_page_contract():
@@ -880,7 +828,6 @@ def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
         children[note_index].children
         == "JKM APO surface, expiry-adjusted to JKZ."
     )
-    assert "pricer-forward-field" in children[note_index - 1].className
 
     bzo_panel = pricer_components._build_structure_panel(
         {
@@ -906,65 +853,10 @@ def test_jkm_vanilla_surface_note_is_exchange_only_and_follows_forward():
     )
 
     assert bzo_note.children == ""
-    assert bzo_note.className == "pricer-surface-proxy-note"
     assert pricer_input_callbacks.sync_exchange_surface_proxy_note("CME-BRENT-BZO") == (
         "",
         "pricer-surface-proxy-note",
     )
-    for asset, model, workflow in (
-        ("JKM", "asian76", "exchange"),
-        ("TTF", "black76", "exchange"),
-        ("JKM", "black76", "otc"),
-        ("JKM", "black76", "legacy"),
-    ):
-        panel = pricer_components._build_structure_panel(
-            {
-                "structure_id": f"{workflow}-{asset}-{model}",
-                "label": "Structure 1",
-                "template": {"asset": asset, "model": model},
-            },
-            workflow=workflow,
-        )
-        assert not any(
-            "pricer-jkm-vanilla-surface-note"
-            in str(getattr(component, "className", ""))
-            for component in walk(panel)
-        )
-
-
-def test_otc_header_starts_with_model_while_exchange_order_is_unchanged():
-    structure = {
-        "structure_id": "test-structure",
-        "label": "Structure 1",
-        "template": {"asset": "TTF", "model": "black76"},
-    }
-    otc_panel = pricer_components._build_structure_panel(structure, workflow="otc")
-    exchange_panel = pricer_components._build_structure_panel(structure, workflow="exchange")
-
-    def direct_control_types(panel):
-        controls = next(
-            item
-            for item in walk(panel)
-            if getattr(item, "className", None)
-            == "pricer-structure-header-controls"
-        )
-        return [
-            child.id["type"]
-            for child in controls.children
-            if isinstance(getattr(child, "id", None), dict)
-        ]
-
-    assert direct_control_types(otc_panel)[:3] == [
-        "pricer-model-field",
-        "pricer-asset-field",
-        "pricer-price-unit-field",
-    ]
-    assert direct_control_types(exchange_panel)[:4] == [
-        "pricer-mapping-id-field",
-        "pricer-asset-field",
-        "pricer-price-unit-field",
-        "pricer-model-field",
-    ]
 
 
 def test_otc_kirk_form_has_explicit_two_asset_inputs_and_unit_notional_default():
@@ -2217,20 +2109,6 @@ def test_pricer_number_inputs_publish_edits_without_debounce():
     )
     assert forward.step == "any"
     assert forward.persistence == "pricer-structure-1-black76-forward-step-any-v2"
-    forward_field = next(
-        component
-        for component in walk(pricer_controls._build_context_form("black76"))
-        if isinstance(component, html.Label)
-        and any(
-            isinstance(descendant, dcc.Input)
-            and isinstance(descendant.id, dict)
-            and descendant.id.get("param") == "forward"
-            for descendant in walk(component)
-        )
-    )
-    assert forward_field.className == (
-        "pricer-field pricer-number-field pricer-forward-field"
-    )
     assert rate.step == 0.000001
     assert rate.persistence == "pricer-structure-1-black76-rate"
     multiplier = component_by_id("pricer-contract-multiplier")
@@ -2562,7 +2440,6 @@ def test_calculation_and_result_grids_reconcile_two_leg_trade(monkeypatch):
     delta_column = next(
         column for column in position_columns if column["field"] == "trade_delta"
     )
-    assert delta_column["minWidth"] == 82
     value_getter = delta_column["valueGetter"]["function"]
     assert "pricingRows" in value_getter
     assert "const " not in value_getter
@@ -3444,41 +3321,6 @@ def test_jkm_apo_exchange_month_locks_all_governed_dates():
     assert all(item.disabled for item in dates)
 
 
-@pytest.mark.parametrize(
-    ("asset", "model"),
-    [
-        ("TTF", "black76"),
-        ("JKM", "asian76"),
-        ("HH", "black76"),
-        ("Brent", "black76"),
-        ("NBP", "black76"),
-    ],
-)
-def test_every_asset_model_header_has_delivery_immediately_after_shape(asset, model):
-    header = pricer_controls._build_structure_header_context(
-        model,
-        values={"delivery_shape": "MONTH"},
-        asset=asset,
-    )
-    labels = [
-        item.children[0].children
-        for item in header
-        if isinstance(item, html.Label)
-    ]
-    delivery = next(
-        item
-        for root in header
-        for item in walk(root)
-        if isinstance(getattr(item, "id", None), dict)
-        and item.id.get("param") == "delivery_month"
-    )
-
-    assert labels == ["Premium", "Shape", "Delivery"]
-    assert delivery.id["model"] == model
-    assert delivery.disabled is False
-    assert delivery.options
-
-
 def test_jkm_month_delivery_callbacks_preserve_selection_and_sync_dates():
     options, selected, disabled, style = pricer_input_callbacks.sync_delivery_month_control(
         "JKM",
@@ -3760,7 +3602,6 @@ def test_ttf_sum27_callback_renders_monthly_component_audit(monkeypatch):
     assert getattr(strip_details, "open", None) in (None, False)
     assert isinstance(strip_details.children[0], html.Summary)
     assert strip_details.children[0].children == "Monthly strip components"
-    assert strip_details.children[1].className == "pricer-strip-details-content"
     component_grid = next(
         item
         for item in walk(rendered[1])
@@ -4359,7 +4200,6 @@ def test_exchange_strip_presentation_does_not_change_legacy_result_labels():
         if column["headerName"] == "Product"
     )["tooltipField"] == "product_detail"
     assert exchange_nbp_grid.rowData[0]["product_code"] == "UKF"
-
 
 
 def test_product_result_card_enrichment_requires_an_exchange_mapping():

@@ -7,7 +7,7 @@ import pytest
 from dash.exceptions import PreventUpdate
 import numpy as np
 
-from vol_calibration import jkm_batch, ttf_batch
+from vol_calibration import jkm_batch
 from options.vol_calibration.calibration import ttf_candidates
 from vol_calibration.components import comparison_modal, smile_grid
 from vol_calibration.components.parameter_table import create_parameter_table

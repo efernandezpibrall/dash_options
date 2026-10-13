@@ -22,8 +22,6 @@ from pricer_workspace import (
 from component_helpers import walk_components as _walk
 
 
-def _links(component):
-    return [item for item in _walk(component) if isinstance(item, dcc.Link)]
 
 
 def test_browser_titles_cover_every_route_and_disable_dash_title_overrides():
@@ -117,34 +115,6 @@ def test_pricer_rate_field_style_has_one_premium_aware_owner():
         ) == expected
 
 
-def test_top_navigation_order_and_pricer_separator():
-    links = _links(index_options.nav_links)
-
-    assert [link.children for link in links] == [
-        'Greeks',
-        'Valuation',
-        'Trades',
-        'Underlying Prices',
-        'Volatility Surface',
-        'Vol Trades',
-        'Correlations',
-        'Scenarios',
-        'Pricer',
-    ]
-    assert all(link.children != 'P&L Explain' for link in links)
-    assert links[-1].id == 'nav-pricer'
-    assert getattr(links[-1], 'href') == '/pricer'
-
-    pricer_group = next(
-        item
-        for item in _walk(index_options.nav_links)
-        if getattr(item, 'className', None) == 'nav-group-pricer'
-    )
-    assert [link.id for link in pricer_group.children] == [
-        'nav-pricer',
-    ]
-
-
 def test_pricer_route_uses_current_workspace_and_signed_lots():
     pricer_layout = index_options.display_page('/pricer', None)
 
@@ -168,7 +138,6 @@ def test_pricer_route_uses_current_workspace_and_signed_lots():
         item for item in _walk(pricer_layout) if isinstance(item, html.H1)
     )
     assert current_heading.className == 'pricer-visually-hidden-title'
-    assert 'pricer-page-current' in pricer_layout.className.split()
 
     pricer_ids = [
         item.id
@@ -221,46 +190,12 @@ def test_pricer_route_uses_current_workspace_and_signed_lots():
         len(section.children[0].children[0].children) == 1
         for section in workflow_sections
     )
-    assert not any(
-        'pricer-workflow-section-kicker'
-        in str(getattr(item, 'className', '')).split()
-        or 'pricer-workflow-section-description'
-        in str(getattr(item, 'className', '')).split()
-        for item in _walk(pricer_layout)
-    )
     workflow_bodies = [section.children[1] for section in workflow_sections]
-    assert all(
-        'pricer-workflow-section-body'
-        in str(getattr(body, 'className', '')).split()
-        for body in workflow_bodies
-    )
-    assert [
-        len(
-            [
-                item
-                for item in _walk(body)
-                if 'pricer-structure-panel'
-                in str(getattr(item, 'className', '')).split()
-            ]
-        )
-        for body in workflow_bodies
-    ] == [1, 1]
     assert (
         workflow_bodies[0].children[0].id
         == 'pricer-exchange-structures-container'
     )
     assert workflow_bodies[1].children[0].id == 'pricer-structures-container'
-    assert 'pricer-detailed-analysis-section' in str(
-        workflow_bodies[1].children[1].className
-    ).split()
-    assert all(
-        any(
-            'pricer-structure-panel'
-            in str(getattr(item, 'className', '')).split()
-            for item in _walk(body)
-        )
-        for body in workflow_bodies
-    )
     assert {
         'pricer-exchange-calculate-all',
         'pricer-exchange-add-structure',
@@ -359,9 +294,6 @@ def test_pricer_route_uses_current_workspace_and_signed_lots():
         'Position Greeks',
     ]
     assert 'side' not in pricer_grid.rowData[0]
-    assert pricer_grid.dashGridOptions['rowHeight'] == 28
-    assert pricer_grid.dashGridOptions['headerHeight'] == 30
-    assert pricer_grid.dashGridOptions['groupHeaderHeight'] == 24
     assert pricer_grid.dashGridOptions['rowSelection']['checkboxes'] is False
     assert 'selectionColumnDef' not in pricer_grid.dashGridOptions
     pricer_name = next(

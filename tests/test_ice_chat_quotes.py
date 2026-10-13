@@ -330,8 +330,6 @@ def test_section_follows_selected_product_without_showing_brent_rows():
             )
 
 
-
-
 def test_empty_and_error_states_are_explicit():
     strip = quote_components.build_service_strip(
         {},
@@ -340,28 +338,6 @@ def test_empty_and_error_states_are_explicit():
     )
     assert "ice-chat-service-strip-danger" in strip.className
     assert len(strip.children) == 4
-
-
-def test_grid_height_is_compact_for_short_tapes_and_bounded_for_long_tapes():
-    rows = _rows()
-    snapshot = {
-        "rows": rows,
-        "error": None,
-        "loaded_at": "2026-08-17T08:00:00+00:00",
-        "truncated": False,
-    }
-    result = quotes.render_quote_dashboard(
-        snapshot, {}, None, None, None, None, None, None, []
-    )
-    assert result[2] == {"height": "180px"}
-
-    snapshot["rows"] = [dict(rows[0], event_id=f"event-{index}") for index in range(20)]
-    result = quotes.render_quote_dashboard(
-        snapshot, {}, None, None, None, None, None, None, []
-    )
-    assert result[2] == {"height": "418px"}
-
-
 
 
 @pytest.mark.parametrize("has_rows", [False, True])

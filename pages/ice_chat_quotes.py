@@ -11,7 +11,7 @@ from dash import Input, Output, State, callback, html, no_update
 from dash.exceptions import PreventUpdate
 
 import ice_quote_data as quote_data
-import ice_surface_workbench  # registers lazy surface editor callbacks at startup
+import ice_surface_workbench  # noqa: F401 - registers lazy surface editor callbacks
 from vol_trades_market_window import market_context, quote_table_rows
 
 

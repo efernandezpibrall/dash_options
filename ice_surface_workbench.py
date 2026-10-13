@@ -1,6 +1,4 @@
 """Compact progressive review. Shared analytics owns every price and fit."""
-import hashlib
-import json
 import math
 from uuid import uuid4
 

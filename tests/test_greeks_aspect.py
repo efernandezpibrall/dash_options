@@ -236,10 +236,6 @@ def test_comparison_grid_locks_chronology_and_enables_local_scrolling():
         accessible_label='Delta by maturity and asset',
     )
 
-    assert 'greeks-comparison-grid' in grid.className.split()
-    assert grid.dashGridOptions['rowHeight'] == 28
-    assert grid.dashGridOptions['headerHeight'] == 30
-    assert grid.dashGridOptions['groupHeaderHeight'] == 24
     assert grid.dashGridOptions['suppressHorizontalScroll'] is False
     assert grid.dashGridOptions['suppressMovableColumns'] is True
     assert grid.dashGridOptions['getRowId'] == {
@@ -258,38 +254,8 @@ def test_comparison_grid_locks_chronology_and_enables_local_scrolling():
     assert maturity_column['lockPinned'] is True
     assert maturity_column['sortable'] is False
     assert maturity_column['resizable'] is False
-    assert maturity_column['width'] == 68
-    assert maturity_column['minWidth'] == maturity_column['width']
-    assert maturity_column['maxWidth'] == maturity_column['width']
     assert delta_column['sortable'] is False
     assert delta_column['resizable'] is False
-    assert delta_column['minWidth'] == delta_column['width']
-    assert delta_column['maxWidth'] == delta_column['width']
-    assert grid.style['width'] == (
-        f"{maturity_column['width'] + delta_column['width'] + 2}px"
-    )
-
-
-def test_comparison_columns_expand_to_fit_the_longest_header_or_value():
-    short_grid = greeks.build_compact_table(
-        'comparison-short-grid-test',
-        pd.DataFrame([{'Maturity': '2026-10', 'Delta': 1.0}]),
-        comparison_grid=True,
-    )
-    long_grid = greeks.build_compact_table(
-        'comparison-long-grid-test',
-        pd.DataFrame([{'Maturity': '2027-CAL', 'Delta': -123456789.0}]),
-        comparison_grid=True,
-    )
-
-    short_delta = next(
-        column for column in short_grid.columnDefs if column.get('field') == 'Delta'
-    )
-    long_delta = next(
-        column for column in long_grid.columnDefs if column.get('field') == 'Delta'
-    )
-    assert long_delta['width'] > short_delta['width']
-    assert 'flex' not in long_delta
 
 
 def test_aggregation_and_unit_use_compact_segmented_controls():
@@ -309,101 +275,12 @@ def test_aggregation_and_unit_use_compact_segmented_controls():
     assert unit.value == 'native'
     assert aggregation.inline is True
     assert unit.inline is True
-    assert 'greeks-segmented-control' in aggregation.className.split()
-    assert 'greeks-segmented-control' in unit.className.split()
     assert getattr(aggregation, 'inputStyle', None) in (None, {})
     assert getattr(unit, 'inputStyle', None) in (None, {})
-    assert any(
-        getattr(component, 'children', None) == 'Unit'
-        and 'inline-filter-label' in getattr(component, 'className', '').split()
-        for component in components
-    )
     assert not any(
         getattr(component, 'children', None) == 'Unit Mode'
         for component in components
     )
-
-
-def test_maturity_cutoff_labels_are_complete_and_compact():
-    assert greeks._month_through_label('2027-03-31') == '2027 Q1 · Mar'
-    assert greeks._month_through_label('2027-12-31') == '2027 Q4 · Dec'
-    assert greeks._quarter_through_label('2027-12-31') == '2027'
-
-
-def test_all_selectors_and_actions_share_one_toolbar_row():
-    selector_row = next(
-        component
-        for component in _walk(greeks.layout)
-        if 'greeks-monitor-selector-row'
-        in getattr(component, 'className', '').split()
-    )
-    selector_ids = [
-        next(
-            getattr(descendant, 'id', None)
-            for descendant in _walk(control_group)
-            if getattr(descendant, 'id', None)
-        )
-        for control_group in selector_row.children[:8]
-    ]
-    action_ids = {
-        getattr(component, 'id', None)
-        for component in _walk(selector_row.children[8])
-        if getattr(component, 'id', None)
-    }
-
-    assert selector_ids == [
-        'date-selector',
-        'maturity-aggregation-mode-selector',
-        'month-through-selector',
-        'quarter-through-selector',
-        'unit-mode-selector',
-        'strategy-selector',
-        'trade-type-selector',
-        'risk-bucket-selector',
-    ]
-    assert action_ids == {
-        'greeks-aspect-settlement-btn',
-        'greeks-aspect-live-btn',
-        'export-greeks-workbook-btn',
-    }
-    assert len(selector_row.children) == 10
-    assert 'greeks-control-actions' in selector_row.children[8].className.split()
-    assert selector_row.children[8].children[0].children == 'Aspect Actions'
-    assert 'greeks-inline-source-status' in selector_row.children[9].className.split()
-    inline_source_ids = {
-        getattr(component, 'id', None)
-        for component in _walk(selector_row.children[9])
-        if getattr(component, 'id', None)
-    }
-    assert inline_source_ids == {
-        'greeks-source-status-mount',
-        'greeks-source-status-inline',
-    }
-    assert not any(
-        'greeks-monitor-action-row' in getattr(component, 'className', '').split()
-        for component in _walk(greeks.layout)
-    )
-
-    action_buttons = {
-        getattr(component, 'id', None): component
-        for component in _walk(selector_row.children[8])
-        if getattr(component, 'id', None)
-    }
-    assert action_buttons['greeks-aspect-settlement-btn'].children == 'COB'
-    assert getattr(
-        action_buttons['greeks-aspect-settlement-btn'],
-        'aria-label',
-    ) == 'Load Aspect COB'
-    assert action_buttons['greeks-aspect-live-btn'].children == 'Live'
-    assert getattr(
-        action_buttons['greeks-aspect-live-btn'],
-        'aria-label',
-    ) == 'Load Aspect Live'
-    assert action_buttons['export-greeks-workbook-btn'].children == 'Export'
-    assert getattr(
-        action_buttons['export-greeks-workbook-btn'],
-        'aria-label',
-    ) == 'Export Workbook'
 
 
 @pytest.mark.parametrize(
@@ -433,7 +310,6 @@ def test_filters_share_compact_debounced_multi_picker_contract(
     assert selector.maxHeight == 360
     assert selector.labels['selected_count'] == count_label
     assert selector.labels['search'] == search_label
-    assert {'greeks-compact-multi-dropdown', specific_class} <= set(selector.className.split())
     assert all_label in labels_script
 
     # Dash transfers module-level registrations when the host server is set up;

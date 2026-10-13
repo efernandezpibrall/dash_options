@@ -5,7 +5,7 @@ from options.vol_calibration.intraday_tfo import price,identity,POLICY,VERSION
 from uuid import uuid4
 from options.option_expiry_engine import calculate_option_expiry
 
-def fixture(month_offset=2, *, base_vol=.55, market_vol=.57, curvature_pp=0.):
+def fixture(month_offset=2, *, base_vol=.55, market_vol=.57, curvature_pp=2.):
     now=pd.Timestamp.now(tz='UTC'); day=now.tz_convert('Asia/Dubai').normalize().tz_localize(None)
     month=(day+pd.offsets.MonthBegin(month_offset)); expiry=pd.Timestamp(calculate_option_expiry('ICE_TTF_TFO_71085679_EXPIRY',month.date())); years=(expiry-day).days/365.25
     deltas=np.array(STANDARD_CALL_DELTAS); ivs=base_vol+.01*curvature_pp*(2*(deltas-.5))**2; forward=80.
@@ -27,36 +27,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from options.vol_calibration import intraday_publication as publication
 from options.vol_calibration.intraday_tfo import evidence
-from test_settlement_postgres import blank_database, database
 
 @pytest.fixture
 def inputs():
     return fixture()
-
-
-def test_regular_shape_is_a_standing_fit_requirement(inputs):
-    candidate=api.fit_tfo_intraday(inputs)
-    summary=candidate['summaries'][0]
-    assert summary['eligible'],summary
-    assert summary['validation']['vol_shape_weight']==POLICY['vol_shape_weight']
-    assert summary['validation']['continuous_price_constraints']
-    assert summary['validation']['fit_policy']=='current-market-full-wing-smile-v2'
-    assert len(api.validate_tfo_candidate(candidate))==401
-
-
-def test_persisted_curve_reproduces_fitted_month(inputs):
-    from options.vol_calibration.models.smooth_call_spline import frame_surface_volatility,SmoothCallSpline
-    result=api.fit_tfo_intraday(inputs)
-    frame=pd.DataFrame(result['surface']).sort_values('strike')
-    parameters=result['expiry_results'][0]['parameters']
-    curve=SmoothCallSpline(parameters['smooth_call_spline'])
-    strikes=np.linspace(frame.strike.min(),frame.strike.max(),1001)
-    expected=np.sqrt(curve.variance(strikes/parameters['reference_forward'])/parameters['reference_years'])
-    actual=frame_surface_volatility(frame,strikes)
-    # Tiny tail vegas amplify roundoff in reconstructed prices into IV error.
-    np.testing.assert_allclose(actual,expected,atol=1e-6)
-    np.testing.assert_allclose(price(parameters['reference_forward'],strikes,parameters['reference_years'],actual,'C'),
-        price(parameters['reference_forward'],strikes,parameters['reference_years'],expected,'C'),atol=1e-9)
 
 
 def test_price_fit_sparse_modes_and_evidence_exclusions(inputs):

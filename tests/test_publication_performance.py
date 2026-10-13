@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import shutil
 from uuid import uuid4
 
 import numpy as np
@@ -10,18 +9,7 @@ import pytest
 from sqlalchemy import event, text
 
 from options.vol_calibration import api
-from options.vol_calibration.publication import service
-from integration.verify_settlement_pipeline import temporary_postgres, apply_migrations, fixture_inputs
-
-
-@pytest.fixture
-def database(forbid_live_postgres_connections):
-    if not shutil.which("initdb"):
-        pytest.skip("Local PostgreSQL binaries required")
-    with temporary_postgres() as engine:
-        forbid_live_postgres_connections.add(engine.url.port)
-        apply_migrations(engine)
-        yield engine
+from integration.verify_settlement_pipeline import fixture_inputs
 
 
 def publish(engine, candidate, key, **kwargs):

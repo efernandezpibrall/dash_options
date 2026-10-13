@@ -97,7 +97,8 @@ def _fit_bundle(key,run_id,workspace,specs,actor,prior):
                     'reason':'Calculation budget reached; no conclusion about feasibility.'}}))
                 continue
             except ValueError as exc:
-                update(lambda j:j['modes'].update({mode:{'status':'Unavailable','reason':str(exc)}}))
+                reason = str(exc)
+                update(lambda j:j['modes'].update({mode:{'status':'Unavailable','reason':reason}}))
                 continue
             summary=value['manifest']['joint_fit']['summary']
             status=value['manifest']['joint_fit']['diagnostics']['status']
@@ -116,7 +117,8 @@ def _fit_bundle(key,run_id,workspace,specs,actor,prior):
     except QuoteFitCancelled:
         update(lambda j:j.update(status='cancelled'))
     except Exception as exc:
-        update(lambda j:j.update(status='failed',error=str(exc) if isinstance(exc,ValueError) else 'Fit unavailable. Refresh options data.'))
+        reason = str(exc) if isinstance(exc, ValueError) else 'Fit unavailable. Refresh options data.'
+        update(lambda j:j.update(status='failed',error=reason))
 
 
 def submit(workspace,selection,actor,editor,prior=None):

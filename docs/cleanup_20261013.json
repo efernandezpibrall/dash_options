@@ -1,0 +1,515 @@
+{
+  "date": "2026-10-13",
+  "policy": "Retain only distinct business-critical coverage; remove nonessential tests rather than replace them.",
+  "changes": [
+    {
+      "path": "tests/test_pricer_published_surface.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_current_pricer_leg_grid_uses_route_specific_compact_geometry"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_pricing_model_dropdown_uses_compact_model_names"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_otc_header_starts_with_model_while_exchange_order_is_unchanged"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_every_asset_model_header_has_delivery_immediately_after_shape"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_top_navigation_order_and_pricer_separator"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_comparison_columns_expand_to_fit_the_longest_header_or_value"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_maturity_cutoff_labels_are_complete_and_compact"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_all_selectors_and_actions_share_one_toolbar_row"
+    },
+    {
+      "path": "tests/test_trade_ledger.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_trades_filters_reuse_the_greeks_sticky_toolbar_contract"
+    },
+    {
+      "path": "tests/test_currency_aware_valuation.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_valuation_filters_reuse_the_greeks_sticky_toolbar_contract"
+    },
+    {
+      "path": "tests/test_ice_chat_quotes.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_grid_height_is_compact_for_short_tapes_and_bounded_for_long_tapes"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_definition",
+      "reason": "Cosmetic geometry, layout order or wording; retained callback, field, unit, export and source-state tests cover operational behavior.",
+      "name": "test_bloomberg_settlement_legend_uses_plain_label_and_source_tooltip"
+    },
+    {
+      "path": "tests/test_tfo_intraday.py",
+      "action": "remove_definition",
+      "reason": "Numerical shape and persisted-curve coverage already owned by options/tests/test_tfo_regular_smile.py and test_tfo_full_wings.py; keep Dash publication and integration scenarios.",
+      "name": "test_regular_shape_is_a_standing_fit_requirement"
+    },
+    {
+      "path": "tests/test_tfo_intraday.py",
+      "action": "remove_definition",
+      "reason": "Numerical shape and persisted-curve coverage already owned by options/tests/test_tfo_regular_smile.py and test_tfo_full_wings.py; keep Dash publication and integration scenarios.",
+      "name": "test_persisted_curve_reproduces_fitted_month"
+    },
+    {
+      "path": "tests/test_vol_trades_strip_charts.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "all(panel.children[1].className == \"brent-vol-history-graph\" for panel in panels)"
+    },
+    {
+      "path": "tests/test_vol_trades_strip_charts.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "all(\n        panel.children[1].figure.layout.height == 308 and not panel.children[1].figure.layout.showlegend\n        for panel in panels\n    )"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "'pricer-page-current' in pricer_layout.className.split()"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "not any(\n        'pricer-workflow-section-kicker'\n        in str(getattr(item, 'className', '')).split()\n        or 'pricer-workflow-section-description'\n        in str(getattr(item, 'className', '')).split()\n        for item in _walk(pricer_layout)\n    )"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "all(\n        'pricer-workflow-section-body'\n        in str(getattr(body, 'className', '')).split()\n        for body in workflow_bodies\n    )"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "[\n        len(\n            [\n                item\n                for item in _walk(body)\n                if 'pricer-structure-panel'\n                in str(getattr(item, 'className', '')).split()\n            ]\n        )\n        for body in workflow_bodies\n    ] == [1, 1]"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "'pricer-detailed-analysis-section' in str(\n        workflow_bodies[1].children[1].className\n    ).split()"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "all(\n        any(\n            'pricer-structure-panel'\n            in str(getattr(item, 'className', '')).split()\n            for item in _walk(body)\n        )\n        for body in workflow_bodies\n    )"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "pricer_grid.dashGridOptions['rowHeight'] == 28"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "pricer_grid.dashGridOptions['headerHeight'] == 30"
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "pricer_grid.dashGridOptions['groupHeaderHeight'] == 24"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "'greeks-comparison-grid' in grid.className.split()"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "grid.dashGridOptions['rowHeight'] == 28"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "grid.dashGridOptions['headerHeight'] == 30"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "grid.dashGridOptions['groupHeaderHeight'] == 24"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "maturity_column['width'] == 68"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "maturity_column['minWidth'] == maturity_column['width']"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "maturity_column['maxWidth'] == maturity_column['width']"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "delta_column['minWidth'] == delta_column['width']"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "delta_column['maxWidth'] == delta_column['width']"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "grid.style['width'] == (\n        f\"{maturity_column['width'] + delta_column['width'] + 2}px\"\n    )"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "'greeks-segmented-control' in aggregation.className.split()"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "'greeks-segmented-control' in unit.className.split()"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "any(\n        getattr(component, 'children', None) == 'Unit'\n        and 'inline-filter-label' in getattr(component, 'className', '').split()\n        for component in components\n    )"
+    },
+    {
+      "path": "tests/test_greeks_aspect.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "{'greeks-compact-multi-dropdown', specific_class} <= set(selector.className.split())"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "\"refresh-button-primary\" in intraday.className"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "\"refresh-button-secondary\" in settlement.className"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "\"vol-trades-trade-grid\" in trade_grid.className"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "\"vol-trades-chain-grid\" in chain_grid.className"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "trade_grid.style[\"height\"] == chain_grid.style[\"height\"] == \"560px\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "figure.layout.height == 308"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "figure.layout.hoverlabel.bgcolor == \"#0F172A\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "figure.layout.hoverlabel.font.color == \"#F8FAFC\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "traces[calibrated_name].line.color == \"#7C3AED\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "icap.line.color == \"#0F766E\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "note.className == \"brent-vol-history-settlement-exclusion-note\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "any(\n        \"brent-vol-history-exclusion-metric-primary\"\n        in str(getattr(item, \"className\", \"\")).split()\n        for item in note_items\n    )"
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "header.className == \"brent-vol-history-card-header\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "header.children[0].className == \"brent-vol-history-card-title\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "header.children[1].className == \"brent-vol-history-card-quality\""
+    },
+    {
+      "path": "tests/test_brent_vol_history.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "header.children[1].children[1].className == (\n        \"brent-vol-history-quality-detail\"\n    )"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "not any(\n        getattr(item, \"className\", None) == \"pricer-market-sizing-layout\"\n        for item in walk(pricing_components)\n    )"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "not any(\n        getattr(item, \"className\", None)\n        == \"pricer-section pricer-output-section\"\n        for item in walk(pricing_components)\n    )"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "compact_widths == {\n        \"name\": 104,\n        \"side\": 72,\n        \"ratio\": 64,\n        \"call_put\": 82,\n        \"strike\": 84,\n        \"quote_basis\": 94,\n        \"quote_value\": 94,\n        \"raw_volatility\": 88,\n        \"volatility_used\": 82,\n        \"trade_value\": 88,\n        \"trade_delta\": 82,\n        \"trade_gamma\": 82,\n        \"trade_theta\": 82,\n        \"trade_vega\": 82,\n        \"trade_rho\": 82,\n        \"unit_value\": 72,\n        \"unit_delta\": 72,\n        \"unit_gamma\": 72,\n        \"unit_theta\": 72,\n        \"unit_vega\": 72,\n        \"unit_rho\": 72,\n    }"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "kirk_columns[\"volatility_asset_1\"][\"width\"] == 118"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "kirk_columns[\"volatility_asset_2\"][\"width\"] == 118"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "kirk_columns[\"trade_gamma_s1s2\"][\"width\"] == 96"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "kirk_columns[\"trade_corr_sensitivity\"][\"width\"] == 88"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "kirk_columns[\"trade_vega_equiv\"][\"width\"] == 92"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "\"pricer-forward-field\" in children[note_index - 1].className"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "bzo_note.className == \"pricer-surface-proxy-note\""
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "forward_field.className == (\n        \"pricer-field pricer-number-field pricer-forward-field\"\n    )"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "delta_column[\"minWidth\"] == 82"
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "strip_details.children[1].className == \"pricer-strip-details-content\""
+    },
+    {
+      "path": "tests/test_pricer_multileg_page.py",
+      "action": "remove_assertion",
+      "reason": "Exact styling lock without distinct business behavior.",
+      "expression": "not any(\n            \"pricer-jkm-vanilla-surface-note\"\n            in str(getattr(component, \"className\", \"\"))\n            for component in walk(panel)\n        )"
+    },
+    {
+      "path": "tests/test_vol_calibration_migration.py",
+      "action": "remove_source_text_assertions",
+      "reason": "Keep executable downgrade and database migration/rollback coverage."
+    },
+    {
+      "path": "tests/test_inline_vol_trades_calibration_migration.py",
+      "action": "remove_source_text_assertions",
+      "reason": "Keep executable downgrade and database migration/rollback coverage."
+    },
+    {
+      "path": "tests/test_vol_market_snapshot_migration.py",
+      "action": "remove_source_text_assertions",
+      "reason": "Keep executable downgrade and database migration/rollback coverage."
+    },
+    {
+      "path": "ice_surface_components.py",
+      "action": "remove_definition",
+      "name": "_ranges",
+      "reason": "Private helper has no remaining references in the repository."
+    },
+    {
+      "path": "tests/test_navigation.py",
+      "action": "remove_definition",
+      "name": "_links",
+      "reason": "Private helper has no remaining references in the repository."
+    },
+    {
+      "path": "tests/conftest.py",
+      "action": "consolidate_database_fixtures",
+      "reason": "One implementation of per-test disposable PostgreSQL fixtures, retaining owned-port allowlisting and isolation. Remove test-to-test fixture imports."
+    },
+    {
+      "path": "tests/test_tfo_intraday.py",
+      "action": "repair_shared_fixture",
+      "reason": "Use a curved synthetic base for publication/UI scenarios; flat-prior convergence is independently protected in the analytics suite."
+    },
+    {
+      "path": "tests/test_ttf_hybrid_surface.py",
+      "action": "consolidate_optimizer_stub",
+      "reason": "Share the repeated failed-start recorder while preserving distinct serial, parallel and fallback scenarios."
+    },
+    {
+      "path": "ice_surface_jobs.py",
+      "action": "make_error_closure_explicit",
+      "reason": "Capture exception text before synchronous job-update lambdas; no job behavior change."
+    },
+    {
+      "path": "pages/ice_chat_quotes.py",
+      "action": "retain_callback_registration_import",
+      "reason": "Import registers callbacks; explicitly exempt it from unused-import removal."
+    },
+    {
+      "path": "vol_trades_workspace/quote_components.py",
+      "action": "retain_public_reexport",
+      "reason": "quote_details is used through this module by pages/ice_chat_quotes.py."
+    }
+  ],
+  "baseline": "2ad3ca5bdaaa0c0ecfacdeaa77e05f370843fbf0",
+  "validation": {
+    "passed_tests": 874,
+    "skipped_tests": 0,
+    "subtests_passed": 0,
+    "database": "Disposable task-owned PostgreSQL; no production writes",
+    "log_sha256": "d8190e6473ab26777e540a682f8325166abe79fd22ead10334d9543d65d90371",
+    "local_log": "/Users/fernandezpibrall/.codex/backups/cleanup-20261013/dash_options-suite.log",
+    "after_final_helper_cleanup": "23 focused tests passed; full suite passed before the helper-only cleanup.",
+    "calibration_boundary": "Passed for source checkouts and staged candidate, zero violations."
+  },
+  "reviewed_paths": [
+    "docs/cleanup_20261013.json",
+    "ice_surface_components.py",
+    "ice_surface_jobs.py",
+    "ice_surface_workbench.py",
+    "pages/ice_chat_quotes.py",
+    "tests/conftest.py",
+    "tests/test_brent_vol_history.py",
+    "tests/test_currency_aware_valuation.py",
+    "tests/test_greeks_aspect.py",
+    "tests/test_ice_chat_quotes.py",
+    "tests/test_inline_vol_trades_calibration_migration.py",
+    "tests/test_navigation.py",
+    "tests/test_pricer_multileg_page.py",
+    "tests/test_pricer_published_surface.py",
+    "tests/test_publication_performance.py",
+    "tests/test_settlement_postgres.py",
+    "tests/test_tfo_intraday.py",
+    "tests/test_trade_ledger.py",
+    "tests/test_ttf_hybrid_surface.py",
+    "tests/test_vol_calibration.py",
+    "tests/test_vol_calibration_migration.py",
+    "tests/test_vol_market_snapshot_migration.py",
+    "tests/test_vol_trades_markers.py",
+    "tests/test_vol_trades_strip_charts.py",
+    "vol_trades_workspace/quote_components.py"
+  ]
+}

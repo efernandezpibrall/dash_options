@@ -21,3 +21,24 @@ def forbid_live_postgres_connections(monkeypatch):
     monkeypatch.setattr(psycopg2, "connect", blocked)
     # Only the owned-cluster fixture registers its randomly allocated local port.
     return owned_ports
+
+
+# Database-backed tests use only a per-test disposable cluster.
+import shutil
+
+
+@pytest.fixture
+def blank_database(forbid_live_postgres_connections):
+    from integration.verify_settlement_pipeline import temporary_postgres
+    if not shutil.which("initdb") or not shutil.which("pg_ctl"):
+        pytest.skip("Local PostgreSQL binaries are required for persistence verification")
+    with temporary_postgres() as engine:
+        forbid_live_postgres_connections.add(engine.url.port)
+        yield engine
+
+
+@pytest.fixture
+def database(blank_database):
+    from integration.verify_settlement_pipeline import apply_migrations
+    apply_migrations(blank_database)
+    return blank_database

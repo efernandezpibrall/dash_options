@@ -116,48 +116,6 @@ def test_valuation_table_has_explicit_currency_and_whole_number_totals():
     assert records[0]['__qty_pnl_raw'] == 90.2
 
 
-def test_valuation_filters_reuse_the_greeks_sticky_toolbar_contract():
-    toolbar = next(
-        component
-        for component in _walk(valuation.layout)
-        if 'valuation-monitor-controls'
-        in getattr(component, 'className', '').split()
-    )
-    selector_row = next(
-        component
-        for component in _walk(toolbar)
-        if 'valuation-monitor-selector-row'
-        in getattr(component, 'className', '').split()
-    )
-    ids = {
-        getattr(component, 'id', None)
-        for component in _walk(selector_row)
-        if getattr(component, 'id', None)
-    }
-    labels = [
-        component.children
-        for component in _walk(selector_row)
-        if 'inline-filter-label'
-        in getattr(component, 'className', '').split()
-    ]
-
-    assert 'greeks-sticky-filter-bar' in toolbar.className.split()
-    assert labels == ['COB Date', 'Strategies']
-    assert ids == {
-        'pnl-date-dropdown',
-        'pnl-strategy-dropdown',
-        'valuation-source-status-mount',
-        'valuation-aspect-source-status',
-        'valuation-source-status-inline',
-    }
-    assert 'greeks-compact-multi-dropdown' in next(
-        component
-        for component in _walk(selector_row)
-        if getattr(component, 'id', None) == 'pnl-strategy-dropdown'
-    ).className.split()
-    assert 'greeks-inline-source-status' in selector_row.children[2].className.split()
-
-
 def test_valuation_page_omits_redundant_currency_note():
     visible_text = ' '.join(
         str(component.children)

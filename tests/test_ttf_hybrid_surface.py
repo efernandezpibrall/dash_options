@@ -50,21 +50,24 @@ def _hybrid_observations():
     )
 
 
-def test_expanded_retry_reuses_failed_deterministic_starts(monkeypatch):
-    monkeypatch.setenv("GAS_START_WORKERS", "1")
+@pytest.fixture
+def failed_starts(monkeypatch):
     starts = []
-
     def failed_minimize(_objective, start, **_kwargs):
         starts.append(tuple(np.asarray(start, dtype=float)))
         return type("FailedFit", (), {
-            "fun": np.nan,
-            "x": np.full(len(start), np.nan),
-            "success": False,
-            "nit": 0,
-            "message": "No finite candidate",
+            "fun": np.nan, "x": np.full(len(start), np.nan), "success": False,
+            "nit": 0, "message": "No finite candidate",
         })()
-
     monkeypatch.setattr(gas_hybrid_fit, "minimize", failed_minimize)
+    return starts
+
+
+def test_expanded_retry_reuses_failed_deterministic_starts(monkeypatch, failed_starts):
+    monkeypatch.setenv("GAS_START_WORKERS", "1")
+    starts = failed_starts
+
+
     observations = _hybrid_observations()
     initial = get_defaults("TTF")
     with pytest.raises(hybrid_module.HybridFitNoCandidate) as first:
@@ -92,7 +95,7 @@ def test_expanded_retry_reuses_failed_deterministic_starts(monkeypatch):
     assert pickle.loads(pickle.dumps(first.value)).attempts == first.value.attempts
 
 
-def test_parallel_start_collection_preserves_ordered_retry_attempts(monkeypatch):
+def test_parallel_start_collection_preserves_ordered_retry_attempts(monkeypatch, failed_starts):
     class InlinePool:
         def __init__(self, **_kwargs):
             pass
@@ -106,21 +109,11 @@ def test_parallel_start_collection_preserves_ordered_retry_attempts(monkeypatch)
         def map(self, function, tasks):
             return map(function, tasks)
 
-    starts = []
+    starts = failed_starts
 
-    def failed_minimize(_objective, start, **_kwargs):
-        starts.append(tuple(np.asarray(start, dtype=float)))
-        return type("FailedFit", (), {
-            "fun": np.nan,
-            "x": np.full(len(start), np.nan),
-            "success": False,
-            "nit": 0,
-            "message": "No finite candidate",
-        })()
 
     monkeypatch.setenv("GAS_START_WORKERS", "4")
     monkeypatch.setattr(observed_fit_pool, "ProcessPoolExecutor", InlinePool)
-    monkeypatch.setattr(gas_hybrid_fit, "minimize", failed_minimize)
     observations = _hybrid_observations()
     initial = get_defaults("TTF")
     with pytest.raises(hybrid_module.HybridFitNoCandidate) as first:
@@ -138,25 +131,15 @@ def test_parallel_start_collection_preserves_ordered_retry_attempts(monkeypatch)
     assert len(set(starts)) == 9
 
 
-def test_start_pool_failure_runs_the_original_serial_starts(monkeypatch):
-    starts = []
+def test_start_pool_failure_runs_the_original_serial_starts(monkeypatch, failed_starts):
+    starts = failed_starts
 
     def unavailable_pool(**_kwargs):
         raise RuntimeError("process creation failed")
 
-    def failed_minimize(_objective, start, **_kwargs):
-        starts.append(tuple(np.asarray(start, dtype=float)))
-        return type("FailedFit", (), {
-            "fun": np.nan,
-            "x": np.full(len(start), np.nan),
-            "success": False,
-            "nit": 0,
-            "message": "No finite candidate",
-        })()
 
     monkeypatch.setenv("GAS_START_WORKERS", "4")
     monkeypatch.setattr(observed_fit_pool, "ProcessPoolExecutor", unavailable_pool)
-    monkeypatch.setattr(gas_hybrid_fit, "minimize", failed_minimize)
     with pytest.raises(hybrid_module.HybridFitNoCandidate) as failure:
         hybrid_module.fit_ttf_hybrid_candidate(
             _hybrid_observations(), get_defaults("TTF"), n_starts=3, seed=42

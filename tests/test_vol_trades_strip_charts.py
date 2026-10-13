@@ -90,11 +90,6 @@ def test_periods_append_chronologically_without_new_controls_or_summaries():
     panels = render(rows)
     assert [panel.children[0].children.children for panel in panels] == ["Q1-27", "Winter-27"]
     assert all(len(panel.children) == 2 and isinstance(panel.children[1], dcc.Graph) for panel in panels)
-    assert all(panel.children[1].className == "brent-vol-history-graph" for panel in panels)
-    assert all(
-        panel.children[1].figure.layout.height == 308 and not panel.children[1].figure.layout.showlegend
-        for panel in panels
-    )
     assert panels[1].children[1].figure.layout.meta["months"][-1] == "2028-03-01"
 
 
