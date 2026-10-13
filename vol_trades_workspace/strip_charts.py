@@ -15,7 +15,7 @@ from vol_trades_ice_quotes import prepare_strip_events
 from vol_trades_quote_ranges import empty_range_trace, quote_age_label, range_visible
 from vol_trades_market_window import history_identity, utc_timestamp
 from vol_trades_strip_data import load_strip_inputs, load_strip_settlement_inputs
-from vol_trades_workspace import chart_data, quote_charts
+from vol_trades_workspace import chart_data, quote_filters
 from workspace_cache import WorkspaceLoadCache
 
 
@@ -78,7 +78,7 @@ def _settlement_projection(inputs, months):
     )
 
 
-def build_strip_figure(label, months, projection, *, x_axis, selected_layers, identity, settlement=None, cutoff_at=None):
+def build_strip_figure(label, months, projection, *, x_axis, selected_layers, identity, settlement=None, cutoff_at=None, proposal=None):
     figure = go.Figure()
     delta_mode = chart_data._normalize_x_axis(x_axis) == chart_data.X_AXIS_DELTA
     selected = None if selected_layers is None else set(selected_layers)
@@ -105,6 +105,14 @@ def build_strip_figure(label, months, projection, *, x_axis, selected_layers, id
                 ),
             )
         )
+    for curve in (proposal or {}).get("curves", []):
+        points = curve["points"]
+        figure.add_trace(go.Scatter(
+            x=[point["delta"] if delta_mode else point["strike"] for point in points],
+            y=[100*point["volatility"] for point in points], mode="lines",
+            name="Intraday proposal", meta={"legend_layer":"intraday-proposal"},
+            visible=visible("intraday-proposal"), line={"color":"#a855f7", "width":2},
+            hovertemplate="Intraday proposal · Equivalent strip IV %{y:.2f}%<extra></extra>"))
     interval = empty_range_trace()
     range_x, range_y, range_text = [], [], []
     for row in projection.get("quotes", []):
@@ -273,6 +281,7 @@ def render_strip_charts(
     *,
     input_loader=load_strip_inputs,
     settlement_loader=load_strip_settlement_inputs,
+    proposal_inputs=None,
     **filters,
 ):
     history, quote_snapshot = history or {}, quote_snapshot or {}
@@ -295,7 +304,7 @@ def render_strip_charts(
         row.setdefault("contract_label", row.get("strip_label") or row["_strip_label"])
         row.setdefault("option_filter_key", row["option_type"])
         row.setdefault("strike_filter_key", str(row["strike"]))
-    filtered = quote_charts.filter_quote_rows(rows, product="TFO", **filters)
+    filtered = quote_filters.filter_quote_rows(rows, product="TFO", **filters)
     if filtered.empty:
         return []
     groups = {key: frame.to_dict("records") for key, frame in filtered.groupby("_strip_key", sort=False)}
@@ -348,6 +357,7 @@ def render_strip_charts(
             identity=identity,
             settlement=settlement,
             cutoff_at=window.get("cutoff_at"),
+            proposal=_projection(proposal_inputs, first["_strip_months"], valid_units) if proposal_inputs and valid_units else None,
         )
         plots.append(
             html.Section(

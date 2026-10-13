@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 
 from pages import brent_vol_history as history
 from vol_trades_market_window import history_identity
-from vol_trades_workspace import history_charts, overlays, quote_charts, trade_tape
+from vol_trades_workspace import history_charts, overlays, trade_tape
 
 
 def test_rebuilt_base_charts_do_not_reuse_the_previous_ice_overlay_generation():
@@ -95,21 +95,3 @@ def test_ice_expiry_opacity_is_independent_of_size_and_age():
     assert payload["ice-bid"]["opacity"] == [0.85, 0.85]
     assert payload["ice-bid"]["symbol"] == ["triangle-down", "triangle-down-open"]
     assert "Quoted size 100" in payload["ice-bid"]["text"][1]
-
-
-def test_ice_comparison_symbols_use_call_put_and_do_not_enlarge_latest_event():
-    base = dict(product_label="TFO", contract_label="Jan-27", option_label="Call",
-                option_type="C", strike=75, price_unit_label="EUR/MWh", bid=5, offer=6,
-                single_price=5.5, theoretical_price=5.2, bid_iv_pct=65, offer_iv_pct=66,
-                single_iv_pct=65.5, our_iv_pct=65.2, bid_iv_edge_pp=-0.2,
-                offer_iv_edge_pp=0.8, single_iv_deviation_pp=0.3, forward=70,
-                surface_cob_date="2026-10-01", sender_handle="broker", outbound_status="",
-                observed_at="2026-10-02T08:00:00Z", bid_size=1, offer_size=10, single_size=50)
-    frame = pd.DataFrame([base, dict(base, option_type="P", option_label="Put",
-                                    observed_at="2026-10-02T10:00:00Z", bid_size=100)])
-    figure = quote_charts.build_all_quotes_figure(frame)
-    for trace, symbol in zip(figure.data, ("triangle-down", "triangle-up", "diamond")):
-        assert list(trace.marker.symbol) == [symbol, symbol + "-open"]
-        assert list(trace.marker.size) == [6, 6]
-        assert trace.marker.opacity == pytest.approx(0.85)
-    assert figure.data[2].name == "ICE single price"

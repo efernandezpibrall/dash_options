@@ -217,7 +217,11 @@ def test_publication_candidate_separates_batch_and_manual_targets(monkeypatch):
     monkeypatch.setattr(
         publication_candidates,
         "operational_surface_frame",
-        lambda *args, **kwargs: pd.DataFrame({"iv": [0.5]}),
+        lambda *args, **kwargs: pd.DataFrame({
+            "iv": np.full(401, .5),
+            "strike": np.linspace(.1, 3., 401) * float(args[0].forward.iloc[0]),
+            "total_variance": np.full(401, .25),
+        }),
     )
     table_row = {
         **ttf_page.get_defaults("TTF"),

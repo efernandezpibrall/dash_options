@@ -1,5 +1,10 @@
 """Initialize Dash callbacks before a threaded worker accepts requests."""
 
+import os
+
+# libpq applies this to every PostgreSQL pool, including analytics readers.
+os.environ.setdefault("PGAPPNAME", "dash_options")
+
 from index_options import app, server
 
 # Dash's first-request setup is not synchronized across request threads.

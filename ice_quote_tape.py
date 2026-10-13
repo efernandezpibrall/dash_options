@@ -43,6 +43,10 @@ def display_orientation(row):
 def project_quote(row):
     """Render persisted values using the shared interpretation already attached."""
     result = {}
+    check = (row.get("edge_assessment") or {}).get("surface_check") or {}
+    result["surface_check_display"] = check.get("label") or ("Insufficient" if row.get("valuation_status") in {"blocked", "failed"} else "Not assessed")
+    result["surface_check_status"] = check.get("status") or ("insufficient" if row.get("valuation_status") in {"blocked", "failed"} else "unavailable")
+    result["surface_check_tooltip"] = check.get("reason") or row.get("valuation_reason") or "Surface assessment not recorded for this earlier valuation."
     decimals = int(row.get("price_decimals") or 3)
     bid, offer, trade = (number(row.get(key)) for key in ("bid", "offer", "single_price"))
     if bid is None and offer is None and trade is not None:

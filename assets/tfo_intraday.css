@@ -1,0 +1,14 @@
+.tfo-intraday-controls { display: inline-flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+.tfo-intraday-controls[hidden] { display: none; }
+.tfo-intraday-controls small { color: var(--muted, #64748b); font-size: .75rem; }
+.tfo-intraday-months { display: flex; flex-wrap: wrap; gap: .5rem 1rem; margin: .75rem 0; }
+.tfo-intraday-months input { margin-right: .35rem; }
+.tfo-intraday-summary { overflow-x: auto; margin: .75rem 0; }
+.tfo-intraday-summary table { width: 100%; font-size: .8rem; border-collapse: collapse; }
+.tfo-intraday-summary td, .tfo-intraday-summary th { padding: .4rem .6rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
+.tfo-intraday-modal .modal-content { border-radius: .65rem; }
+.tfo-intraday-modal .modal-body { font-size: .85rem; }
+.tfo-intraday-legend { border-top: 2px solid #a855f7; width: 18px; height: 0; display: inline-block; }
+/* Keep this card above the dashboard's sticky toolbar and navigation. */
+.tfo-intraday-modal { z-index: 1400; }
+.tfo-intraday-backdrop { z-index: 1390; }

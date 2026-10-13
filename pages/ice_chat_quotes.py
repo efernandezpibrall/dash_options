@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from vol_trades_workspace import quote_charts, quote_components
+from vol_trades_workspace import quote_components, quote_filters
 
 from datetime import datetime, timezone
 
 import pandas as pd
-from dash import Input, Output, callback, html, no_update
+from dash import Input, Output, State, callback, html, no_update
+from dash.exceptions import PreventUpdate
 
 import ice_quote_data as quote_data
-from dash_utils import triggered_id
+import ice_surface_workbench  # registers lazy surface editor callbacks at startup
 from vol_trades_market_window import market_context, quote_table_rows
 
 
@@ -51,6 +52,7 @@ def refresh_quote_snapshot(_interval, window, history_snapshot=None):
     return (
         {
             "rows": result.rows,
+            "review_ref": result.review_ref,
             "error": result.error,
             "loaded_at": result.loaded_at,
             "truncated": result.truncated,
@@ -72,7 +74,7 @@ def refresh_quote_snapshot(_interval, window, history_snapshot=None):
     Input("brent-vol-history-product", "value"),
 )
 def update_quote_filter_options(snapshot, product="BRENT"):
-    frame = quote_charts.filter_quote_rows(quote_table_rows(snapshot), product=product)
+    frame = quote_filters.filter_quote_rows(quote_table_rows(snapshot), product=product)
     if frame.empty:
         return [], [], [], [], [], []
 
@@ -97,12 +99,9 @@ def update_quote_filter_options(snapshot, product="BRENT"):
 
 @callback(
     Output("ice-chat-service-status", "children"),
-    Output("ice-chat-quote-chart", "figure"),
     Output("ice-chat-quote-grid", "rowData"),
     Output("ice-chat-quote-grid", "style"),
     Output("ice-chat-table-status", "children"),
-    Output("ice-chat-chart-title", "children"),
-    Output("ice-chat-chart-hint", "children"),
     Input("ice-chat-quote-snapshot", "data"),
     Input("ice-chat-service-snapshot", "data"),
     Input("ice-chat-contract", "value"),
@@ -112,7 +111,6 @@ def update_quote_filter_options(snapshot, product="BRENT"):
     Input("ice-chat-source-channel", "value"),
     Input("ice-chat-status-filter", "value"),
     Input("ice-chat-positive-only", "value"),
-    Input("ice-chat-quote-grid", "selectedRows"),
     Input("brent-vol-history-product", "value"),
 )
 def render_quote_dashboard(
@@ -125,14 +123,13 @@ def render_quote_dashboard(
     source_channel,
     status,
     positive_only,
-    selected_rows,
     product="BRENT",
 ):
     snapshot = snapshot or {}
     selected_product = quote_data._selected_product(product)
     label = quote_data.PRODUCT_LABELS[selected_product]
     rows = quote_table_rows(snapshot)
-    frame = quote_charts.filter_quote_rows(
+    frame = quote_filters.filter_quote_rows(
         rows,
         product=selected_product,
         contract=contract,
@@ -143,33 +140,6 @@ def render_quote_dashboard(
         status=status,
         positive_only="positive" in (positive_only or []),
     )
-    selected = (selected_rows or [None])[0]
-    if selected and (
-        frame.empty or str(selected.get("event_id")) not in set(frame["event_id"].astype(str))
-    ):
-        selected = None
-    if selected:
-        figure = quote_charts.build_instrument_figure(frame, selected)
-        chart_title = "Instrument quote history"
-        instrument = selected.get("instrument_label") or "Selected instrument"
-        orientation = {"to_put": "to put", "to_call": "to call"}.get(selected.get("fence_premium_orientation"), "side unresolved")
-        chart_hint = (f"{instrument} · inferred {orientation}; indication gap is non-executable; no single structure IV"
-                      if selected.get("structure_code") == "CLLR" else
-                      f"{instrument} · correlation not assigned; CSO valuation on hold"
-                      if selected.get("structure_code") in {"CSO3", "CSO4"} else
-                      f"{instrument} · signed leg valuation; no single structure IV; broker edge unverified"
-                      if selected.get("structure_code") in {"CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"} else
-                      f"{instrument} · broker premium and IV vs our marks")
-        if selected.get("edge_confidence"):
-            chart_hint = f"{instrument} · {selected['signal_label']} · {selected.get('edge_explanation') or 'net edge assessed'}"
-    elif selected_product not in quote_data.QUOTE_FEED_PRODUCTS:
-        figure = quote_charts._empty_figure(f"ICE quote feed is unavailable for {label}")
-        chart_title = "Broker quotes vs our mark"
-        chart_hint = f"No ICE quote feed is configured for {label}"
-    else:
-        figure = quote_charts.build_all_quotes_figure(frame)
-        chart_title = "Broker quotes vs our mark"
-        chart_hint = "Vol differences compare marks · premium edge and confidence are shown in the tape"
     status_strip = (
         html.Div(
             f"No ICE quote feed is configured for {label}.",
@@ -206,43 +176,12 @@ def render_quote_dashboard(
             table_status += f" · {held_csos} CSOs: correlation not assigned"
     visible_rows = min(len(frame), 11)
     grid_height = min(420, max(180, 88 + 30 * visible_rows))
-    selection_only = triggered_id() == "ice-chat-quote-grid"
     return (
-        no_update if selection_only else status_strip,
-        figure,
-        no_update if selection_only else frame.to_dict("records"),
-        no_update if selection_only else {"height": f"{grid_height}px"},
-        no_update if selection_only else table_status,
-        chart_title,
-        chart_hint,
+        status_strip,
+        frame.to_dict("records"),
+        {"height": f"{grid_height}px"},
+        table_status,
     )
-
-
-@callback(
-    Output("ice-chat-signal-summary", "children"),
-    Input("ice-chat-quote-snapshot", "data"),
-    Input("ice-chat-contract", "value"),
-    Input("ice-chat-option-type", "value"),
-    Input("ice-chat-strike", "value"),
-    Input("ice-chat-sender", "value"),
-    Input("ice-chat-source-channel", "value"),
-    Input("ice-chat-status-filter", "value"),
-    Input("ice-chat-positive-only", "value"),
-    Input("ice-chat-quote-grid", "selectedRows"),
-)
-def render_signal_summary(
-    snapshot,
-    contract,
-    option_type,
-    strike,
-    sender,
-    source_channel,
-    status,
-    positive_only,
-    selected_rows,
-):
-    # Preserve the callback signature for dashboard tabs opened before this section was removed.
-    return None
 
 
 @callback(
@@ -251,42 +190,61 @@ def render_signal_summary(
     Input("ice-chat-quote-grid", "selectedRows"),
     Input("ice-chat-quote-snapshot", "data"),
     Input("brent-vol-history-product", "value"),
+    State("ice-chat-reply-audit", "children"),
 )
-def render_reply_audit(selected_rows, snapshot, product="BRENT"):
+def render_reply_audit(selected_rows, snapshot, product="BRENT", current_children=None):
     selected = (selected_rows or [None])[0]
-    prompt = "Select a quote to inspect the three edge checks, sent message and acknowledgment."
+    # Keep the current anchor when adding quotes, so target edits survive.
+    if isinstance(current_children, list) and current_children and isinstance(current_children[0], dict):
+        anchor = current_children[0].get("props", {}).get("data-anchor-event")
+        selected = next((row for row in selected_rows or [] if str(row.get("event_id")) == anchor), selected)
+    prompt = "Select a quote to inspect its surface assessment, leg values, edge checks and reply."
     if not selected or quote_data._row_product(selected.get("product_code")) != quote_data._selected_product(product):
         return prompt, False
     visible = {str(row.get("event_id")) for row in (snapshot or {}).get("rows", [])}
     if str(selected.get("event_id")) not in visible:
         return prompt, False
-    record, error = quote_data.load_quote_reply(str(selected["event_id"]), product)
-    if error:
-        return error, True
-    if not record:
-        return "No reply delivery is recorded for this quote.", True
-    state = record["outbound_status"]
-    labels = {"acknowledged": "🟢 Acknowledged by ICE", "pending": "🟡 Awaiting ICE acknowledgment",
-              "suppressed": "Suppressed", "blocked": "🟡 Reply on hold",
-              "explicit_failure": "🔴 ICE rejected reply", "ambiguous_timeout": "🟡 Delivery uncertain — acknowledgment timed out"}
-    def gst(value):
-        return pd.Timestamp(value).tz_convert("Asia/Dubai").strftime("%d %b %H:%M:%S GST") if value else "—"
-    metadata = [html.Strong(labels.get(state, "No reply recorded")),
-                html.Span(f"Sent {gst(record['outbound_attempted_at'])}"),
-                html.Span(f"Acknowledged {gst(record['outbound_acknowledged_at'])}")]
-    if record["outbound_batch_reference"]:
-        metadata.append(html.Span(f"Ref {record['outbound_batch_reference']}"))
-    children = quote_components.quote_details(selected, record)
-    children.extend(quote_components._edge_audit(record["edge_assessment"], record["quote_context"], record))
-    children.append(html.Div(metadata, className="ice-chat-reply-metadata"))
-    if record["outbound_error_message"]:
-        children.append(html.P(record["outbound_error_message"]))
-    if record["outbound_message_text"]:
-        children.append(html.Pre(record["outbound_message_text"], className="ice-chat-reply-text"))
-    else:
-        children.append(html.P("Exact text was not retained for this earlier reply." if state
-                               else "No outbound message has been sent for this quote."))
-    return children, True
+    render_key=str(selected['event_id'])
+    if isinstance(current_children,list) and current_children and isinstance(current_children[0],dict):
+        if current_children[0].get('props',{}).get('data-render-key')==render_key:
+            return no_update,no_update
+    from ice_surface_components import surface_assessment_panel
+    from dash import dcc
+    panel=surface_assessment_panel({'event_id':render_key},context=selected)
+    setattr(panel,'data-render-key',render_key);setattr(panel,'data-anchor-event',render_key)
+    return [panel,html.Details([html.Summary('Original quote, valuation inputs and ICE reply'),
+        dcc.Store(id='ice-chat-detail-event',data=selected),html.Div(id='ice-chat-detail-body')],
+        id='ice-chat-detail-disclosure',className='ice-surface-disclosure ice-surface-audit')],True
+
+
+@callback(Output('ice-chat-detail-body','children'),Input('ice-chat-detail-disclosure','n_clicks'),
+    State('ice-chat-detail-event','data'),State('brent-vol-history-product','value'),State('ice-chat-detail-body','children'),prevent_initial_call=True)
+def load_reply_details(clicks,selected,product,prior):
+    if not clicks or not selected or isinstance(prior,list):raise PreventUpdate
+    record,error=quote_data.load_quote_reply(str(selected['event_id']),product)
+    if error:return error
+    if not record:return 'No saved reply for this quote.'
+    audit=quote_components.quote_details(selected,record)
+    audit.extend(quote_components._edge_audit(record.get('edge_assessment'),record.get('quote_context'),record))
+    labels={'acknowledged':'Acknowledged by ICE','pending':'Awaiting ICE acknowledgment','suppressed':'Suppressed','blocked':'Reply on hold','explicit_failure':'ICE rejected reply','ambiguous_timeout':'Delivery uncertain — acknowledgment timed out'}
+    from ice_quote_tape import gst
+    metadata=[html.Strong(labels.get(record.get('outbound_status'),'No reply recorded')),
+        html.Span('Sent '+gst(record.get('outbound_attempted_at'),True)),
+        html.Span('Acknowledged '+gst(record.get('outbound_acknowledged_at'),True))]
+    if record.get('outbound_batch_reference'):metadata.append(html.Span('Ref '+str(record['outbound_batch_reference'])))
+    audit.append(html.Div(metadata,className='ice-chat-reply-metadata'))
+    if record.get('outbound_error_message'):audit.append(html.P(record['outbound_error_message']))
+    check=(record.get('edge_assessment') or {}).get('surface_check') or {}
+    legs=check.get('legs') or []
+    if legs:
+        audit.insert(0,html.Table([html.Thead(html.Tr([html.Th(x) for x in ['Delivery','Leg','Weight','Forward','IV %','Vega / pt']])),
+            html.Tbody([html.Tr([html.Td(str(l.get('contract_month'))[:10]),html.Td(f"{l['strike']:g}{l['option_type']}"),
+                html.Td(f"{l['coefficient']:+g}"),html.Td(str(l.get('forward'))),html.Td(f"{100*l['strike_volatility']:.2f}"),
+                html.Td(str(l.get('signed_vega')))]) for l in legs])]))
+    if record.get('original_market_text'):audit.append(html.Pre(record['original_market_text']))
+    audit.append(html.Pre(record.get('outbound_message_text') or 'No retained outbound message.'))
+    return audit
+
 
 
 @callback(

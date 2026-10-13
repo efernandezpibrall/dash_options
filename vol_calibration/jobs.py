@@ -82,7 +82,9 @@ CLAIM_JOB_SQL = text(
         FROM at_lng.vol_calibration_jobs
         WHERE cancellation_requested = FALSE
           AND attempts < max_attempts
+          AND next_attempt_at <= CURRENT_TIMESTAMP
           AND (:job_id IS NULL OR job_id = :job_id)
+          AND (:job_type IS NULL OR job_type = :job_type)
           AND (
               status = 'queued'
               OR (status = 'running' AND lease_expires_at < CURRENT_TIMESTAMP)
@@ -216,6 +218,8 @@ FAIL_JOB_SQL = text(
         worker_id = NULL,
         lease_expires_at = NULL,
         last_error = :last_error,
+        failure_kind = :failure_kind,
+        next_attempt_at = CURRENT_TIMESTAMP + (:retry_delay_seconds * INTERVAL '1 second'),
         finished_at = CASE
             WHEN cancellation_requested OR attempts >= max_attempts
             THEN CURRENT_TIMESTAMP
@@ -233,6 +237,7 @@ ABORT_JOB_SQL = text(
     """
     UPDATE at_lng.vol_calibration_jobs
     SET status = 'failed',
+        failure_kind = 'permanent',
         worker_id = NULL,
         lease_expires_at = NULL,
         last_error = :last_error,
@@ -411,7 +416,7 @@ class PostgresJobRepository:
                 )
             return record
 
-    def claim(self, *, worker_id: str, lease_seconds: int = 60, job_id=None):
+    def claim(self, *, worker_id: str, lease_seconds: int = 60, job_id=None, job_type=None):
         self._require_positive(lease_seconds, "lease_seconds")
         with self.engine.begin() as connection:
             result = connection.execute(
@@ -420,6 +425,7 @@ class PostgresJobRepository:
                     "worker_id": worker_id,
                     "lease_seconds": lease_seconds,
                     "job_id": job_id,
+                    "job_type": job_type,
                 },
             )
             return self._record(result)
@@ -468,7 +474,9 @@ class PostgresJobRepository:
                 )
             )
 
-    def fail(self, *, job_id, worker_id: str, last_error: str):
+    def fail(self, *, job_id, worker_id: str, last_error: str, retry_delay_seconds=0, failure_kind=None):
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds cannot be negative")
         with self.engine.begin() as connection:
             return self._record(
                 connection.execute(
@@ -477,6 +485,8 @@ class PostgresJobRepository:
                         "job_id": job_id,
                         "worker_id": worker_id,
                         "last_error": last_error,
+                        "retry_delay_seconds": retry_delay_seconds,
+                        "failure_kind": failure_kind,
                     },
                 )
             )

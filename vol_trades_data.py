@@ -1145,6 +1145,7 @@ def load_latest_calibrated_surface(
     engine=None,
     *,
     product: str = PRODUCT,
+    intraday: bool = False,
 ) -> pd.DataFrame:
     """Load the latest active calibrated publication for the selected product.
 
@@ -1202,6 +1203,11 @@ def load_latest_calibrated_surface(
             selected_cob=selected_cob.date().isoformat(),
         )
     publication = catalog.iloc[0]
+    if product == "TFO" and intraday:
+        from options.vol_calibration.api import resolve_tfo_intraday_publication
+        active_intraday = resolve_tfo_intraday_publication(db_engine, selected_cob.date())
+        if active_intraday:
+            publication = {**active_intraday, "publication_cob_date": active_intraday["cob_date"]}
     publication_id = str(publication["publication_id"])
     frame = (
         _read_calibrated_surface_points(

@@ -163,3 +163,91 @@ selected official inputs, persists verified per-expiry checkpoints in
 `at_lng.vol_calibration_job_items`, and returns completed candidates to the
 existing publication gate. It does not publish automatically. The feature is
 independent of the older generic background-job flag above.
+# Brent/HH settlement worker (analytics 1.4.1)
+
+`settlement_worker.py` is a separate process and uses only
+`options.vol_calibration.api` for source preparation, fitting, validation,
+lossless transport and publication. It does not run inside a page callback.
+The existing gas batch worker remains a separate job family. Job claims now
+support an explicit family filter, preventing either worker from consuming the
+other's queue.
+
+Brent policy `brent_single_svi_actual_strikes_v2` retains the first accepted
+quote fit, then tries admissible minimum-variance SVI coordinates and a bounded
+neighbour seed when needed. The new Brent model uses raw SVI wings. Historical
+pickles without `raw_svi_wings` retain the old taper. HH policy
+`hh_lne_single_svi_seasonal_quotes_v2` uses the same recovery, admissible sparse
+coordinates, and explicit sparse quote/optimizer gates. Rich fit failures cannot
+silently become extrapolated months. Failure diagnostics contain all failed
+maturities; sparse dependencies are reported rather than manufactured.
+
+Source preparation checks independently generated monthly expiry coverage,
+quote/contract expiry agreement, exact source rows, forwards, conventions,
+weighting policy and code/runtime identity. Publication candidates retain the
+same 401 points and 11 anchors per maturity. Certification checks original
+quotes and premium/IV reconciliation, the final model's density, variance,
+delta inversion and monotone/convex call prices. Calendar monotonicity across
+different delivery futures is not an acceptance condition.
+
+The worker reuses PostgreSQL jobs, leases, cancellation and item checkpoints.
+Candidate/certificate and readiness state are durable in
+`vol_settlement_candidates`, `vol_settlement_source_events` and
+`vol_settlement_promotion`. Tagged float transport round-trips all IEEE bits;
+no pickle or rounded pandas JSON is used for retained candidates. A source or
+implementation change requires a new submission and cannot reuse a checkpoint.
+Restart after publication commit recovers through the certified idempotency key.
+Permanent source, model, certificate or concurrency failures are held; execution
+failures receive at most three claims. Stale workers cannot activate a revision.
+
+Automatic publication requires **all** of: settlement jobs enabled, a separate
+per-product auto flag, an explicitly configured service publisher, a database
+promotion approval and at least 20 prospective successful shadow sessions under
+the exact implementation. Historical replay does not satisfy that gate. All
+new flags default off. Automatic jobs expect no existing same-day publication;
+corrections and manual/automatic competition are held for review.
+
+Migration `20261005_01` preserves v1 policies and admits v2, removes numerical
+scale truncation from point/error storage, and restores the current TTF view
+definition, owner, grants and comment around that change. Unknown dependent
+views cause the migration to fail transactionally and require a reviewed
+extension. Deploy both repositories together; numerical source edits invalidate
+certificates and prospective shadow evidence.
+
+Verification commands (project interpreter, paired checkout):
+
+```sh
+python integration/verify_settlement_pipeline.py
+python integration/replay_settlement_sources.py --from-cob 2026-09-01 --through-cob 2026-10-02 --output-dir /path/to/replay
+python ../options/scripts/check_vol_calibration_boundaries.py --dashboard .
+```
+
+The PostgreSQL verifier owns a temporary cluster and never loads a configured
+database. It tests genuine persistence and locks with pinned synthetic source
+fixtures. Historical replay separately loads the configured database with
+read-only connections, verifies lossless certificates, and checks active
+publication pointers before and after.
+
+
+Analytics 1.4.1 retains the v2 numerical policies and adds typed HH seasonal
+checkpoints containing predecessor/input identities and original sparse-fit
+diagnostics. Compatible sparse slices are reused on restart; changed dependencies
+are fitted again. Acceptance thresholds come from the pinned product policy for
+both fitting and certification. Brent and HH SQL frame readers can reuse an
+existing locked SQLAlchemy connection, preserving the publication source check.
+
+Apply `20261005_02` after `20261005_01` for recovery and operational controls.
+Jobs carry durable retry eligibility and failure classification; only temporary
+execution failures can be retried through the audited operator command. Job
+attempt counters are preserved, with three additional claims per authorized
+recovery. Source/model/deadline holds remain permanent for that submission.
+Promotion now uses reviewed session coverage, successful latest jobs, current
+source revisions and an explicitly approved evidence cutoff/identity. A saved
+shadow candidate without a successful job cannot count. Worker identity includes
+execution, operations, job, authority and feature-flag code.
+
+Session calendars are explicit reviewed imports with exchange timezone and
+readiness/deadline timestamps. The worker reconciles due sessions, stores missing
+inputs, blocks late activation and persists meaningful alerts with resolution.
+See `DEPLOYMENT.md` for calendar import, approval, retry and monitoring commands.
+No production calendar, approval, service identity or automatic-publication flag
+is enabled by installing this code.

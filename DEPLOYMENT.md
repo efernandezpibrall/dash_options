@@ -416,3 +416,200 @@ NULL. The tape states `BASIS REQUIRED`; selected details show each month’s
 delivery hours and clarify that these are separate leg values. An acknowledged
 reply older than the valuation is labelled `Prior reply`. ICEchat owns the
 leg valuation and fresh reply text; no historical message is resent.
+# Settlement automation candidate: analytics 1.4.1
+
+This implementation is staged work. Installation does not enable automatic
+publication. Deploy the paired dashboard and analytics wheel with migration
+`20261005_01` and `20261005_02`; preserve current source routing, authentication, existing
+publication flags and unrelated services. Back up the schema and publication
+metadata first. Run the migration as the owner of the current surface view;
+it preserves its definition, grants, owner and comment. It uses a five-second
+lock timeout and aborts transactionally for unexpected view dependencies.
+Published v2 rows have no automatic downgrade: rollback the application only
+after verifying it can still consume their stored parameters and points.
+
+Use a dedicated supervised settlement process with the same configured database
+and the installed release interpreter, independent of Gunicorn. Start in shadow:
+
+```sh
+export OPTIONS_CONFIG_PATH=/absolute/path/to/runtime-config.ini
+export VOL_CALIBRATION_SETTLEMENT_JOBS_ENABLED=true
+python -m vol_calibration.settlement_worker --from-cob 2026-10-05 --mode shadow
+```
+
+`--from-cob` is an explicit operational boundary. Polling reconciles persisted
+complete settlement snapshots on startup and every 60 seconds, deduplicating
+source events and catching up after downtime. A scheduled one-shot may also
+supply `--expected-cob YYYY-MM-DD --once` from the exchange business calendar;
+an absent source is recorded as waiting. The worker does not invent daily
+business dates from a weekday calendar. Intraday snapshots are excluded.
+
+Inspect persisted state with:
+
+```sh
+python -m vol_calibration.settlement_worker --from-cob 2026-10-05 --status
+```
+
+Watch waiting inputs, held calibrations, source revisions, exhausted retries,
+lease expiry, point/maturity counts and time to completion. A hold keeps the
+previous publication active. Diagnose and submit corrected immutable inputs;
+never relax a gate merely to complete a settlement. Source/model validation and
+concurrency failures are permanent for that job. Runtime/database failures retry
+up to three claims with persisted 30/60-second backoff (bounded at 300 seconds).
+A lease expired at that limit becomes a retryable failed job. Permanent numerical,
+source, deadline and authority holds require corrected inputs or configuration;
+they cannot use the execution-retry command.
+
+Promotion is deliberately separate. Collect at least 20 prospective shadow
+sessions from `vol_settlement_promotion.shadow_start_cob`, replay the available
+history, review all holds and confirm real consumer readbacks. Historical
+sessions before that date do not count. The most recent required sessions must
+all contain exact certificates for the current code/runtime and worker. Approve the explicit reviewed evidence window using the operator command below.
+The gate checks every required calendar session, its latest shadow job and the
+current source revision. Failed or pending jobs count as failures even without
+candidate rows. Counted shadow jobs must be created and completed inside their
+reviewed readiness/deadline window; late replays cannot count. It binds the approval to the exact evidence identity and cutoff;
+future publish sessions do not extend that approval window implicitly. Corrections
+to reviewed source sessions or changes in implementation require renewed review.
+Promote HH first; assess it before approving Brent. No script in this change
+automatically approves either product.
+
+Only after those checks configure the dedicated service publisher:
+
+```sh
+export VOL_CALIBRATION_SETTLEMENT_SERVICE_ACTOR=settlement-publication-service
+export VOL_CALIBRATION_SETTLEMENT_SERVICE_ROLE=publisher
+export VOL_CALIBRATION_HH_AUTO_SETTLEMENT_ENABLED=true
+# Enable Brent separately after its review:
+# export VOL_CALIBRATION_BRENT_AUTO_SETTLEMENT_ENABLED=true
+python -m vol_calibration.settlement_worker --from-cob YYYY-MM-DD --mode publish
+```
+
+The service does not inherit a local browser identity or generic write flags.
+Publication rechecks promotion, the current source revision, source identity,
+reviewed session deadline, cancellation and lease within the transaction. Its
+bounded SHARE lock on the snapshot table prevents correction inserts from
+committing between the final revision check and activation. It verifies every saved point and expiry result before
+activation, then reads the committed publication on a fresh connection. A
+completed publication followed by a process crash is recovered idempotently.
+Existing same-day revisions cause a hold rather than automatic supersession.
+
+For the kill switch, stop the supervised worker and disable the relevant auto
+flag before restarting. Environment/configuration is resolved by the running
+process, so changing a configuration file alone is not a live kill switch.
+Keep shadow calculations enabled independently if useful. Do not republish
+portfolio valuations or resend ICEchat messages as part of surface rollout.
+Prove the active release path/version, persisted revision, hydrated selected
+product dashboard and downstream pricing readbacks before declaring deployment
+verified. A ready health endpoint or historical test alone is insufficient.
+
+
+The 1.4.1 recovery migration adds `next_attempt_at` and `failure_kind` to jobs,
+an immutable retry audit, reviewed session calendars, persistent alerts and
+approval evidence identities. It clears older approvals because the corrected
+worker needs fresh review. Apply both migrations before starting the new worker;
+older applications remain readable, but old workers must be stopped during the
+paired rollout.
+
+Load an exchange calendar reviewed by the operator before enabling automatic
+publication. Each product has a separate JSON manifest with `schema: 1`,
+`commodity` (`BRENT` or `HH`), `version`, `source`, IANA `timezone`, `from_cob`,
+`through_cob`, and an explicit `sessions` list. Each session contains `cob`,
+`ready_at` and `deadline_at` as ISO timestamps with timezone offsets. The declared
+coverage must contain every exchange session, including special holiday hours;
+closed dates have no session row. The worker does not derive sessions from the
+option-expiry calendar. Import is idempotent; removing or changing an existing
+reviewed session is rejected and requires a reviewed correction migration.
+
+```sh
+export VOL_CALIBRATION_SETTLEMENT_OPERATOR_ACTOR=reviewed-settlement-operator
+export VOL_CALIBRATION_SETTLEMENT_OPERATOR_ROLES=approver
+python -m vol_calibration.settlement_worker --from-cob YYYY-MM-DD --import-calendar /path/to/reviewed-brent-sessions.json
+python -m vol_calibration.settlement_worker --from-cob YYYY-MM-DD --import-calendar /path/to/reviewed-hh-sessions.json
+python -m vol_calibration.settlement_worker --from-cob YYYY-MM-DD --approve-product HH --evidence-through YYYY-MM-DD
+```
+
+Calendar sessions become eligible at their explicit readiness time. A missing
+source stays waiting; a missed deadline prevents automatic activation. Alerts
+for holds, exhausted execution retries, missing/expired calendars, missed
+completion deadlines and source corrections are persisted in
+`vol_settlement_alerts`. The worker logs only new or changed alerts and their
+resolution; direct them through the supervisor's existing monitoring. `--status`
+includes active alerts, reviewed deadlines, next retry times, failure kinds and
+completion latency. No external notification destination is configured by this
+change.
+
+After repairing a temporary execution failure, an authorized calibrator can
+extend the retry allowance by three claims. The operation retains the job ID,
+attempt history, valid maturity checkpoints and any certified candidate. It
+rechecks current source, implementation and immutable input identity, and saves
+operator, reason and previous/new retry limits in `vol_settlement_retry_audit`.
+A duplicate retry of a queued/running/succeeded job is rejected.
+
+```sh
+export VOL_CALIBRATION_SETTLEMENT_OPERATOR_ROLES=calibrator
+python -m vol_calibration.settlement_worker --from-cob YYYY-MM-DD --retry-job JOB_UUID --reason 'Temporary database outage repaired'
+```
+
+The official test suite includes disposable PostgreSQL regression coverage for
+source corrections before and during activation, the phantom-insert lock,
+missing/failed/pending promotion sessions, exhausted-job recovery, deadline
+alerts and migration lock contention. The real Brent source loader is exercised
+against persisted quote, forward and governed-expiry rows, including reads on
+the publication transaction's locked connection. PostgreSQL binaries are
+required for these tests; skipped persistence tests are not release evidence.
+
+## Connection pool repair candidate — 9 October 2026
+
+The inactive `1.3.3-connection-pools-20261009` dashboard artifact is derived from
+`1.3.3-ice-fast-review-20261008`, with only the database ownership repair. Its
+analytics wheel is `1.3.3+poolfix.20261009`; unrelated 1.4.2 source work is not
+part of this artifact. The paired ICEchat candidate is
+`0.1.3-connection-pools-20261009`, wheel `0.1.3+poolfix.20261009`.
+
+`options.connection_pool` owns both dashboard and cached analytics engines.
+Required/optional lookup flags do not enter pool identity. Equivalent default
+PostgreSQL driver/port spellings share an engine; distinct effective database
+identities never share connections. Initialization is synchronized. Each source
+reserves five physical connections with zero overflow and a ten-second checkout
+wait; all owned source reservations together are capped at ten per process.
+The normal main/middle-office fallback therefore has one five-connection pool.
+A separately configured middle-office source can use the second five-connection
+pool. A third source is rejected explicitly until a quiescent configuration
+reload, rather than silently expanding the process budget.
+
+`clear_runtime_config_cache()` now disposes the shared pools before clearing
+configuration. It refuses to run during active checkouts. Callers must reacquire
+engines after a reset; retired references cannot silently open new pools. Child
+processes discard inherited pools with `dispose(close=False)` and establish their
+own connections. Never pass a borrowed connection across a fork. The aggregate
+server budget remains per-process capacity multiplied by worker count; retain the
+single-worker dashboard topology.
+
+`options.connection_pool.database_pool_snapshot()` exposes process ID, hashed
+source identity, reserved capacity, physical connect/close counters,
+checkout/checkin/invalidation/disposal counters and recent retired-pool totals.
+It contains no connection strings or credentials. Bloomberg's worker pool and
+ICEchat's persistence pool are separately bounded to two retained plus one
+overflow connection each. ICEchat's three-connection ceiling includes its
+long-lived advisory-lock connection. Worker startup and shutdown failures must
+still dispose pools. A rejected ICEchat lock acquisition must never publish a
+stopped status for the process that actually owns the bot.
+
+Source defaults and staged launchers identify sessions as `dash_options`,
+`bbg_option_chain_worker`, and `icechat`; the dedicated ICEchat session continues
+to use `icechat_service_lock`. Saved LaunchAgent settings are not active until a
+normal reload/login. Do not edit a sealed release launcher without regenerating
+its paired manifest; the original dashboard launcher was restored and the naming
+change is included in the candidate instead.
+
+Verification evidence and the source/staged PostgreSQL soak are in
+`../connection-audit-20261009/`. No production service was restarted to build or
+test this candidate. Activation requires a later controlled maintenance step:
+confirm no running Bloomberg job, switch the dashboard using its release controls,
+reload the Bloomberg LaunchAgent, and gracefully stop/reload ICEchat only when
+replacing its existing lock is authorized. Verify the new application names,
+per-process connection plateau, worker heartbeat, the single reacquired ICEchat
+lock and hydrated dashboard before declaring the incident resolved. Preserve the
+old artifacts and launch configurations for rollback; do not enable new features
+or automatic publication as part of this repair.

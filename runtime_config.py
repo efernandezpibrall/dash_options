@@ -7,7 +7,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from options.connection_pool import get_shared_database_engine, reset_database_pools
 
 
 def _config_candidates() -> list[Path]:
@@ -160,7 +160,6 @@ def config_bool(section: str, option: str, *, fallback: bool) -> bool:
     raise ValueError(f"{section}.{option} must be a boolean value.")
 
 
-@lru_cache(maxsize=2)
 def get_database_engine(*, middle_office: bool = False, required: bool = True):
     """Create a cached engine only when a data operation actually needs one."""
     option = "MIDDLE_OFFICE_CONNECTION_STRING" if middle_office else "CONNECTION_STRING"
@@ -174,10 +173,10 @@ def get_database_engine(*, middle_office: bool = False, required: bool = True):
                 f"Database configuration is unavailable. Set {variable} or OPTIONS_CONFIG_PATH."
             )
         return None
-    return create_engine(connection_string, pool_pre_ping=True)
+    return get_shared_database_engine(connection_string)
 
 
 def clear_runtime_config_cache():
     """Clear cached settings and engines; intended for tests and explicit reloads."""
-    get_database_engine.cache_clear()
+    reset_database_pools()
     load_runtime_config.cache_clear()

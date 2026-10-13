@@ -547,8 +547,9 @@ def test_refresh_poll_reports_fresh_reuse_and_selects_reused_snapshot(monkeypatc
     )
     assert result[1]["BRENT"]["result_snapshot_id"] == "snapshot-id"
     assert result[1]["BRENT"]["result_status"] == "fresh_reuse"
+    assert result[5].children == "Succeeded"
     assert result[2:5] == (True, False, True)
-    assert result[5] == (
+    assert result[5].title == (
         "Fresh complete Bloomberg snapshot reused—no new Bloomberg request was needed."
     )
 
@@ -584,11 +585,12 @@ def test_capacity_failure_preserves_displayed_snapshot_and_recovers_polling(monk
     )
     assert result[1] is history.no_update
     assert result[2:5] == (True, False, True)
-    assert result[5] == (
+    assert result[5].title == (
         "Bloomberg daily request capacity has been reached. The displayed snapshot "
         "is unchanged; refresh again after Bloomberg resets the entitlement."
     )
-    assert "redacted provider error" not in result[5]
+    assert "redacted provider error" not in result[5].title
+    assert result[5].children == "Failed"
 
 
 def test_settlement_click_uses_shared_job_store_and_disables_both_buttons(monkeypatch):
@@ -633,7 +635,7 @@ def test_settlement_click_uses_shared_job_store_and_disables_both_buttons(monkey
     assert result[0]["BRENT"]["job_id"] == "settlement-job-BRENT"
     assert result[1] == {}
     assert result[2:5] == (False, True, True)
-    assert result[5] == "Settlement refresh queued for BRENT, TFO, ON, and LNE."
+    assert result[5].title == "Settlement refresh queued for BRENT, TFO, ON, and LNE."
 
 
 def test_settlement_click_surfaces_safe_batch_preflight_rejection(monkeypatch):
@@ -665,7 +667,7 @@ def test_settlement_click_surfaces_safe_batch_preflight_rejection(monkeypatch):
 
     assert result[0] == {}
     assert result[2:5] == (True, False, False)
-    assert result[5] == "An intraday refresh is already active for TFO."
+    assert result[5].title == "An intraday refresh is already active for TFO."
     assert result[6].endswith("brent-vol-history-refresh-status-danger")
 
 
@@ -712,7 +714,7 @@ def test_settlement_completion_selects_result_and_reports_pending_oi(monkeypatch
     assert result[1]["BRENT"]["result_snapshot_id"] == "settlement-snapshot"
     assert result[1]["BRENT"]["request_kind"] == gateway.SETTLEMENT_REQUEST_KIND
     assert result[2:5] == (True, False, False)
-    assert result[5] == (
+    assert result[5].title == (
         "Settlements refreshed through 14 Aug · OI pending for 14 Aug."
     )
 
@@ -785,8 +787,8 @@ def test_settlement_batch_poll_reports_every_product_and_keeps_polling(monkeypat
     assert result[1]["BRENT"]["result_snapshot_id"] == "snapshot-BRENT"
     assert result[1]["TFO"]["result_snapshot_id"] == "old-tfo"
     assert result[2:5] == (False, True, True)
-    assert result[5].startswith("Settlements 2/4 finished")
-    assert all(f"{product}:" in result[5] for product in jobs)
+    assert result[5].title.startswith("Settlements 2/4 finished")
+    assert all(f"{product}:" in result[5].title for product in jobs)
     assert result[6].endswith("brent-vol-history-refresh-status-warning")
 
 
@@ -866,7 +868,7 @@ def test_selecting_completed_product_emits_only_its_completion(monkeypatch):
     assert result[1]["TFO"]["result_snapshot_id"] == "snapshot-TFO"
     assert set(result[1]) == {"BRENT", "TFO"}
     assert result[2] is True
-    assert result[5].startswith("Settlements 4/4 finished")
+    assert result[5].title.startswith("Settlements 4/4 finished")
 
 
 def test_intraday_after_completed_batch_clears_stale_settlement_jobs(monkeypatch):
@@ -957,8 +959,9 @@ def test_intraday_after_completed_batch_clears_stale_settlement_jobs(monkeypatch
         submitted[1],
     )
 
-    assert polled[5] == "Fetching market data…"
-    assert not polled[5].startswith("Settlements")
+    assert polled[5].children == "Running"
+    assert polled[5].title == "Fetching market data…"
+    assert not polled[5].title.startswith("Settlements")
     assert polled[2] is False
 
 
@@ -1004,7 +1007,7 @@ def test_missing_batch_job_becomes_terminal_failure_without_losing_snapshot(
     assert result[0]["TFO"]["status"] == "failed"
     assert result[1]["TFO"]["result_snapshot_id"] == "old-tfo-snapshot"
     assert result[2] is True
-    assert "TFO: failed" in result[5]
+    assert "TFO: failed" in result[5].title
 
 
 def test_offline_worker_disables_refresh_and_does_not_submit(monkeypatch):
@@ -1037,9 +1040,9 @@ def test_offline_worker_disables_refresh_and_does_not_submit(monkeypatch):
 
     assert result[0] == {}
     assert result[2:5] == (True, True, True)
-    assert result[5] == (
-        "Bloomberg worker status is unavailable. Apply migration 010 and start "
-        "the worker."
+    assert result[5].title == (
+        "Bloomberg worker status is unavailable; the database connection "
+        "or worker registry could not be read."
     )
 
 
@@ -1058,7 +1061,7 @@ def test_worker_health_poll_reenables_refresh_when_heartbeat_returns(monkeypatch
     assert result[0] is history.no_update
     assert result[1] is history.no_update
     assert result[2:5] == (True, False, False)
-    assert result[5] == "Bloomberg TFO worker ready."
+    assert result[5] == ""
 
 
 def test_active_poll_does_not_reemit_unchanged_job_or_completion(monkeypatch):
@@ -1145,7 +1148,7 @@ def test_queued_job_over_30_seconds_reports_ready_worker_as_busy(monkeypatch):
 
     assert result[0]["BRENT"]["job_id"] == "queued-job"
     assert result[2:5] == (False, True, True)
-    assert result[5] == (
+    assert result[5].title == (
         "Bloomberg Brent worker is online—this request is queued behind another "
         "refresh. The page will keep monitoring it."
     )
@@ -1190,7 +1193,7 @@ def test_fresh_queued_job_briefly_reports_waiting_for_ready_worker(monkeypatch):
     )
 
     assert result[2:5] == (False, True, True)
-    assert result[5] == "Waiting for Bloomberg worker…"
+    assert result[5].title == "Waiting for Bloomberg worker…"
 
 
 def test_offline_queued_job_remains_under_active_polling(monkeypatch):
@@ -1242,8 +1245,8 @@ def test_offline_queued_job_remains_under_active_polling(monkeypatch):
 
     assert result[0]["BRENT"]["job_id"] == "queued-job"
     assert result[2:5] == (False, True, True)
-    assert "worker is offline" in result[5]
-    assert "no heartbeat in 30 seconds" in result[5]
+    assert "worker is offline" in result[5].title
+    assert "no heartbeat in 30 seconds" in result[5].title
 
 
 def test_settlement_current_and_progress_messages_are_concise():

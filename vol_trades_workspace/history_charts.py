@@ -984,6 +984,12 @@ def build_expiry_figure(
         if "option_expiration_date" in raw
         else pd.Series(dtype="datetime64[ns]")
     )
+    if resolved_product == "TFO" and is_intraday:
+        figure.add_trace(go.Scatter(
+            x=[], y=[], mode="lines", name="Intraday proposal",
+            line={"color": "#a855f7", "width": 2},
+            meta={"legend_layer": "intraday-proposal"}, showlegend=False,
+            hovertemplate="Intraday proposal · %{y:.2f}%<extra></extra>"), secondary_y=False)
     if resolved_product in quote_data.QUOTE_FEED_PRODUCTS:
         for layer, label, color, symbol in (
             ("ice-bid", "ICE bid quote", "#B42318", "triangle-down"),
@@ -1104,7 +1110,7 @@ def _expiry_legend_contract(cards) -> dict[str, Any]:
             if not layer:
                 continue
             trace_entries.append({"index": index, "layer": layer})
-            if _trace_has_points(trace) or layer.startswith("ice-"):
+            if _trace_has_points(trace) or layer.startswith("ice-") or layer == "intraday-proposal":
                 available.add(layer)
             if _trace_has_new_volume_edge(trace):
                 new_volume_layers.add(layer)
@@ -1217,6 +1223,7 @@ EXPIRY_LEGEND_LAYER_ORDER = (
     "icap-settlement",
     "published",
     "calibrated",
+    "intraday-proposal",
     "pricing-reference",
     "volume-calls",
     "volume-puts",
@@ -1226,6 +1233,11 @@ EXPIRY_LEGEND_LAYER_ORDER = (
 
 
 EXPIRY_LEGEND_LAYER_SPECS = {
+    "intraday-proposal": {
+        "label": "Intraday proposal", "group": "reference",
+        "swatch": "tfo-intraday-legend",
+        "description": "Show the proposed intraday smile before publication",
+    },
     "call-mid": {
         "label": "Call mid",
         "group": "iv",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from vol_trades_workspace import chart_data, quote_charts
+from vol_trades_workspace import chart_data, quote_filters
 
 from html import escape
 import numpy as np
@@ -182,7 +182,7 @@ def update_ice_quote_overlays(
         row.setdefault("option_filter_key", row.get("option_type"))
         row.setdefault("strike_filter_key", quote_data._compact_number(row.get("strike")))
         row.setdefault("contract_label", pd.Timestamp(row["contract_month"]).strftime("%b-%y"))
-    filtered = quote_charts.filter_quote_rows(
+    filtered = quote_filters.filter_quote_rows(
         eligible_rows, product=history_snapshot.get("product"), contract=contract,
         option_type=option_type, strike=strike, sender=sender, source_channel=source_channel,
         status=status, positive_only="positive" in (positive_only or []),

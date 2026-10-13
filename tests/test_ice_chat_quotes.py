@@ -4,10 +4,9 @@ import uuid
 import pandas as pd
 import pytest
 from dash import dcc, html
-from dash._no_update import NoUpdate
 
 import index_options
-from vol_trades_workspace import quote_charts, quote_components
+from vol_trades_workspace import quote_filters, quote_components
 from pages import ice_chat_quotes as quotes
 import ice_quote_data as quote_data
 
@@ -114,7 +113,7 @@ def _rows():
     return quote_data._serialize_frame(frame)
 
 
-def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_grid():
+def test_embedded_layout_has_section_heading_filters_polling_and_stable_grid():
     items = list(_walk(quotes.layout))
     headings = [item for item in items if isinstance(item, html.H2)]
     ids = {getattr(item, "id", None) for item in items}
@@ -141,27 +140,12 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
         item for item in items if isinstance(item, str)
     }
     assert interval.interval == 10_000
-    signal_placeholder = next(
-        item for item in items if getattr(item, "id", None) == "ice-chat-signal-summary"
-    )
-    assert signal_placeholder.hidden is True
     assert "Current signal" not in {
-        item for item in items if isinstance(item, str)
-    }
-    assert "Broker quotes vs our mark" in {
         item for item in items if isinstance(item, str)
     }
     assert "Executable edge" not in {
         item for item in items if isinstance(item, str)
     }
-    edge_card = next(
-        item for item in items
-        if getattr(item, "className", None) == "ice-chat-card ice-chat-edge-card"
-    )
-    assert edge_card is not None
-    chart = next(item for item in items if getattr(item, "id", None) == "ice-chat-quote-chart")
-    assert chart.config["displayModeBar"] == "hover"
-    assert chart.config["modeBarButtonsToRemove"] == ["select2d", "lasso2d"]
     assert {
         "ice-chat-window",
         "ice-chat-contract",
@@ -171,10 +155,6 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
         "ice-chat-source-channel",
         "ice-chat-status-filter",
         "ice-chat-positive-only",
-        "ice-chat-signal-summary",
-        "ice-chat-quote-chart",
-        "ice-chat-chart-title",
-        "ice-chat-chart-hint",
         "ice-chat-quote-grid",
     }.issubset(ids)
     assert grid.dashGridOptions["getRowId"]["function"] == "params.data.event_id"
@@ -188,7 +168,7 @@ def test_embedded_layout_has_section_heading_filters_polling_chart_and_stable_gr
     assert grid.dashGridOptions["suppressPaginationPanel"] is True
     assert grid.dashGridOptions["suppressMovableColumns"] is True
     assert "processUnpinnedColumns" not in grid.dashGridOptions
-    assert grid.dashGridOptions["rowSelection"]["checkboxes"] is False
+    assert grid.dashGridOptions["rowSelection"]["checkboxes"] is True
     fields = _column_fields(grid.columnDefs)
     assert len(fields) == len(set(fields))
     assert {
@@ -236,7 +216,7 @@ def test_route_redirects_to_embedded_section_and_navigation_is_retired():
     assert response.headers["Location"].endswith("/vol_trades#ice-quotes")
 
 
-def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
+def test_serialization_and_filtering_preserve_trader_signs():
     rows = _rows()
     assert rows[0]["product_code"] == "B"
     assert rows[0]["product_label"] == "Brent"
@@ -255,32 +235,9 @@ def test_serialization_filtering_and_all_quote_figure_preserve_trader_signs():
     assert rows[0]["signal_edge_ticks"] == 10.0
     assert rows[0]["signal_price_edge"] == 0.1
     assert rows[0]["signal_iv_edge_pp"] == 1.0
-    frame = quote_charts.filter_quote_rows(rows, positive_only=True)
+    frame = quote_filters.filter_quote_rows(rows, positive_only=True)
     assert len(frame) == 1
     assert frame.iloc[0]["best_action"] == "SELL"
-    figure = quote_charts.build_all_quotes_figure(frame)
-    names = [trace.name for trace in figure.data]
-    assert "Sell to bid" in names
-    assert "Buy at offer" in names
-    bid_trace = next(trace for trace in figure.data if trace.name == "Sell to bid")
-    assert list(bid_trace.y) == [1.0]
-    assert bid_trace.marker.color == "#b42318"
-    assert list(bid_trace.marker.size) == [6]
-    assert bid_trace.marker.opacity == 0.85
-    assert figure.layout.height == 320
-    assert figure.layout.yaxis.title.text == "Broker IV minus our mark (vol pts)"
-    assert figure.layout.xaxis.title.text is None
-    assert figure.layout.xaxis.showgrid is False
-    assert "yaxis2" not in figure.layout
-    assert figure.layout.yaxis.range[0] < 0.0 < figure.layout.yaxis.range[1]
-    assert [shape.type for shape in figure.layout.shapes] == ["rect", "rect", "line"]
-    assert any(annotation.text == "OUR VOL" for annotation in figure.layout.annotations)
-    assert "Broker quote:" in bid_trace.hovertemplate
-    assert all(
-        "Actionable" not in str(getattr(annotation, "text", ""))
-        for annotation in figure.layout.annotations
-    )
-    assert float(figure.layout.shapes[-1].y0) == 0.0
 
 
 def test_reported_trade_keeps_tick_deviation_without_executable_edge():
@@ -358,49 +315,21 @@ def test_section_follows_selected_product_without_showing_brent_rows():
                          [{"label": edge_label, "value": "positive"}]]
         result = quotes.render_quote_dashboard(
             snapshot, {}, None, None, None, None, None, None,
-            [], [row], product,
+            [], product,
         )
         if product == "BRENT":
-            assert len(result[2]) == 1
-            assert result[5] == "Instrument quote history"
+            assert len(result[1]) == 1
         else:
-            assert result[2] == []
+            assert result[1] == []
             if product in quote_data.QUOTE_FEED_PRODUCTS:
-                assert result[4] == "No quotes match the selected filters"
-                assert result[1].layout.annotations[0].text == "No ICE Chat quotes in the selected window"
+                assert result[3] == "No quotes match the selected filters"
             else:
-                assert result[4] == f"ICE quote feed is unavailable for {label}"
-                assert label in result[1].layout.annotations[0].text
-            assert result[5] == "Broker quotes vs our mark"
+                assert result[3] == f"ICE quote feed is unavailable for {label}"
             assert quotes.update_quote_filter_options(snapshot, product) == (
                 [], [], [], [], [], []
             )
 
 
-def test_selected_instrument_shows_premium_and_iv_history():
-    rows = _rows()
-    frame = pd.DataFrame(rows)
-    figure = quote_charts.build_instrument_figure(frame, rows[0])
-    names = [trace.name for trace in figure.data]
-    assert {"Bid", "Offer", "Our theo", "Bid IV", "Offer IV", "Our IV"}.issubset(names)
-    assert figure.layout.yaxis.title.text == "Premium (USD/bbl)"
-
-    other_product = dict(rows[0])
-    other_product.update(
-        event_id="event-2",
-        product_code="T",
-        product_label="TTF Gas",
-        currency_code="EUR",
-        price_unit="MWh",
-        price_unit_label="EUR/MWh",
-    )
-    separated = quote_charts.build_instrument_figure(
-        pd.DataFrame([rows[0], other_product]), rows[0]
-    )
-    bid_trace = next(trace for trace in separated.data if trace.name == "Bid")
-    assert len(bid_trace.x) == 1
-    empty = quote_charts.build_instrument_figure(pd.DataFrame(), rows[0])
-    assert empty.layout.annotations[0].text == "Selected instrument has no visible history"
 
 
 def test_empty_and_error_states_are_explicit():
@@ -411,8 +340,6 @@ def test_empty_and_error_states_are_explicit():
     )
     assert "ice-chat-service-strip-danger" in strip.className
     assert len(strip.children) == 4
-    figure = quote_charts.build_all_quotes_figure(pd.DataFrame())
-    assert figure.layout.annotations[0].text == "No ICE Chat quotes in the selected window"
 
 
 def test_grid_height_is_compact_for_short_tapes_and_bounded_for_long_tapes():
@@ -424,44 +351,17 @@ def test_grid_height_is_compact_for_short_tapes_and_bounded_for_long_tapes():
         "truncated": False,
     }
     result = quotes.render_quote_dashboard(
-        snapshot, {}, None, None, None, None, None, None, [], []
+        snapshot, {}, None, None, None, None, None, None, []
     )
-    assert result[3] == {"height": "180px"}
-    assert result[5] == "Broker quotes vs our mark"
-    assert result[6] == "Vol differences compare marks · premium edge and confidence are shown in the tape"
-
-    selected_result = quotes.render_quote_dashboard(
-        snapshot, {}, None, None, None, None, None, None, [], [rows[0]]
-    )
-    assert selected_result[5] == "Instrument quote history"
-    assert selected_result[6] == "Oct-26 · 90 Call · SELL · Convention verified; net edge checked against buffer"
+    assert result[2] == {"height": "180px"}
 
     snapshot["rows"] = [dict(rows[0], event_id=f"event-{index}") for index in range(20)]
     result = quotes.render_quote_dashboard(
-        snapshot, {}, None, None, None, None, None, None, [], []
+        snapshot, {}, None, None, None, None, None, None, []
     )
-    assert result[3] == {"height": "418px"}
+    assert result[2] == {"height": "418px"}
 
 
-def test_grid_selection_does_not_resend_unchanged_tape_or_status(monkeypatch):
-    rows = _rows()
-    snapshot = {
-        "rows": rows,
-        "error": None,
-        "loaded_at": "2026-08-17T08:00:00+00:00",
-        "truncated": False,
-    }
-    monkeypatch.setattr(quotes, "triggered_id", lambda: "ice-chat-quote-grid")
-
-    result = quotes.render_quote_dashboard(
-        snapshot, {}, None, None, None, None, None, None, [], [rows[0]]
-    )
-
-    assert isinstance(result[0], NoUpdate)
-    assert isinstance(result[2], NoUpdate)
-    assert isinstance(result[3], NoUpdate)
-    assert isinstance(result[4], NoUpdate)
-    assert result[5] == "Instrument quote history"
 
 
 @pytest.mark.parametrize("has_rows", [False, True])
@@ -479,6 +379,11 @@ def test_snapshot_loader_reads_persisted_rows_with_bounded_cutoff(monkeypatch, h
         statements.append(sql)
         if quote_data.SERVICE_TABLE in sql:
             return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: {}))
+        if "upper(commodity) = 'TTF'" in sql or "upper(commodity) = 'JKM'" in sql:
+            assert "vol_surface_publications" in sql
+            assert "published_at <= :loaded_at" in sql
+            assert parameters == {"loaded_at": now}
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None))
         if "commodity = 'BRENT'" in sql:
             assert "vol_surface_publications" in sql
             assert "published_at <= :loaded_at" in sql

@@ -139,7 +139,7 @@ def test_claim_is_atomic_and_recovers_expired_work():
     assert "lease_expires_at < CURRENT_TIMESTAMP" in sql
     assert "reset_orphaned_items" in sql
     assert "attempts < max_attempts" in sql
-    assert parameters == {"worker_id": "worker-2", "lease_seconds": 90, "job_id": None}
+    assert parameters == {"worker_id": "worker-2", "lease_seconds": 90, "job_id": None, "job_type": None}
     assert claimed.attempts == 2
 
 

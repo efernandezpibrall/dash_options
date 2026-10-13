@@ -11,6 +11,7 @@ from dash import (
 )
 from vol_calibration.feature_flags import inline_calibration_enabled
 import vol_trades_data as market_data
+import tfo_intraday_workspace
 
 
 def _build_market_snapshot():
@@ -246,6 +247,7 @@ def build_layout(ice_quotes_layout):
                 storage_type="memory",
             ),
             dcc.Store(id="vol-trades-publication-revision", storage_type="memory"),
+            tfo_intraday_workspace.layout(),
             dcc.Store(id="vol-trades-source-revision"),
             dcc.Interval(id="vol-trades-source-poll", interval=30000, n_intervals=0),
             html.Div(
@@ -278,6 +280,7 @@ def build_layout(ice_quotes_layout):
                                             "brent-vol-history-section-title"
                                         ),
                                     ),
+                                    tfo_intraday_workspace.controls(),
                                     html.Span(
                                         id="vol-trades-icap-date-warning",
                                         role="alert",
@@ -346,7 +349,10 @@ def build_layout(ice_quotes_layout):
                                     ),
                                     "Exact reported records",
                                 ],
+                                id="brent-vol-history-trade-context",
                                 className="brent-vol-history-table-context",
+                                role="status",
+                                style={"whiteSpace": "normal", "flex": "0 1 auto", "lineHeight": "1.4", "textAlign": "right"},
                             ),
                         ],
                         className="brent-vol-history-table-header",

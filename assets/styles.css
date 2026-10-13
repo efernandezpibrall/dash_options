@@ -7501,8 +7501,8 @@ button:hover {
 
 .brent-vol-history-refresh-heading {
     display: flex;
-    flex-wrap: wrap;
     align-items: baseline;
+    justify-content: space-between;
     gap: 4px 8px;
     min-width: 0;
 }
@@ -7514,6 +7514,8 @@ button:hover {
 .brent-vol-history-refresh-heading .brent-vol-history-refresh-status {
     margin: 0;
     line-height: 13px;
+    white-space: nowrap;
+    text-align: right;
 }
 
 .brent-vol-history-calibration-status {

@@ -22,3 +22,12 @@ dagcomponentfuncs.IceTapeDelivery = function (props) {
     const state = label === 'Sent' ? 'sent' : (label === 'Failed' ? 'failed' : 'neutral');
     return React.createElement('span', {className: 'ice-tape-delivery ice-tape-delivery-' + state}, label);
 };
+
+// Assessment confidence uses neutral/amber styling, separate from BUY/SELL colours.
+dagcomponentfuncs.IceTapeSurfaceCheck = function (props) {
+    const data = props.data || {};
+    return React.createElement('span', {
+        className: 'ice-surface-badge ice-surface-' + (data.surface_check_status || 'unavailable'),
+        title: data.surface_check_tooltip
+    }, data.surface_check_display || 'Not assessed');
+};

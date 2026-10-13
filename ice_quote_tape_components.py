@@ -28,6 +28,7 @@ QUOTE_COLUMN_DEFS = [
     {"headerName": "Our valuation", "headerClass": "ice-chat-group-header", "children": [
         {**tape_column("Model", "model_sort_value", 148, numeric=True, formatter="params.data.model_display", tooltip="model_tooltip"), "cellClass": "ice-chat-number-cell ice-chat-theo-cell"},
         tape_column("IV %", "our_iv_pct", 112, numeric=True, formatter="params.data.our_iv_display", tooltip="our_iv_tooltip"),
+        {**tape_column("Surface check", "surface_check_display", 140, tooltip="surface_check_tooltip"), "cellRenderer": "IceTapeSurfaceCheck"},
         {**tape_column("Net edge", "signal_price_edge", 132, tooltip="edge_tooltip"), "cellRenderer": "IceTapeEdge"},
     ]},
     {"headerName": "Inputs", "headerClass": "ice-chat-group-header", "children": [

@@ -102,6 +102,11 @@ def _next_month(value: date) -> date:
 
 
 def _load_publication_catalog(engine, asset: str, valuation_date: date) -> dict | None:
+    if asset == "TTF":
+        from options.vol_calibration.api import resolve_tfo_intraday_publication
+        intraday = resolve_tfo_intraday_publication(engine, valuation_date)
+        if intraday:
+            return intraday
     started = perf_counter()
     query = text(
         f"""
@@ -276,7 +281,7 @@ def load_published_surface_slice(
             normalized_asset,
             selected_date,
         ),
-        force_refresh=force_refresh,
+        force_refresh=force_refresh or (normalized_asset == "TTF" and selected_date == pd.Timestamp.now(tz="Asia/Dubai").date()),
         degraded=lambda value: value is None,
         healthy_ttl_seconds=300,
         degraded_ttl_seconds=5,
@@ -330,7 +335,7 @@ def load_published_surface_expiry_slice(
     catalog = _CATALOG_CACHE.get_or_load(
         catalog_key,
         lambda: _load_publication_catalog(db_engine, normalized_asset, selected_date),
-        force_refresh=force_refresh,
+        force_refresh=force_refresh or (normalized_asset == "TTF" and selected_date == pd.Timestamp.now(tz="Asia/Dubai").date()),
         degraded=lambda value: value is None,
         healthy_ttl_seconds=300,
         degraded_ttl_seconds=5,

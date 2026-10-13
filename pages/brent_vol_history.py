@@ -325,11 +325,16 @@ def _refresh_stage_label(job, request_kind: str) -> str:
 
 def _worker_readiness_message(readiness, product_label: str) -> str:
     if readiness.ready:
+        session = getattr(readiness, "bloomberg_session_status", None)
+        if session in {"not_started", "stopped", "starting"}:
+            return f"Bloomberg {product_label} worker available; Bloomberg connects when refresh starts."
+        if session == "error":
+            return f"Bloomberg {product_label} worker available; refresh will retry the Bloomberg connection."
         return f"Bloomberg {product_label} worker ready."
     if readiness.reason == "registry_unavailable":
         return (
-            "Bloomberg worker status is unavailable. Apply migration 010 and "
-            "start the worker."
+            "Bloomberg worker status is unavailable; the database connection "
+            "or worker registry could not be read."
         )
     if readiness.reason == "no_eligible_worker":
         return (
@@ -341,7 +346,31 @@ def _worker_readiness_message(readiness, product_label: str) -> str:
             f"Bloomberg {product_label} worker is offline—no heartbeat in "
             f"{WORKER_FRESHNESS_SECONDS} seconds. Start or restart the worker."
         )
+    if getattr(readiness, "lifecycle_status", None) == "error":
+        return f"Bloomberg {product_label} worker is recovering; refresh is temporarily unavailable."
     return f"Bloomberg {product_label} worker is offline. Start or restart it."
+
+
+def _intraday_success_message(job) -> str:
+    metrics = dict(getattr(job, "metrics", None) or {})
+    total = metrics.get("active_event_count", metrics.get("event_count"))
+    resolved = metrics.get("resolved_event_count")
+    partial = (getattr(job, "result_status", None) == "partial"
+               or metrics.get("coverage_status") == "partial")
+    prefix = "Bloomberg intraday refreshed"
+    details = []
+    if total is not None:
+        details.append(f"{int(total):,} active trades collected")
+    if resolved is not None:
+        details.append(f"{int(resolved):,} IVs resolved")
+    if total is not None and resolved is not None and int(total) > int(resolved):
+        details.append(f"{int(total) - int(resolved):,} IVs unavailable")
+    if partial:
+        details.append("tape coverage partial")
+    reasons = metrics.get("coverage_reasons") or []
+    if reasons:
+        details.append("; ".join(str(reason) for reason in reasons))
+    return prefix + (" · " + " · ".join(details) if details else "") + "."
 
 
 def _queued_job_wait_exceeded(job, *, now: Any = None) -> bool:
@@ -472,9 +501,11 @@ def manage_bloomberg_refresh(
         triggered = ctx.triggered_id
     except Exception:
         triggered = None
-    suppress_unchanged_stores = triggered in {
-        "brent-vol-history-refresh-poll",
-        "brent-vol-history-worker-poll",
+    # Product/initial readiness requests can finish after a refresh click. They
+    # must not overwrite its job/completion stores with their stale empty State.
+    suppress_unchanged_stores = triggered not in {
+        "brent-vol-history-refresh-button",
+        "brent-vol-history-settlement-refresh-button",
     }
 
     def response(
@@ -500,13 +531,24 @@ def manage_bloomberg_refresh(
             if suppress_unchanged_stores and updated_completions == completions
             else updated_completions
         )
+        status_label = ""
+        if message:
+            if status_class.endswith("-danger"):
+                status_label = "Failed"
+            elif status_class.endswith("-warning"):
+                status_label = "Partial"
+            elif status_class.endswith("-active"):
+                status_label = "Running"
+            elif status_class.endswith("-success") and updated_jobs:
+                status_label = "Succeeded"
+        compact_status = html.Span(status_label, title=message) if status_label else ""
         return (
             jobs_output,
             completions_output,
             poll_disabled,
             intraday_disabled,
             settlement_disabled,
-            message,
+            compact_status,
             status_class,
             intraday_style,
             settlement_style,
@@ -742,10 +784,12 @@ def manage_bloomberg_refresh(
                     elif getattr(selected, "result_status", None) == "noop":
                         message = "Checked Bloomberg—no market-data changes."
                     else:
-                        message = "Bloomberg intraday snapshot is ready."
+                        message = _intraday_success_message(selected)
                     is_partial = (
                         str(getattr(selected, "result_status", "") or "").lower()
                         == "partial"
+                        or (getattr(selected, "metrics", None) or {}).get("coverage_status") == "partial"
+                        or int((getattr(selected, "metrics", None) or {}).get("unresolved_event_count") or 0) > 0
                         or bool(
                             (getattr(selected, "metrics", None) or {}).get(
                                 "failed_dates"
@@ -1257,6 +1301,7 @@ def render_history(
                 selected_date,
                 display_expiries,
                 product=product,
+                intraday=product == "TFO" and snapshot_kind == "INTRADAY",
             )
         except Exception:
             calibrated = market_data._empty_calibrated_surface(
@@ -1496,13 +1541,24 @@ def render_ice_quote_overlays(
     Input("ice-chat-source-channel", "value"),
     Input("ice-chat-status-filter", "value"),
     Input("ice-chat-positive-only", "value"),
+    Input("tfo-intraday-view", "data"),
+    State("tfo-intraday-request", "data"),
 )
 def render_quarter_season_charts(quote_snapshot, history, window, x_axis, layers,
-                                contract, option_type, strike, sender, source_channel, status, positive_only):
+                                contract, option_type, strike, sender, source_channel, status, positive_only,
+                                intraday_view=None, intraday_request=None):
+    from tfo_intraday_workspace import proposal_strip_inputs
+    try:
+        proposal = proposal_strip_inputs(intraday_view, intraday_request)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("Intraday strip proposal unavailable")
+        proposal = None
     return strip_charts.render_strip_charts(
         quote_snapshot, history, window, x_axis, layers,
         contract=contract, option_type=option_type, strike=strike, sender=sender,
         source_channel=source_channel, status=status, positive_only="positive" in (positive_only or []),
+        proposal_inputs=proposal,
     )
 
 
@@ -1678,6 +1734,23 @@ def update_trade_window(market_window, detail_expiry, snapshot_reference, figure
             [no_update for _ in figures],
             [],
         )
+
+
+@callback(
+    Output("brent-vol-history-trade-context", "children"),
+    Input("brent-vol-history-trade-grid", "rowData"),
+    Input("brent-vol-history-detail-expiry", "value"),
+)
+def update_trade_tape_context(rows, expiry_value):
+    expiry = pd.to_datetime(expiry_value, errors="coerce")
+    label = "Select an expiry" if pd.isna(expiry) else expiry.strftime("%b-%y")
+    rows = rows or []
+    resolved = sum(row.get("trade_iv_status") == "resolved" for row in rows)
+    message = f"{label} · {len(rows):,} records in selected window · {resolved:,} IVs resolved"
+    reasons = list(dict.fromkeys(row.get("trade_iv_exclusion_reason") for row in rows if row.get("trade_iv_exclusion_reason")))
+    if reasons:
+        message += " · " + "; ".join(reasons)
+    return message
 
 
 @callback(

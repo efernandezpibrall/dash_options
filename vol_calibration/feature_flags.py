@@ -135,3 +135,19 @@ def hh_publication_enabled() -> bool:
         "HH_PUBLICATION_ENABLED",
         False,
     )
+
+
+def settlement_jobs_enabled() -> bool:
+    return calibration_enabled() and _enabled(
+        "VOL_CALIBRATION_SETTLEMENT_JOBS_ENABLED", "SETTLEMENT_JOBS_ENABLED", False
+    )
+
+
+def settlement_auto_publication_enabled(product: str) -> bool:
+    product = product.upper()
+    if product not in {"BRENT", "HH"}:
+        return False
+    return settlement_jobs_enabled() and _enabled(
+        f"VOL_CALIBRATION_{product}_AUTO_SETTLEMENT_ENABLED",
+        f"{product}_AUTO_SETTLEMENT_ENABLED", False,
+    )

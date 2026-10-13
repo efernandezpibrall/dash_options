@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from vol_trades_workspace import quote_charts
 from ice_quote_tape_components import QUOTE_COLUMN_DEFS, quote_details
 from options.ice_quote_interpretation import assessment_summary
 
@@ -171,44 +170,6 @@ def build_layout():
             dcc.Store(id="ice-chat-quote-snapshot"),
             dcc.Store(id="ice-chat-service-snapshot"),
             dcc.Interval(id="ice-chat-refresh-interval", interval=10_000, n_intervals=0),
-            html.Div(id="ice-chat-signal-summary", hidden=True),
-            html.Section(
-                [
-                    html.Div(
-                        [
-                            html.H3(
-                                "Broker quotes vs our mark",
-                                id="ice-chat-chart-title",
-                            ),
-                            html.Span(
-                                "Vol differences compare marks · premium edge and confidence are shown in the tape",
-                                id="ice-chat-chart-hint",
-                                className="ice-chat-section-hint",
-                            ),
-                        ],
-                        className="ice-chat-section-header",
-                    ),
-                    dcc.Loading(
-                        html.Div(
-                            dcc.Graph(
-                                id="ice-chat-quote-chart",
-                                figure=quote_charts._empty_figure("Waiting for ICE Chat quote data"),
-                                config={
-                                    "displaylogo": False,
-                                    "responsive": True,
-                                    "displayModeBar": "hover",
-                                    "modeBarButtonsToRemove": ["select2d", "lasso2d"],
-                                },
-                            ),
-                            className="ice-chat-chart-shell",
-                            role="img",
-                            **{"aria-label": "Broker quote volatility edge against our saved mark"},
-                        ),
-                        type="circle",
-                    ),
-                ],
-                className="ice-chat-card ice-chat-edge-card",
-            ),
             html.Section(
                 [
                     html.Div(
@@ -244,10 +205,12 @@ def build_layout():
                                 "pagination": False,
                                 "suppressPaginationPanel": True,
                                 "rowSelection": {
-                                    "mode": "singleRow",
+                                    "mode": "multiRow",
                                     "enableClickSelection": True,
-                                    "checkboxes": False,
+                                    "checkboxes": True,
+                                    "headerCheckbox": False,
                                 },
+                                "selectionColumnDef": {"width": 34, "minWidth": 34, "maxWidth": 34, "pinned": "left"},
                                 "enableCellTextSelection": True,
                                 "ensureDomOrder": True,
                                 "suppressMovableColumns": True,
@@ -269,8 +232,8 @@ def build_layout():
                         className="ice-chat-grid-shell",
                     ),
                     html.Details(
-                        [html.Summary("Quote details · assessment · reply"), html.Div(
-                            "Select a quote to inspect the three edge checks, sent message and acknowledgment.",
+                        [html.Summary("Surface assessment · quote details · reply"), html.Div(
+                            "Select a quote to inspect its surface assessment, leg values, edge checks and reply.",
                             id="ice-chat-reply-audit", role="status",
                         )],
                         id="ice-chat-reply-audit-details", className="ice-chat-reply-audit", open=False,
@@ -320,7 +283,9 @@ def _edge_audit(assessment, context, valuation=None):
         children.insert(0, html.P(f"Quote valuation surface COB {valuation['surface_cob_date']}; "
             f"{valuation['pricing_model']}; publication {str(valuation['surface_publication_id'])[:8]}. "
             "Historical reviews retain the inputs available at original receipt."))
-    if context:
+    if context and context.get("repair"):
+        children.insert(0, html.P(f"Revaluation: {context['repair']}. Original source payload preserved."))
+    elif context and context.get("confirmation"):
         children.insert(0, html.P(f"Confirmed correction: {context['confirmation']}. "
             f"Original {context['original_product']} {context['original_bid']}/{context['original_offer']}; "
             f"effective TTF {context['bid']:.3f}/{context['offer']:.3f} EUR/MWh. Source payload preserved."))

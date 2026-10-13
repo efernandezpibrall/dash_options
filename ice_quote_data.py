@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
+import hashlib
 import math
 from typing import Any
 
@@ -149,6 +150,7 @@ class QuoteLoadResult:
     error: str | None
     loaded_at: str
     truncated: bool
+    review_ref: dict | None = None
 
 
 def _safe_error(exc: Exception) -> str:
@@ -282,9 +284,9 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     fence = normalized["structure_code"].eq("CLLR")
     spread = normalized["structure_code"].isin(["CALLSPR", "PUTSPR"])
     cso = normalized["structure_code"].isin(["CSO3", "CSO4"])
-    package = normalized["structure_code"].isin(["CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"])
+    package = normalized["structure_code"].isin(["CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD", "PUT_TREE"])
     structure = fence | spread | cso | package
-    normalized.loc[package, "option_label"] = normalized.loc[package, "structure_code"].map({"CFLY": "Butterfly", "STNGL": "Strangle", "STRDL": "Straddle", "DIAGONAL_CALL_SPREAD": "Diagonal call spread", "PUT_SPREAD_VS_CALL": "Put spread vs call", "CALL_SPREAD_VS_PUT_SPREAD": "Call spread vs put spread"})
+    normalized.loc[package, "option_label"] = normalized.loc[package, "structure_code"].map({"CFLY": "Butterfly", "STNGL": "Strangle", "STRDL": "Straddle", "DIAGONAL_CALL_SPREAD": "Diagonal call spread", "PUT_SPREAD_VS_CALL": "Put spread vs call", "CALL_SPREAD_VS_PUT_SPREAD": "Call spread vs put spread", "PUT_TREE": "Put tree"})
     normalized.loc[fence, "option_label"] = "Fence"
     normalized.loc[spread, "option_label"] = normalized.loc[spread, "structure_code"].map(
         {"CALLSPR": "Call spread", "PUTSPR": "Put spread"}
@@ -329,7 +331,7 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
         if row["structure_code"] == "CLLR":
             side = {"to_put": "to put", "to_call": "to call"}.get(row["fence_premium_orientation"], "side?")
             return f"{amount} {side}*"
-        if row["structure_code"] in {"CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD"}:
+        if row["structure_code"] in {"CALLSPR", "PUTSPR", "CFLY", "STNGL", "STRDL", "PUT_SPREAD_VS_CALL", "DIAGONAL_CALL_SPREAD", "CALL_SPREAD_VS_PUT_SPREAD", "PUT_TREE"}:
             return f"{amount} {row['premium_cashflow']}"
         return amount
     normalized["theoretical_display"] = normalized.apply(display_theoretical, axis=1)
@@ -360,6 +362,14 @@ def _serialize_frame(frame: pd.DataFrame) -> list[dict]:
     normalized["observed_display"] = normalized["observed_at"].dt.tz_convert(
         "Asia/Dubai"
     ).dt.strftime("%d %b %H:%M:%S")
+    if "edge_assessment" in normalized:
+        def compact_assessment(value):
+            if not isinstance(value, dict) or not isinstance(value.get("surface_check"), dict):
+                return value
+            check = value["surface_check"]
+            return {**value, "surface_check": {key: check.get(key) for key in
+                ("version", "status", "label", "reason", "historical", "convention_verified")}}
+        normalized["edge_assessment"] = normalized["edge_assessment"].map(compact_assessment)
     normalized = enrich_rows(normalized)
     return json.loads(normalized.to_json(orient="records", date_format="iso"))
 
@@ -430,16 +440,17 @@ def load_quote_snapshot(
     )
     ttf_publication_query = text(
         """
-        SELECT cob_date
+        SELECT cob_date,publication_id
         FROM at_lng.vol_surface_publications
         WHERE upper(commodity) = 'TTF' AND status = 'published' AND is_active
+          AND published_at <= :loaded_at
         ORDER BY cob_date DESC, published_at DESC, created_at DESC
         LIMIT 1
         """
     )
     jkm_publication_query = text(
         """
-        SELECT cob_date FROM at_lng.vol_surface_publications
+        SELECT cob_date,publication_id FROM at_lng.vol_surface_publications
         WHERE upper(commodity) = 'JKM' AND status = 'published' AND is_active
           AND published_at <= :loaded_at
         ORDER BY cob_date DESC, published_at DESC, created_at DESC LIMIT 1
@@ -459,8 +470,10 @@ def load_quote_snapshot(
             )
             service_row = connection.execute(service_query).mappings().first()
             surface_cob = connection.execute(surface_query, {"loaded_at": loaded_at}).scalar()
-            ttf_surface_cob = connection.execute(ttf_publication_query).scalar()
-            jkm_surface_cob = connection.execute(jkm_publication_query, {"loaded_at": loaded_at}).scalar()
+            ttf_publication = connection.execute(ttf_publication_query, {"loaded_at": loaded_at}).mappings().first()
+            ttf_surface_cob = ttf_publication["cob_date"] if ttf_publication else None
+            jkm_publication = connection.execute(jkm_publication_query, {"loaded_at": loaded_at}).mappings().first()
+            jkm_surface_cob = jkm_publication["cob_date"] if jkm_publication else None
     except Exception as exc:
         return QuoteLoadResult(
             rows=[],
@@ -480,7 +493,24 @@ def load_quote_snapshot(
     ) if (service.get("surface_cob_date") or surface_cob) else None
     service["ttf_surface_cob_date"] = str(ttf_surface_cob) if ttf_surface_cob else None
     service["jkm_surface_cob_date"] = str(jkm_surface_cob) if jkm_surface_cob else None
+    from snapshot_cache import snapshot_store
+    def safe(value):
+        return None if not isinstance(value,(dict,list,tuple)) and pd.isna(value) else value
+    records=[{k:safe(v) for k,v in r.items()} for r in frame.to_dict('records')]
+    revision=hashlib.sha256(json.dumps(records,sort_keys=True,default=str).encode()).hexdigest()
+    try:review_ref=snapshot_store.publish('ice-quote-evidence-v2',revision,records,ttl_seconds=3600)
+    except Exception:
+        review_ref=None
+        service['review_error']='Review cache unavailable. Refresh options data.'
+    service['ttf_publication_id']=str(ttf_publication['publication_id']) if ttf_publication else None
+    service['jkm_publication_id']=str(jkm_publication['publication_id']) if jkm_publication else None
+    from ice_surface_jobs import prewarm
+    for product,publication_id in [('TTF',service['ttf_publication_id']),('JKM',service['jkm_publication_id'])]:
+        if publication_id and any(r.get('product_code')=={'TTF':'TFM','JKM':'JKM'}[product] for r in records):
+            try:prewarm(db_engine,product,publication_id)
+            except ValueError:service['review_error']='Published surface unavailable. Refresh options data.'
     return QuoteLoadResult(
+        review_ref=review_ref,
         rows=_serialize_frame(frame),
         service=service,
         error=None,
@@ -507,14 +537,30 @@ def load_quote_reply(
                        quote_row.outbound_error_message, quote_row.outbound_message_text, quote_row.outbound_batch_reference,
                        quote_row.edge_assessment, quote_row.quote_context, quote_row.surface_cob_date,
                        quote_row.surface_publication_id, quote_row.pricing_model, quote_row.single_price, quote_row.bid, quote_row.offer,
-                       quote_row.components, quote_row.structure_legs,
+                       quote_row.components, quote_row.structure_legs, quote_row.received_at, quote_row.observed_at,
+                       quote_row.product_code, quote_row.sender_handle, quote_row.contract_month,
+                       quote_row.strike, quote_row.option_type, quote_row.option_expiration_date,
+                       quote_row.forward, quote_row.our_volatility, quote_row.theoretical_price,
                        publication.published_at AS surface_published_at,
+                       latest.publication_id AS latest_surface_publication_id,
+                       latest.published_at AS latest_surface_published_at,
                        COALESCE(event.raw_payload #>> '{{message,messageString}}',
                                 event.raw_payload #>> '{{message,text}}',
                                 event.raw_payload #>> '{{market,description}}') AS original_market_text
                 FROM {QUOTE_VIEW} quote_row
                 LEFT JOIN at_lng.vol_surface_publications publication
                   ON publication.publication_id = quote_row.surface_publication_id
+                LEFT JOIN LATERAL (
+                    SELECT publication_id, published_at
+                    FROM at_lng.vol_surface_publications
+                    WHERE upper(commodity) = CASE quote_row.product_code
+                          WHEN 'TFM' THEN 'TTF' WHEN 'JKM' THEN 'JKM' ELSE 'BRENT' END
+                      AND status = 'published' AND is_active AND published_at <= now()
+                      AND cob_date <= CURRENT_DATE
+                      AND (quote_row.product_code <> 'B' OR
+                           (approved_at IS NOT NULL AND approved_at <= published_at))
+                    ORDER BY cob_date DESC, published_at DESC, created_at DESC LIMIT 1
+                ) latest ON true
                 LEFT JOIN at_lng.ice_chat_market_events event ON event.id = quote_row.event_id
                 WHERE event_id = CAST(:event_id AS uuid) AND product_code = :product_code
             """), {"event_id": str(event_id),

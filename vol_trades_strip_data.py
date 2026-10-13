@@ -71,8 +71,9 @@ def load_strip_inputs(history, months, *, engine=None):
             catalog = (
                 connection.execute(
                     text(
-                        "SELECT commodity, cob_date FROM at_lng.vol_surface_publications "
-                        "WHERE publication_id = CAST(:publication AS uuid) AND status = 'published'"
+                        "SELECT p.commodity, p.cob_date, r.configuration->>'activation_scope' AS activation_scope "
+                        "FROM at_lng.vol_surface_publications p JOIN at_lng.vol_calibration_runs r ON r.run_id=p.run_id "
+                        "WHERE p.publication_id = CAST(:publication AS uuid) AND p.status = 'published'"
                     ),
                     {"publication": str(publication_id)},
                 )
@@ -90,6 +91,11 @@ def load_strip_inputs(history, months, *, engine=None):
                 connection,
                 params={"cob": cob.date(), "contracts": contracts},
             )
+            if catalog.get("activation_scope") == "intraday":
+                # Use the exact forward coordinates retained in the composite revision.
+                curve = surface.groupby("contract_date", as_index=False).agg(value=("forward_value", "first"))
+                curve["contract"] = pd.to_datetime(curve["contract_date"]).dt.strftime("%YM%m")
+                curve["currency"], curve["units"], curve["cob"] = "EUR", "MWH", cob.date()
         surface["publication_id"] = str(publication_id)
         curve["contract_month"] = curve["contract"].map(dict(zip(contracts, months)))
         return {
