@@ -554,6 +554,32 @@ def test_refresh_poll_reports_fresh_reuse_and_selects_reused_snapshot(monkeypatc
     )
 
 
+def test_refresh_clock_keeps_ticket_and_completion_then_returns_to_idle(monkeypatch):
+    from dataclasses import replace
+    job = gateway.RefreshJobView.from_mapping({
+        **_job_row(gateway.INTRADAY_REQUEST_KIND, product="TFO"),
+        "created_at": pd.Timestamp.now(tz="UTC"),
+    })
+    monkeypatch.setattr(history, "intraday_refresh_enabled", lambda _: True)
+    monkeypatch.setattr(history, "settlement_refresh_enabled", lambda _: True)
+    monkeypatch.setattr(history, "_authorize_refresh", lambda: SimpleNamespace(subject="cal"))
+    monkeypatch.setattr(history, "submit_refresh_job", lambda *a, **kw: (job, True))
+    monkeypatch.setattr(history, "ctx", SimpleNamespace(triggered_id="brent-vol-history-refresh-button"))
+    queued = history.update_bloomberg_refresh(1, 0, 0, "TFO", None, None)
+    assert queued[0]["TFO"]["job_id"] == job.job_id
+    assert queued[2] == 1000
+    assert queued[5].children == "Running"
+
+    completed = replace(job, status="succeeded", stage="complete",
+                        result_snapshot_id="new-intraday", result_status="success")
+    monkeypatch.setattr(history, "get_refresh_jobs", lambda _: {"TFO": completed})
+    monkeypatch.setattr(history, "ctx", SimpleNamespace(triggered_id="brent-vol-history-refresh-poll"))
+    done = history.update_bloomberg_refresh(1, 0, 1, "TFO", queued[0], queued[1])
+    assert done[1]["TFO"]["result_snapshot_id"] == "new-intraday"
+    assert done[2] == 10000
+    assert done[5].children == "Succeeded"
+
+
 def test_capacity_failure_preserves_displayed_snapshot_and_recovers_polling(monkeypatch):
     completion = {"result_snapshot_id": "displayed-snapshot"}
     job = SimpleNamespace(
@@ -1309,6 +1335,8 @@ def _calibrated_points(volatility=0.30):
                 "delta": 0.25,
                 "put_call": "C",
                 "volatility": volatility,
+                "total_variance": volatility**2 * 72 / 365.25,
+                "working_forward": 78.0,
                 "forward_value": 78.0,
                 "source_name": "exchange",
                 "calibration_basis": "settlement",

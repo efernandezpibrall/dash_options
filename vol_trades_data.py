@@ -1096,6 +1096,8 @@ def _read_calibrated_surface_points(
                s.delta,
                s.put_call,
                s.volatility,
+               s.total_variance,
+               s.working_forward,
                s.working_forward AS forward_value,
                s.source_name,
                s.calibration_basis,
@@ -1123,7 +1125,9 @@ def _read_calibrated_surface_points(
         return frame
     for column in ("contract_date", "option_expiration_date", "created_at"):
         frame[column] = pd.to_datetime(frame[column], errors="coerce")
-    for column in ("strike", "delta", "volatility", "forward_value"):
+    # Keep the original pricing coordinates for smooth-surface reconstruction.
+    # forward_value remains the display alias used by existing chart consumers.
+    for column in ("strike", "delta", "volatility", "total_variance", "working_forward", "forward_value"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame
 

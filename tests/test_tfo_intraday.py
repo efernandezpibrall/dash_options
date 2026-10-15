@@ -64,6 +64,31 @@ def publish_base(engine,inputs):
     return base
 
 
+def test_partial_intraday_proposal_preserves_base_months_in_quarter_chart(database):
+    from options.ttf_strip_charts import project_strip_quotes
+    day = pd.Timestamp.now(tz="Asia/Dubai").tz_localize(None)
+    first = (day.to_period("Q") + 1).start_time
+    offset = (first.year-day.year)*12 + first.month-day.month
+    parts = [fixture(offset+i) for i in range(3)]
+    inputs = deepcopy(parts[0])
+    inputs['base_surface'] = pd.concat([p['base_surface'] for p in parts], ignore_index=True)
+    inputs['base_results'] = [p['base_results'][0] for p in parts]
+    publish_base(database, inputs)
+    candidate = api.fit_tfo_intraday(inputs)
+    assert len(candidate['expiry_results']) == 1
+    composite = api.tfo_proposal_strip_inputs(database, candidate)
+    months = list(pd.date_range(first, periods=3, freq='MS').date)
+    assert set(composite['surface']['put_call']) == {'C'}
+    projection = project_strip_quotes(**composite, months=months, rows=[{
+        'option_type':'C', 'strike':80., 'forward':80.,
+        'observed_at':candidate['manifest']['cutoff'],
+        'bid':None, 'offer':None, 'single_price':None,
+    }])
+    assert projection['errors'] == []
+    assert len(projection['curves']) == 1
+    assert len(projection['curves'][0]['points']) >= 60
+
+
 def test_save_publish_idempotency_isolation_and_consumer_readback(database,inputs,monkeypatch):
     engine=database
     base=publish_base(engine,inputs)
@@ -200,8 +225,9 @@ def test_request_generation_cache_ownership_and_write_flags(inputs,monkeypatch):
         ui.candidate({**view,'request_key':'old'},request)
     monkeypatch.setattr(ui,'ttf_intraday_writes_enabled',lambda:False)
     monkeypatch.setattr(ui,'ctx',type('Context',(),{'triggered_id':'tfo-intraday-save'})())
-    saved,message,activation=ui.save_or_publish(1,0,view,request,[result['summaries'][0]['month']],None)
+    saved,message,activation,modal=ui.save_or_publish(1,0,view,request,[result['summaries'][0]['month']],None)
     assert saved is no_update and activation is no_update and 'disabled' in message
+    assert modal is no_update
     rendered=ui.render(view,request,None)
     assert len(rendered)==12 and rendered[-1] and rendered[-2]
 
@@ -239,6 +265,56 @@ def test_intraday_read_rollback_flag_never_accesses_storage(monkeypatch):
     assert api.resolve_tfo_intraday_publication(object(),pd.Timestamp.now(tz='Asia/Dubai').date()) is None
 
 
+def test_publish_callback_closes_only_after_verified_receipt(monkeypatch):
+    import tfo_intraday_workspace as ui
+    from vol_calibration.auth import Identity, Role
+    from dash import no_update
+    actor = Identity('alice', frozenset({Role.CALIBRATOR, Role.PUBLISHER}), True, 'test')
+    value = {'manifest': {'expected_intraday_id': 'previous'}}
+    saved = {'draft_id': 'draft', 'months': ['2026-12-01', '2027-01-01']}
+    receipt = {'publication_id': 'published', 'commodity': 'TTF', 'publication_date': '2026-10-13',
+               'published_at': '2026-10-13T12:00:00Z'}
+    monkeypatch.setattr(ui, 'ctx', type('Context', (), {'triggered_id': 'tfo-intraday-publish-card'})())
+    monkeypatch.setattr(ui, 'review_candidate', lambda *_: (actor, value))
+    monkeypatch.setattr(ui, 'ttf_intraday_writes_enabled', lambda: True)
+    monkeypatch.setattr(ui, 'ttf_publication_enabled', lambda: True)
+    monkeypatch.setattr(ui, 'get_database_engine', lambda **_: object())
+    monkeypatch.setattr(ui, 'save_tfo_intraday_draft', lambda *a, **kw: saved)
+    def publish(*args, **kwargs):
+        assert kwargs == {'actor': 'alice', 'expected_intraday_id': 'previous'}
+        return receipt
+    monkeypatch.setattr(ui, 'publish_tfo_intraday_draft', publish)
+    result = ui.save_or_publish(0, 1, {}, {}, saved['months'], None)
+    assert result[0] == saved and result[2] == dict(receipt, selected_months=saved['months'])
+    assert result[3] is False
+    assert ui.publication_changed(result[2]) == {
+        'commodity': 'TTF', 'cob_date': '2026-10-13', 'publication_id': 'published'}
+    def rejected(*args, **kwargs):
+        raise ValueError('Source evidence changed; refresh intraday.')
+    monkeypatch.setattr(ui, 'publish_tfo_intraday_draft', rejected)
+    result = ui.save_or_publish(0, 2, {}, {}, saved['months'], None)
+    assert 'Source evidence changed' in result[1]
+    assert result[0] is result[2] is result[3] is no_update
+    monkeypatch.setattr(ui, 'ctx', type('Context', (), {'triggered_id': 'tfo-intraday-save'})())
+    result = ui.save_or_publish(1, 2, {}, {}, saved['months'], None)
+    assert result[0] == saved and 'Draft saved' in result[1]
+    assert result[2] is result[3] is no_update
+
+
+def test_publish_feedback_waits_for_displayed_revision():
+    import tfo_intraday_workspace as ui
+    receipt = {'publication_id': 'new', 'publication_date': '2026-10-13',
+               'published_at': '2026-10-13T12:00:00Z', 'selected_months': ['2026-12-01', '2027-01-01']}
+    history = {'product': 'TFO', 'snapshot_kind': 'INTRADAY', 'business_date': '2026-10-13', 'publication_id': 'old'}
+    waiting = ui.publication_feedback(receipt, history, 'TFO')
+    assert 'Dec-26, Jan-27' in waiting and '16:00:00 GST' in waiting and 'refreshing' in waiting
+    assert 'expiry panels updated' in ui.publication_feedback(receipt, dict(history, publication_id='new'), 'TFO')
+    assert 'charts could not reload' in ui.publication_feedback(receipt, dict(history, calibration_status='query_error'), 'TFO')
+    assert 'select the published intraday date' in ui.publication_feedback(receipt, dict(history, business_date='2026-10-12'), 'TFO')
+    assert ui.publication_feedback(receipt, history, 'BRENT') == ''
+    assert ui.publication_feedback(None, history, 'TFO') == ''
+
+
 def test_review_separates_trade_age_and_plots_comparable_moneyness(inputs,monkeypatch):
     import tfo_intraday_workspace as ui
     import vol_trades_data
@@ -254,8 +330,8 @@ def test_review_separates_trade_age_and_plots_comparable_moneyness(inputs,monkey
     value=api.fit_tfo_intraday(market);assert value['summaries'][0]['eligible']
     monkeypatch.setattr(ui,'review_candidate',lambda *a:(None,value))
     monkeypatch.setattr(ui,'get_database_engine',lambda **kw:object())
-    monkeypatch.setattr(vol_trades_data,'_read_calibrated_surface_points',lambda *a:market['base_surface'])
-    figure,detail=ui.chart(value['summaries'][0]['month'],{'ref':'test'},None,{})
+    monkeypatch.setattr(vol_trades_data,'_cached_calibrated_surface_points',lambda *a:market['base_surface'])
+    figure,detail=ui.chart(value['summaries'][0]['month'],{'ref':'test'},None,{},True)
     trade=next(t for t in figure.data if t.name=='Bloomberg trades')
     assert abs(trade.x[0]-q['strike']/historical_forward*q['underlying_mid'])<1e-9
     assert trade.customdata[0][1]==20

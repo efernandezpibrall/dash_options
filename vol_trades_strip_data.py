@@ -83,19 +83,20 @@ def load_strip_inputs(history, months, *, engine=None):
             if not catalog or str(catalog["commodity"]).upper() != "TTF" or catalog["cob_date"] != cob.date():
                 raise ValueError("The selected calibrated TTF publication does not match its source date")
             surface = _read_calibrated_surface_points(str(publication_id), months, connection)
-            curve = pd.read_sql(
-                text(
-                    "SELECT contract, value, currency, units, cob FROM at_lng.curve "
-                    "WHERE code = 'ICE_TTF' AND cob = :cob AND contract IN :contracts"
-                ).bindparams(bindparam("contracts", expanding=True)),
-                connection,
-                params={"cob": cob.date(), "contracts": contracts},
-            )
             if catalog.get("activation_scope") == "intraday":
                 # Use the exact forward coordinates retained in the composite revision.
                 curve = surface.groupby("contract_date", as_index=False).agg(value=("forward_value", "first"))
                 curve["contract"] = pd.to_datetime(curve["contract_date"]).dt.strftime("%YM%m")
                 curve["currency"], curve["units"], curve["cob"] = "EUR", "MWH", cob.date()
+            else:
+                curve = pd.read_sql(
+                    text(
+                        "SELECT contract, value, currency, units, cob FROM at_lng.curve "
+                        "WHERE code = 'ICE_TTF' AND cob = :cob AND contract IN :contracts"
+                    ).bindparams(bindparam("contracts", expanding=True)),
+                    connection,
+                    params={"cob": cob.date(), "contracts": contracts},
+                )
         surface["publication_id"] = str(publication_id)
         curve["contract_month"] = curve["contract"].map(dict(zip(contracts, months)))
         return {

@@ -8,6 +8,9 @@
 .tfo-intraday-summary td, .tfo-intraday-summary th { padding: .4rem .6rem; border-bottom: 1px solid #e2e8f0; text-align: left; }
 .tfo-intraday-modal .modal-content { border-radius: .65rem; }
 .tfo-intraday-modal .modal-body { font-size: .85rem; }
+.tfo-intraday-action-status { flex: 1 0 100%; font-size: .85rem; overflow-wrap: anywhere; }
+.tfo-intraday-action-status:empty { display: none; }
+.tfo-intraday-actions { display: flex; flex: 1 0 100%; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; min-width: 0; padding: 0; border: 0; }
 .tfo-intraday-legend { border-top: 2px solid #a855f7; width: 18px; height: 0; display: inline-block; }
 /* Keep this card above the dashboard's sticky toolbar and navigation. */
 .tfo-intraday-modal { z-index: 1400; }

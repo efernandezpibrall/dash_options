@@ -101,6 +101,8 @@ def _calibrated_frame():
             "delta": [0.75, 0.50, 0.25],
             "put_call": ["C", "C", "C"],
             "volatility": [0.32, 0.30, 0.28],
+            "total_variance": [vol**2 * 64 / 365.25 for vol in (0.32, 0.30, 0.28)],
+            "working_forward": [80.0, 80.0, 80.0],
             "forward_value": [80.0, 80.0, 80.0],
             "source_name": ["TTF PCHIP/Wing"] * 3,
             "calibration_basis": ["observed"] * 3,
@@ -237,10 +239,10 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
             "brent-vol-history-trade-15m",
         }
     ]
-    worker_poll = next(
+    refresh_poll = next(
         item
         for item in items
-        if getattr(item, "id", None) == "brent-vol-history-worker-poll"
+        if getattr(item, "id", None) == "brent-vol-history-refresh-poll"
     )
     assert len(headings) == 1
     assert headings[0].children == "Vol trades"
@@ -248,8 +250,9 @@ def test_layout_has_one_semantic_h1_and_auditable_components():
     assert trade_slider.allow_direct_input is False
     assert len(trade_presets) == 4
     assert all(button.disabled for button in trade_presets)
-    assert worker_poll.interval == 10_000
-    assert worker_poll.disabled is False
+    assert refresh_poll.interval == 10_000
+    assert refresh_poll.disabled is False
+    assert "brent-vol-history-worker-poll" not in ids
     assert "brent-vol-history-summary" not in ids
     assert "brent-vol-history-trade-status" not in ids
     assert "brent-vol-history-status" not in ids
@@ -1699,7 +1702,7 @@ def test_publication_coverage_ignores_non_chain_maturities():
     assert market_data.publication_coverage(_chain_frame(), published) == (1, 1)
 
 
-@pytest.mark.parametrize("product", ["LNE", "ON", "BRENT"])
+@pytest.mark.parametrize("product", ["LNE", "ON", "BRENT", "TFO"])
 def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkeypatch, product):
     from types import SimpleNamespace
     from dash import no_update
@@ -1708,15 +1711,16 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     snapshot_id = chain.iloc[0]["snapshot_id"]
     snapshots = pd.DataFrame([{
         "snapshot_id": snapshot_id, "business_date": "2026-08-10",
-        "observed_at": "2026-08-10T12:00:00Z", "snapshot_kind": "SETTLEMENT",
+        "observed_at": "2026-08-10T12:00:00Z", "snapshot_kind": "INTRADAY" if product == "TFO" else "SETTLEMENT",
     }])
-    commodity = "BRENT" if product == "BRENT" else "HH"
+    commodity = {"BRENT":"BRENT", "TFO":"TTF"}.get(product, "HH")
     surface = _calibrated_frame().assign(publication_id="new-revision", commodity=commodity)
     surface.attrs["publication_metadata"].update(publication_id="new-revision", commodity=commodity)
     calls = []
     monkeypatch.setattr(history, "ctx", SimpleNamespace(triggered_id="vol-trades-publication-revision"))
     monkeypatch.setattr(market_data, "load_available_snapshots", lambda _product: snapshots)
     monkeypatch.setattr(market_data, "load_chain_snapshot", lambda *_args, **_kwargs: chain)
+    monkeypatch.setattr(market_data, "load_trade_tape", lambda *_args, **_kwargs: pd.DataFrame())
 
     def load(cob, dates, *, product, **kwargs):
         calls.append((cob, product))
@@ -1725,6 +1729,9 @@ def test_publication_refresh_reloads_matching_view_and_preserves_controls(monkey
     monkeypatch.setattr(market_data, "load_latest_calibrated_surface", load)
     monkeypatch.setattr(market_data, "load_published_surface", lambda *_a, **_kw: pytest.fail("duplicate operational overlay queried"))
     event = {"commodity": commodity, "cob_date": "2026-08-10", "publication_id": "new-revision"}
+    if product == "TFO":
+        from tfo_intraday_workspace import publication_changed
+        event = publication_changed({"commodity":"TTF", "publication_date":"2026-08-10", "publication_id":"new-revision"})
     options = [{"value": v} for v in history_charts.EXPIRY_LEGEND_LAYER_ORDER]
     result = history.render_history(
         snapshot_id, "delta", product, event,

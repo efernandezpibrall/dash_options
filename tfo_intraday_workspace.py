@@ -17,6 +17,7 @@ import tfo_intraday_jobs as jobs
 from vol_trades_market_window import history_identity
 import hashlib
 import json
+from uuid import uuid4
 from workspace_cache import WorkspaceLoadCache
 
 _STRIP_INPUTS = WorkspaceLoadCache(max_entries=8)
@@ -37,6 +38,7 @@ def controls():
         html.Button("Review intraday", id="tfo-intraday-review", className="brent-vol-history-refresh-button", disabled=True),
         html.Button("Publish intraday", id="tfo-intraday-publish", className="brent-vol-history-refresh-button", disabled=True),
         html.Small(id="tfo-intraday-status", role="status"),
+        html.Small(id="tfo-intraday-publication-status", role="status", **{"aria-live":"polite"}),
     ], id="tfo-intraday-controls", className="tfo-intraday-controls", hidden=True)
 
 
@@ -59,12 +61,17 @@ def layout():
                 html.Details([html.Summary("Saved drafts"),
                     dcc.Dropdown(id="tfo-intraday-drafts", placeholder="Choose a saved draft"),
                     html.Button("Open draft", id="tfo-intraday-open", className="brent-vol-history-refresh-button")]),
-                html.Div(id="tfo-intraday-action-status", role="status"),
             ]),
             dbc.ModalFooter([
-                html.Button("Save draft", id="tfo-intraday-save", className="brent-vol-history-refresh-button"),
-                html.Button("Publish selected months", id="tfo-intraday-publish-card", className="brent-vol-history-refresh-button"),
-                html.Button("Close", id="tfo-intraday-close", className="brent-vol-history-refresh-button"),
+                html.Div("Saving and verifying the surface… Please wait.", id="tfo-intraday-action-progress",
+                         role="status", hidden=True, className="tfo-intraday-action-status"),
+                html.Div(id="tfo-intraday-action-status", role="status", className="tfo-intraday-action-status",
+                         **{"aria-live":"polite"}),
+                html.Fieldset([
+                    html.Button("Save draft", id="tfo-intraday-save", className="brent-vol-history-refresh-button"),
+                    html.Button("Publish selected months", id="tfo-intraday-publish-card", className="brent-vol-history-refresh-button"),
+                    html.Button("Close", id="tfo-intraday-close", className="brent-vol-history-refresh-button"),
+                ], id="tfo-intraday-actions", disabled=False, className="tfo-intraday-actions"),
             ]),
         ], id="tfo-intraday-modal", is_open=False, size="xl", scrollable=True,
            className="tfo-intraday-modal", backdrop_class_name="tfo-intraday-backdrop"),
@@ -83,6 +90,7 @@ def market_request(history, window, product, previous=None):
     if pd.isna(start) or pd.isna(end) or start >= end:
         return None
     request = {"snapshot_id": history["snapshot_id"], "start": start.isoformat(), "end": end.isoformat(),
+               "scope": (previous or {}).get("scope") or str(uuid4()),
                "display_publication_id": (history.get("calibration") or {}).get("publication_id")}
     request["key"] = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
     return no_update if previous and previous.get("key") == request["key"] else request
@@ -213,16 +221,20 @@ def render(view, request, draft):
 
 
 @callback(Output("tfo-intraday-modal", "is_open"), Output("tfo-intraday-draft-view", "data"),
+          Output("tfo-intraday-action-status", "children", allow_duplicate=True),
           Input("tfo-intraday-review", "n_clicks"), Input("tfo-intraday-publish", "n_clicks"),
           Input("tfo-intraday-close", "n_clicks"), prevent_initial_call=True)
 def toggle(review, publish, close):
-    return ctx.triggered_id!="tfo-intraday-close", None
+    return ctx.triggered_id!="tfo-intraday-close", None, ""
 
 
 @callback(Output("tfo-intraday-chart", "figure"), Output("tfo-intraday-evidence", "children"),
           Input("tfo-intraday-month", "value"), Input("tfo-intraday-view", "data"),
-          Input("tfo-intraday-draft-view", "data"), State("tfo-intraday-request", "data"))
-def chart(month, view, draft, request):
+          Input("tfo-intraday-draft-view", "data"), State("tfo-intraday-request", "data"),
+          Input("tfo-intraday-modal", "is_open"))
+def chart(month, view, draft, request, is_open=False):
+    if not is_open:
+        return no_update, no_update
     fig = go.Figure()
     if not month or not view or not view.get("ref"):
         return fig, ""
@@ -235,7 +247,7 @@ def chart(month, view, draft, request):
             display = intraday_display_curve(value, month)
             fig.add_scatter(x=display['strike'], y=[100*v for v in display['iv']], name="Intraday proposal", line={"color":"#a855f7"})
         import vol_trades_data
-        base = vol_trades_data._read_calibrated_surface_points(value["manifest"]["base_publication_id"], (pd.Timestamp(month).date(),), get_database_engine(required=True))
+        base = vol_trades_data._cached_calibrated_surface_points(value["manifest"]["base_publication_id"], (pd.Timestamp(month).date(),))
         fig.add_scatter(x=base.strike, y=base.volatility*100, name="Published base", line={"color":"#64748b", "dash":"dash"})
         rows = summary.get("evidence", [])
         for kind, label, color, symbol in (("quote","Bloomberg quotes","#059669","circle"),
@@ -298,10 +310,13 @@ def chart(month, view, draft, request):
 
 
 @callback(Output("tfo-intraday-saved", "data"), Output("tfo-intraday-action-status", "children"),
-          Output("tfo-intraday-activation", "data"),
+          Output("tfo-intraday-activation", "data"), Output("tfo-intraday-modal", "is_open", allow_duplicate=True),
           Input("tfo-intraday-save", "n_clicks"), Input("tfo-intraday-publish-card", "n_clicks"),
           State("tfo-intraday-view", "data"), State("tfo-intraday-request", "data"), State("tfo-intraday-months", "value"),
-          State("tfo-intraday-draft-view", "data"), prevent_initial_call=True)
+          State("tfo-intraday-draft-view", "data"), prevent_initial_call=True,
+          running=[(Output("tfo-intraday-action-progress", "hidden"), False, True),
+                   (Output("tfo-intraday-action-status", "hidden"), True, False),
+                   (Output("tfo-intraday-actions", "disabled"), True, False)])
 def save_or_publish(save, card, view, request, months, draft):
     try:
         actor, value = review_candidate(view, request, draft)
@@ -318,14 +333,15 @@ def save_or_publish(save, card, view, request, months, draft):
         expected = value["manifest"]["expected_intraday_id"]
         saved = save_tfo_intraday_draft(engine, value, months, actor=actor.subject)
         if not publishing:
-            return saved, "Draft saved and verified. Active surfaces are unchanged.", no_update
+            return saved, "Draft saved and verified. Active surfaces are unchanged.", no_update, no_update
         receipt = publish_tfo_intraday_draft(engine, saved["draft_id"], actor=actor.subject, expected_intraday_id=expected)
-        return saved, "Intraday publication verified · "+receipt["publication_id"], receipt
+        activation = {**receipt, "selected_months":saved["months"]}
+        return saved, "Intraday publication verified · "+receipt["publication_id"], activation, False
     except (ValueError, PermissionError) as exc:
-        return no_update, str(exc), no_update
+        return no_update, str(exc), no_update, no_update
     except Exception:
         LOG.exception("Intraday write failed")
-        return no_update, "Write unavailable. Check storage and permissions before retrying.", no_update
+        return no_update, "Write unavailable. Check storage and permissions before retrying.", no_update, no_update
 
 
 @callback(Output("tfo-intraday-drafts", "options"), Input("tfo-intraday-modal", "is_open"), Input("tfo-intraday-saved", "data"))
@@ -362,7 +378,27 @@ def open_draft(clicks, draft_id, request):
 def publication_changed(receipt):
     if not receipt:
         raise PreventUpdate
-    return {"product":"TFO", "publication_id":receipt["publication_id"]}
+    return {"commodity":receipt["commodity"], "cob_date":receipt["publication_date"],
+            "publication_id":receipt["publication_id"]}
+
+
+@callback(Output("tfo-intraday-publication-status", "children"),
+          Input("tfo-intraday-activation", "data"), Input("brent-vol-history-snapshot", "data"),
+          Input("brent-vol-history-product", "value"))
+def publication_feedback(receipt, history, product):
+    if not receipt or product != "TFO":
+        return ""
+    published_at = pd.Timestamp(receipt["published_at"]).tz_convert("Asia/Dubai")
+    months = ", ".join(pd.Timestamp(month).strftime("%b-%y") for month in receipt["selected_months"])
+    prefix = f"Published {months} · {published_at:%d %b %H:%M:%S} GST"
+    current = history or {}
+    if not current or current.get("calibration_status") == "query_error":
+        return prefix + " · charts could not reload. Reload the page; publication is already saved."
+    if current.get("business_date") != receipt["publication_date"] or current.get("snapshot_kind") != "INTRADAY":
+        return prefix + " · select the published intraday date to view it."
+    if current.get("publication_id") == receipt["publication_id"]:
+        return prefix + " · expiry panels updated."
+    return prefix + " · refreshing expiry panels…"
 
 
 @callback(Output({"type":"brent-vol-history-expiry-graph", "expiry":ALL, "generation":ALL}, "figure", allow_duplicate=True),

@@ -469,7 +469,7 @@ def _settlement_batch_status(jobs: dict[str, Any]) -> tuple[str, str]:
 @callback(
     Output("brent-vol-history-refresh-job", "data"),
     Output("brent-vol-history-refresh-completion", "data"),
-    Output("brent-vol-history-refresh-poll", "disabled"),
+    Output("brent-vol-history-refresh-poll", "interval"),
     Output("brent-vol-history-refresh-button", "disabled"),
     Output("brent-vol-history-settlement-refresh-button", "disabled"),
     Output("brent-vol-history-refresh-status", "children"),
@@ -479,11 +479,24 @@ def _settlement_batch_status(jobs: dict[str, Any]) -> tuple[str, str]:
     Input("brent-vol-history-refresh-button", "n_clicks"),
     Input("brent-vol-history-settlement-refresh-button", "n_clicks"),
     Input("brent-vol-history-refresh-poll", "n_intervals"),
-    Input("brent-vol-history-worker-poll", "n_intervals"),
     Input("brent-vol-history-product", "value"),
     State("brent-vol-history-refresh-job", "data"),
     State("brent-vol-history-refresh-completion", "data"),
+    running=[(Output("brent-vol-history-refresh-poll", "disabled"), True, False)],
 )
+def update_bloomberg_refresh(
+    refresh_clicks, settlement_clicks, poll_count, product, active_jobs, completions
+):
+    # One clock pauses while a request is in flight. A second readiness timer
+    # can otherwise supersede a slow enqueue response in the Dash renderer,
+    # losing its job ticket even though Bloomberg executes the refresh.
+    result = manage_bloomberg_refresh(
+        refresh_clicks, settlement_clicks, poll_count, 0, product,
+        active_jobs, completions,
+    )
+    return (*result[:2], 10000 if result[2] else 1000, *result[3:])
+
+
 def manage_bloomberg_refresh(
     _refresh_clicks,
     _settlement_refresh_clicks,

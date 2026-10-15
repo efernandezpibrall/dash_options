@@ -257,12 +257,6 @@ def build_layout(ice_quotes_layout):
             ),
             dcc.Interval(
                 id="brent-vol-history-refresh-poll",
-                interval=1000,
-                n_intervals=0,
-                disabled=True,
-            ),
-            dcc.Interval(
-                id="brent-vol-history-worker-poll",
                 interval=10000,
                 n_intervals=0,
                 disabled=False,

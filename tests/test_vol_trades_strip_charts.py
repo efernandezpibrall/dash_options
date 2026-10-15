@@ -2,6 +2,7 @@ import copy
 from datetime import date
 
 import pandas as pd
+import pytest
 from dash import dcc
 
 from options.option_expiry_engine import calculate_option_expiry
@@ -145,6 +146,71 @@ def test_incomplete_period_remains_an_explicit_chart_without_partial_mark():
     figure = render([row()], input_loader=partial)[0].children[1].figure
     assert not any(len(trace.x) for trace in figure.data)
     assert "Missing complete inputs for Mar-27" in figure.layout.annotations[0].text
+
+
+@pytest.mark.parametrize("smooth", [False, True], ids=["legacy", "intraday-smooth"])
+def test_sql_loader_preserves_reference_context_for_q1_chart(blank_database, smooth):
+    """Exercise the SQL projection and chart pricer together, including a forward roll."""
+    import numpy as np
+    from sqlalchemy import Uuid, text
+    from uuid import UUID
+
+    from options.ttf_strip_charts import build_strip_snapshot
+    from options.vol_calibration.models.smooth_call_spline import fit_smooth_call_spline
+    from vol_trades_data import _read_calibrated_surface_points
+
+    publication_id = "00000000-0000-0000-0000-000000000001"
+    months = tuple(date(2027, month, 1) for month in (1, 2, 3))
+    reference_forward = 68.0
+    records = []
+    for month in months:
+        expiry = calculate_option_expiry("ICE_TTF_TFO_71085679_EXPIRY", month)
+        years = year_fraction(date(2026, 10, 1), expiry)
+        strikes = np.geomspace(reference_forward * 0.5, reference_forward * 1.8, 401)
+        variance = np.full(len(strikes), 0.65**2 * years)
+        if smooth:
+            curve, _ = fit_smooth_call_spline(
+                strikes / reference_forward, variance, smoothing=0.0, reference_weight=1.0,
+            )
+            variance = curve.variance(strikes / reference_forward)
+        for strike, total_variance in zip(strikes, variance):
+            records.append(dict(
+                publication_id=UUID(publication_id), contract_date=month,
+                option_expiration_date=expiry, strike=strike, delta=0.5,
+                put_call="C", volatility=float(np.sqrt(total_variance / years)),
+                total_variance=float(total_variance),
+                working_forward=reference_forward,
+                source_name="tfo-intraday-smooth-v2:test" if smooth else "official",
+                calibration_basis="test", surface_region="core",
+                blend_classification="test", calibration_method="test",
+                calibration_policy_version="test", input_fingerprint="test",
+                created_at=pd.Timestamp("2026-10-01"),
+            ))
+    with blank_database.begin() as connection:
+        connection.execute(text("CREATE SCHEMA at_lng"))
+        pd.DataFrame(records).to_sql(
+            "implied_volatility_surface_calibrated", connection, schema="at_lng",
+            index=False, dtype={"publication_id": Uuid()},
+        )
+    surface = _read_calibrated_surface_points(publication_id, months, blank_database)
+    inputs = loader(HISTORY, months)
+    inputs.update(surface=surface, publication_id=publication_id)
+    snapshot = build_strip_snapshot(
+        surface, inputs["forwards"], months, publication_id, "2026-10-01",
+        row()["observed_at"], 70.0,
+    )
+    for part in snapshot.component_snapshots:
+        assert part.surface_forward == reference_forward
+        assert part.surface_years == pytest.approx(
+            year_fraction(date(2026, 10, 1), part.option_expiration_date)
+        )
+        assert part.smooth_price_curve == smooth
+    assert surface.forward_value.eq(reference_forward).all()
+    figure = render([row()], input_loader=lambda *_: inputs)[0].children[1].figure
+    calibrated = next(trace for trace in figure.data if trace.meta["legend_layer"] == "calibrated")
+    assert len(calibrated.x) >= 60, [annotation.text for annotation in figure.layout.annotations]
+    assert np.isfinite(np.asarray(calibrated.y, dtype=float)).all()
+    assert not figure.layout.annotations
 
 
 def test_loader_failure_is_visible_and_has_no_sensitive_error_text():
