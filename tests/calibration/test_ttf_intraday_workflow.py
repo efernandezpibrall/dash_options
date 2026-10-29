@@ -1,6 +1,4 @@
 from datetime import datetime, timezone
-import importlib.util
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -989,73 +987,3 @@ def test_surface_points_use_postgres_copy_with_csv_escaping():
     assert '"official,with-comma"' in copied["payload"]
     assert copied["payload"].rstrip().endswith(r"\N")
     assert copied["closed"] is True
-
-
-MIGRATION_PATH = (
-    Path(__file__).parents[2]
-    / "migrations"
-    / "versions"
-    / "20260806_01_ttf_intraday_workflow.py"
-)
-
-
-class _OperationRecorder:
-    def __init__(self):
-        self.tables = {}
-        self.indexes = {}
-        self.added_columns = []
-        self.checks = []
-        self.statements = []
-
-    def create_table(self, name, *objects, **kwargs):
-        self.tables[name] = {"objects": objects, "kwargs": kwargs}
-
-    def create_index(self, name, table, columns, **kwargs):
-        self.indexes[name] = (table, columns, kwargs)
-
-    def add_column(self, table, column, **kwargs):
-        self.added_columns.append((table, column, kwargs))
-
-    def create_check_constraint(self, name, table, condition, **kwargs):
-        self.checks.append((name, table, condition, kwargs))
-
-    def execute(self, statement):
-        self.statements.append(str(statement))
-
-
-def test_intraday_migration_is_additive_and_append_only(monkeypatch):
-    spec = importlib.util.spec_from_file_location("ttf_intraday_migration", MIGRATION_PATH)
-    migration = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(migration)
-    operations = _OperationRecorder()
-    monkeypatch.setattr(migration, "op", operations)
-
-    migration.upgrade()
-
-    assert migration.down_revision == "20260803_01"
-    assert set(operations.tables) == {
-        "vol_calibration_intraday_trades",
-        "vol_calibration_run_trade_inputs",
-    }
-    added = {column.name for _, column, _ in operations.added_columns}
-    assert {
-        "total_variance",
-        "working_forward",
-        "surface_region",
-        "blend_classification",
-        "calibration_basis",
-        "calibration_method",
-        "calibration_policy_version",
-    } <= added
-    sql = "\n".join(operations.statements)
-    assert "TTF intraday trades are append-only" in sql
-    assert "ttf_vol_surface_publication_current" in sql
-    assert "option_volatility_surface_comparison_current" not in sql
-    hybrid_checks = [
-        kwargs
-        for name, _, _, kwargs in operations.checks
-        if name == "ck_ttf_calibrated_surface_hybrid_fields"
-    ]
-    assert hybrid_checks == [{"schema": "at_lng", "postgresql_not_valid": True}]
-    with pytest.raises(RuntimeError, match="no destructive downgrade"):
-        migration.downgrade()

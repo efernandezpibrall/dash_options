@@ -42,37 +42,35 @@ For direct loopback workstation use, `local_loopback` requires a named user and 
 
 ## Schema and verification
 
-The migration graph converges at `20261029_03`, following the former
-`20261021_01`, `20261029_01` and `20261029_02` heads. Inspect the graph from the
-paired artifact, using its configuration:
+The active graph has a single frozen root, `20261029_03`. Existing databases
+at that checkpoint require no restamping or schema changes. Fresh dashboard
+installations execute the final schema and seed data once, after provisioning
+the external shared trade/catalogue schema.
 
 ```sh
 python -m alembic -c /path/to/release/dashboard/alembic.ini heads
-python -m alembic -c /path/to/release/dashboard/alembic.ini history
+python -m alembic -c /path/to/release/dashboard/alembic.ini upgrade head
 ```
 
-Applying `upgrade head` to a database is a separate operational action. The
-convergence migration repeats the existing guarded retirement after every
-history-creation branch has finished. It removes only empty obsolete tables;
-populated history still requires the verified archive/retirement procedure.
-Missing tables are accepted, unexpected dependencies prevent removal, and a
-failure rolls back table drops and the revision update together. Downgrade
-remains blocked pending verified archive restoration.
+Earlier databases must first use the checksum-verified archived upgrade path:
 
-These migrations inspect database contents and need an online rehearsal against
-a disposable database; an offline `--sql` export cannot establish that their
-guards pass. Preserve old revisions and their SQL resources. Enable writes only
-after the corresponding schema, source calendars, identity and role checks pass.
+```sh
+python -m scripts.maintenance.upgrade_legacy_schema
+python -m scripts.maintenance.upgrade_legacy_schema --apply
+python -m alembic upgrade head
+```
 
-An applied revision is still required history: Alembic and readiness checks load
-the full ancestry, and fresh installations execute it. The 27 revisions and
-three SQL resources are all referenced; none becomes removable merely because
-production reached `20261029_03`. Only generated migration caches can be removed
-without replacing and validating the migration baseline. Keep optional writer
-imports inside migration execution so older readers can inspect the graph.
+The first command only inspects recorded state. Unknown/unversioned schemas
+must be reconciled, never blindly stamped. Readiness recognizes the baseline's
+explicit historical capabilities. Keep the archive and immutable rollback
+releases; only the active migration graph has been consolidated.
 
-The [29 October schema application record](../releases/2026/2026-10-29-schema-convergence.md)
-documents the applied head and compatible runtime/rollback artifacts.
+[Baseline installation and recovery](migration-baseline.md) documents exact
+prerequisites, archive provenance, transaction guards and verification. The
+[implementation verification record](../releases/2026/2026-10-29-single-baseline.md)
+records fresh-install, archived-upgrade and live read-only checks. The
+[29 October schema application record](../releases/2026/2026-10-29-schema-convergence.md)
+records the original live checkpoint application before consolidation.
 
 From the source checkout, run `python -m pytest`. Persistence tests use owned temporary PostgreSQL clusters; install `initdb` and `pg_ctl` for that coverage. Run the analytics boundary verifier against source and staged application paths. The paired release verifier recognizes both the old `integration/` and new `scripts/verification/` resource layouts.
 

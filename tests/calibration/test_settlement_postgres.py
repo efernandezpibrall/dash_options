@@ -4,8 +4,7 @@ from datetime import date
 import time
 from uuid import uuid4
 
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
+from alembic import command
 import numpy as np
 import pandas as pd
 import pytest
@@ -15,7 +14,8 @@ from sqlalchemy.exc import OperationalError
 from options.vol_calibration import api
 from dash_options.calibration.execution import settlement_worker as worker, settlement_operations as operations
 from dash_options.calibration.execution.repository import PostgresJobRepository
-from scripts.verification.verify_settlement_pipeline import fixture_inputs, verify, load, ROOT
+from scripts.verification.verify_settlement_pipeline import fixture_inputs, verify, prepare_external_schema_fixture
+from scripts.maintenance.upgrade_legacy_schema import migration_config
 
 
 @pytest.fixture
@@ -175,17 +175,18 @@ def test_exhausted_retry_preserves_checkpoints_and_audits_authorized_recovery(da
         operations.retry_settlement(database, result.job_id, identity=actor(worker.Role.CALIBRATOR), reason="duplicate", worker_identity=worker.worker_identity())
 
 
-def test_migration_timeout_applies_to_its_first_locking_statement(database):
-    migration = load(next((ROOT / "migrations/versions").glob("20261005_01*.py")))
+def test_migration_timeout_applies_to_its_first_locking_statement(blank_database):
+    database = blank_database
+    with database.begin() as connection:
+        prepare_external_schema_fixture(connection)
     with database.connect() as reader:
         transaction = reader.begin()
-        reader.execute(text("SELECT * FROM at_lng.ttf_vol_surface_publication_current LIMIT 0"))
+        reader.execute(text("SELECT * FROM at_lng.trades_options_valuation LIMIT 0"))
         start = time.monotonic()
         with pytest.raises(OperationalError) as error:
             with database.begin() as connection:
                 connection.execute(text("SET LOCAL statement_timeout='6500ms'"))
-                with Operations.context(MigrationContext.configure(connection)):
-                    migration.upgrade()
+                command.upgrade(migration_config(connection), "head")
         assert error.value.orig.pgcode == "55P03"
         assert 4.5 <= time.monotonic()-start < 6.5
         transaction.rollback()

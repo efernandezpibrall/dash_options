@@ -265,7 +265,7 @@ def test_gas_batch_readiness_requires_checkpoint_migration(monkeypatch):
     assert details["required_migration_head"] == "20260928_01"
 
 
-def test_brent_intraday_readiness_requires_its_branch_and_accepts_multiple_heads(monkeypatch):
+def test_brent_intraday_readiness_rejects_old_heads_and_accepts_baseline(monkeypatch):
     _disable_calibration_mutations(monkeypatch)
     for name in ('writes_enabled','background_jobs_enabled','gas_batch_jobs_enabled','intraday_refresh_enabled','settlement_refresh_enabled'):
         monkeypatch.setattr(health,name,lambda:False)
@@ -287,8 +287,11 @@ def test_brent_intraday_readiness_requires_its_branch_and_accepts_multiple_heads
             return Result(heads)
     monkeypatch.setattr(health,'get_database_engine',lambda required=False:SimpleNamespace(connect=Connection))
     ready,details=health.readiness_status()
-    assert not ready and details['required_migration_head']=='20261023_01'
+    assert not ready and details['required_migration_head']=='20260902_02'
     heads='20261021_01,20261023_01'
     ready,details=health.readiness_status()
-    assert ready and details['migration_heads']==['20261021_01','20261023_01']
+    assert not ready
+    heads='20261029_03'
+    ready,details=health.readiness_status()
+    assert ready and details['migration_heads']==['20261029_03']
     assert {'at_lng.vol_intraday_drafts','at_lng.vol_intraday_active'}.issubset(relations)

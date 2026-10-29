@@ -17,7 +17,7 @@ where = ["src"]
 include = ["dash_options*"]
 
 [tool.setuptools.package-data]
-dash_options = ["assets/*.css", "assets/*.js", "resources/volatility_history_archive/*.json", "resources/volatility_history_archive/*.gz"]
+dash_options = ["assets/*.css", "assets/*.js", "resources/volatility_history_archive/*.json", "resources/volatility_history_archive/*.gz", "resources/migration_history/*.tar.gz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

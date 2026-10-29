@@ -21,7 +21,7 @@ Three retained compatibility bridges still import analytics internals: `calibrat
 
 ## Runtime resources and migrations
 
-`resources/volatility_history_archive/` is required fallback history, not disposable output. Its manifest checksums and observation identifiers remain unchanged. All Alembic revisions and referenced SQL remain in `migrations/`; an old revision can still be required by a fresh install or a rollback lineage check.
+`resources/volatility_history_archive/` is required fallback history, not disposable output. Its manifest checksums and observation identifiers remain unchanged. The active `migrations/` graph contains one frozen `20261029_03` baseline. The checksum-pinned original upgrade chain is packaged in `resources/migration_history/` for older databases and backups; see [baseline recovery](../operations/migration-baseline.md).
 
 An installed wheel finds CSS, JavaScript and history inside its package. Set `OPTIONS_APP_ROOT` to the paired deployment directory containing `alembic.ini` and `migrations/`. A source checkout discovers that root automatically. Set `OPTIONS_CONFIG_PATH` for deployments instead of relying on working-directory configuration.
 

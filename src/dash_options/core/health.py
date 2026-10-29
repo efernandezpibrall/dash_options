@@ -55,7 +55,11 @@ def _migration_lineage_contains(current_revision: str | None, required_revision:
             current_revision,
             "base",
         )
-        return any(revision.revision == required_revision for revision in revisions)
+        return any(
+            revision.revision == required_revision
+            or required_revision in getattr(revision.module, "supersedes_revisions", ())
+            for revision in revisions
+        )
     except Exception:
         # Readiness is deliberately fail-closed when migration lineage is unknown.
         return False

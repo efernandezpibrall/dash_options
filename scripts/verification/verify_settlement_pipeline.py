@@ -3,7 +3,6 @@
 No configured database is accessed. Source loading is replaced by a pinned
 synthetic fixture; exact historical source/model replay is a separate check.
 """
-import importlib.util
 import argparse
 import json
 from pathlib import Path
@@ -20,9 +19,7 @@ from types import SimpleNamespace
 from contextlib import contextmanager
 from functools import wraps
 
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
-from alembic.config import Config
+from alembic import command
 from alembic.script import ScriptDirectory
 import numpy as np
 import pandas as pd
@@ -43,51 +40,53 @@ def fixture_inputs():
     return SimpleNamespace(**values)
 
 
-def load(path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def prepare_external_schema_fixture(connection):
+    """Minimal shared trade/catalogue prerequisites for owned test databases only.
 
-
-def prepare_external_calibration_fixture(connection):
-    """Minimal external curve catalogue needed by the SOFR policy migration.
-
-    This is owned-test setup, not a production migration or a market-data clone.
-    Curve observations are supplied by the explicit captured input bundle.
+    This is not a trading-platform installer or a production data clone. Every
+    dashboard schema change is executed by its real Alembic migration.
     """
-    connection.execute(text("""CREATE TABLE IF NOT EXISTS at_lng.option_discount_curve_definitions (
-        curve_code text PRIMARY KEY, currency text NOT NULL, day_count text NOT NULL,
-        compounding text NOT NULL, source_name text NOT NULL, active boolean NOT NULL
-    )"""))
+    connection.execute(text("CREATE SCHEMA IF NOT EXISTS at_lng"))
+    columns = ["quantity bigint", "model text"]
+    for suffix in ("a", "b"):
+        columns.extend(f"{name}_{suffix} {kind}" for name, kind in (
+            ("volatility_adjustment_components", "jsonb"),
+            ("maturity_date_type", "text"), ("asset", "text"),
+            ("surface_expiry_date", "date"), ("surface_expiry_status", "text"),
+            ("volatility_reference_convention", "text"),
+            ("volatility_reference_convention_version", "text"),
+            ("variance_calendar_code", "text"), ("variance_calendar_version", "text"),
+            ("business_days_to_trade_expiry", "integer"),
+            ("business_days_to_surface_expiry", "integer"),
+            ("vol_adjustment_factor", "numeric"),
+        ))
+    connection.execute(text("CREATE TABLE at_lng.trades_options_valuation (" + ", ".join(columns) +
+                            ", CONSTRAINT trades_options_valuation_adjustment_components_ck CHECK (true))"))
+    connection.execute(text("""CREATE TABLE at_lng.trades_options (
+        model text, contract_convention_code text,
+        CONSTRAINT trades_options_supported_convention_ck CHECK (true));
+        CREATE TABLE at_lng.option_contract_conventions (
+            convention_code text PRIMARY KEY, venue text, product_code text,
+            pricing_model text, exercise_style text, margin_style text, settlement_type text,
+            premium_currency text, discount_curve_required boolean, source_url text,
+            reviewed_at timestamptz, active boolean);
+        CREATE TABLE at_lng.option_discount_curve_definitions (
+            curve_code text PRIMARY KEY, currency text NOT NULL, day_count text NOT NULL,
+            compounding text NOT NULL, source_name text NOT NULL, active boolean NOT NULL)
+    """))
 
 
 def apply_migrations(engine):
-    """Follow Alembic's graph, excluding only external trade-schema revisions.
+    """Bootstrap the full current graph, including shared-table adaptations."""
+    from scripts.maintenance.upgrade_legacy_schema import migration_config
 
-    The separate migration upgrade tests exercise every revision through the
-    real Alembic environment, including those external-schema prerequisites.
-    """
-    config = Config()
-    config.set_main_option("script_location", str(ROOT / "migrations"))
-    script = ScriptDirectory.from_config(config)
-    excluded = {"20260831_02", "20260831_04", "20260902_01"}
-    migrations = [revision for revision in reversed(list(
-        script.iterate_revisions("heads", "base", implicit_base=True)
-    )) if revision.revision not in excluded]
     with engine.begin() as connection:
-        for revision in migrations:
-            prefix = revision.revision
-            if prefix == "20261005_01":
-                connection.execute(text("GRANT SELECT ON at_lng.ttf_vol_surface_publication_current TO PUBLIC"))
-                connection.execute(text("COMMENT ON VIEW at_lng.ttf_vol_surface_publication_current IS 'preserved integration comment'"))
-            if prefix == "20261028_01":
-                prepare_external_calibration_fixture(connection)
-            with Operations.context(MigrationContext.configure(connection)):
-                revision.module.upgrade()
-        assert connection.execute(text("SELECT EXISTS(SELECT 1 FROM pg_class c,LATERAL aclexplode(c.relacl) acl WHERE c.oid='at_lng.ttf_vol_surface_publication_current'::regclass AND acl.grantee=0 AND acl.privilege_type='SELECT')")).scalar_one()
-        assert connection.execute(text("SELECT obj_description('at_lng.ttf_vol_surface_publication_current'::regclass,'pg_class')")).scalar_one() == "preserved integration comment"
-    return [revision.revision for revision in migrations]
+        prepare_external_schema_fixture(connection)
+        config = migration_config(connection)
+        command.upgrade(config, "head")
+        return [revision.revision for revision in reversed(list(
+            ScriptDirectory.from_config(config).walk_revisions()
+        ))]
 
 
 @contextmanager

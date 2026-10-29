@@ -50,7 +50,8 @@ def main():
                 actual_heads = sorted(connection.execute(text('SELECT version_num FROM at_lng.alembic_version')).scalars())
             expected_heads = data.get('migration_heads') or [data['migration_head']]
             assert actual_heads == sorted(expected_heads)
-            for required in ('20260928_01', '20260902_02', *expected_heads):
+            # Capability IDs remain stable across the baseline and legacy graphs.
+            for required in ('20260928_01', '20260902_02', '20261023_01', *expected_heads):
                 assert any(health._migration_lineage_contains(head, required) for head in actual_heads)
             schema = {'heads':actual_heads,'rollback_application_recognizes_lineage':True}
         for item in data["products"]:
