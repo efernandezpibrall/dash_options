@@ -1,5 +1,11 @@
 # Python cache
 __pycache__/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+.venv/
 *.pyc
 *.pyo
 *.pyd
@@ -19,5 +25,5 @@ config.ini
 *.pkl
 *.log
 *.html
-!docs/ttf_intraday_vol_surface_adjustment_guide.html
+!docs/**/*.html
 *.png

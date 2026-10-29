@@ -1,0 +1,162 @@
+/* Live Prices: shared market workspaces with contained, fixed-order tables. */
+.live-prices-page {
+    --live-prices-ink: #17334b;
+    --live-prices-muted: #5d7083;
+    --live-prices-line: #e2e9f0;
+    --live-prices-monthly-height: 946px;
+    max-width: 1880px;
+    margin: 0 auto;
+    padding: 24px 28px 40px;
+    color: var(--color-text-primary, #17334b);
+    font-family: var(--font-family-primary, "Segoe UI", sans-serif);
+    background: #f5f7fa;
+}
+.live-prices-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    position: sticky;
+    top: var(--dashboard-top-bar-height, 54px);
+    z-index: 20;
+    padding: 12px 0 18px;
+    margin-bottom: 4px;
+    background: #f5f7fa;
+}
+.live-prices-toolbar h1 { margin: 0; color: var(--live-prices-ink); font-size: 28px; font-weight: 650; letter-spacing: -.7px; }
+.live-prices-subtitle { margin: 5px 0 0; font-size: 13px; color: var(--live-prices-muted); }
+.live-prices-toolbar button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 112px;
+    min-height: 42px;
+    padding: 9px 18px;
+    border: 1px solid var(--color-primary-dark, #1b4f72);
+    border-radius: 8px;
+    background: var(--color-primary-dark, #1b4f72);
+    color: white;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    box-shadow: 0 2px 4px rgb(20 55 80 / 10%);
+}
+.live-prices-toolbar button > span:first-child { font-size: 20px; line-height: 1; }
+.live-prices-toolbar button:hover:not(:disabled) { background: #123c58; border-color: #123c58; }
+.live-prices-toolbar button:disabled { opacity: .55; cursor: wait; }
+.live-prices-toolbar button:focus-visible, .live-prices-page summary:focus-visible { outline: 3px solid var(--color-primary, #2e86c1); outline-offset: 4px; }
+#live-prices-progress { margin: 0; font-size: 13px; color: var(--live-prices-muted); }
+#live-prices-progress:not(:empty) { padding: 8px 0 14px; }
+.live-prices-snapshot-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 24px;
+    padding: 4px 0 18px;
+    font-size: 12px;
+    color: var(--live-prices-muted);
+    font-variant-numeric: tabular-nums;
+}
+.live-prices-snapshot-meta > span:first-child { color: var(--live-prices-ink); font-weight: 600; }
+.live-prices-market-workspace {
+    min-width: 0;
+    margin-bottom: 24px;
+    border: 1px solid #d9e3ec;
+    border-radius: 12px;
+    background: white;
+    box-shadow: 0 4px 20px rgb(22 48 72 / 4%);
+    overflow: hidden;
+}
+.live-prices-workspace-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px 24px;
+    padding: 22px 24px;
+    border-bottom: 1px solid var(--live-prices-line);
+    background: #f8fbfd;
+}
+.live-prices-workspace-title { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.live-prices-workspace-title h2 { margin: 0; font-size: 23px; font-weight: 650; letter-spacing: -.5px; color: var(--live-prices-ink); }
+.live-prices-workspace-unit { font-size: 12px; font-weight: 500; color: var(--live-prices-muted); }
+.live-prices-workspace-description { margin: 5px 0 0; font-size: 13px; color: var(--live-prices-muted); }
+.live-prices-workspace-counts { display: flex; flex-wrap: wrap; gap: 8px; font-size: 12px; font-variant-numeric: tabular-nums; }
+.live-prices-workspace-counts > span { padding: 7px 11px; border: 1px solid #dde8ef; border-radius: 6px; background: white; color: var(--live-prices-muted); }
+.live-prices-workspace-counts strong { margin-right: 3px; color: var(--live-prices-ink); font-weight: 650; }
+.live-prices-workspace-counts > .live-prices-workspace-warning { color: #765717; background: #fff8e8; border-color: #edddb7; }
+.live-prices-market-section { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr); }
+.live-prices-market-panel { min-width: 0; padding: 20px 22px 22px; }
+.live-prices-strips-panel { border-left: 1px solid var(--live-prices-line); }
+.live-prices-panel-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 6px 12px; min-height: 34px; margin-bottom: 10px; }
+.live-prices-panel-heading h3 { margin: 0; font-size: 15px; font-weight: 650; color: var(--live-prices-ink); }
+.live-prices-panel-caption { font-size: 11px; color: var(--live-prices-muted); }
+.live-prices-strip-group + .live-prices-strip-group { margin-top: 20px; }
+.live-prices-strip-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 10px; }
+.live-prices-strip-heading h4 { margin: 0; font-size: 12px; font-weight: 650; color: #405b72; }
+.live-prices-group-count { color: var(--live-prices-muted); font-size: 11px; }
+.live-prices-workspace-footer { margin: 0; padding: 13px 24px; border-top: 1px solid var(--live-prices-line); background: #fbfcfe; color: var(--live-prices-muted); font-size: 11px; line-height: 1.65; }
+.live-prices-markets, .live-prices-periods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-bottom: 20px; }
+.live-prices-card { min-width: 0; background: white; border: 1px solid var(--live-prices-line); border-radius: 10px; padding: 20px; box-shadow: 0 2px 8px rgb(22 48 72 / 3%); }
+.live-prices-card h2 { font-size: 17px; font-weight: 650; margin: 0; color: var(--live-prices-ink); letter-spacing: -.2px; }
+.live-prices-card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.live-prices-card-heading > div { display: flex; align-items: baseline; flex-wrap: wrap; gap: 9px; }
+.live-prices-unit, .live-prices-coverage { font-size: 11px; color: var(--live-prices-muted); white-space: nowrap; }
+.live-prices-coverage { border-radius: 5px; padding: 4px 7px; background: #f1f5f9; }
+.live-prices-card-caption { font-size: 12px; color: var(--live-prices-muted); margin: 8px 0 16px; line-height: 1.6; }
+.live-prices-curve-card { margin-top: 24px; }
+.live-prices-curve-graph { height: 440px; }
+.live-prices-grid {
+    --ag-font-family: var(--font-family-primary, "Segoe UI", sans-serif);
+    --ag-font-size: 12px;
+    --ag-header-background-color: #f5f8fb;
+    --ag-header-foreground-color: #52687c;
+    --ag-foreground-color: #243e54;
+    --ag-border-color: #e5ebf1;
+    --ag-row-border-color: #edf1f5;
+    --ag-odd-row-background-color: #fbfcfe;
+    --ag-row-hover-color: #edf5fa;
+    --ag-selected-row-background-color: #e9f3fc;
+    --ag-cell-horizontal-padding: 8px;
+    font-variant-numeric: tabular-nums;
+    border-radius: 7px;
+}
+.live-prices-grid .ag-root-wrapper { border-radius: 7px; }
+.live-prices-grid .ag-header-cell-label { font-weight: 600; }
+.live-prices-grid .ag-cell { border-right: 0; }
+.live-prices-page .live-prices-grid.ag-theme-alpine .ag-cell { font-size: 12px; line-height: 20px; padding: 0 8px; }
+.live-prices-page .live-prices-grid.ag-theme-alpine .ag-header-cell { font-size: 11px; padding: 0 8px; }
+.live-prices-page .live-prices-grid .ag-cell[col-id='mid'] { font-weight: 650; color: #154e74; background: #eef6fc; }
+.live-prices-page .live-prices-grid .ag-cell.live-prices-mark-fallback { color: #765717; background: #fff8e8; }
+.live-prices-page .live-prices-grid .ag-cell.live-prices-mark-estimated { background: #f1f6fa; }
+.live-prices-page .live-prices-grid .ag-cell[col-id='month'], .live-prices-page .live-prices-grid .ag-cell[col-id='period'] { font-weight: 550; color: #405b72; }
+.live-prices-grid .ag-cell[col-id='bid'], .live-prices-grid .ag-cell[col-id='ask'] { color: #526b7c; }
+.live-prices-page .ag-cell.live-prices-up { color: #147d56; }
+.live-prices-page .ag-cell.live-prices-down { color: #b83b47; }
+.live-prices-empty { padding: 48px 24px; text-align: center; color: var(--live-prices-muted); background: white; border: 1px dashed #cbd7e2; border-radius: 10px; margin: 12px 0 24px; font-size: 14px; }
+.live-prices-source-notices { margin-bottom: 14px; background: #fff9eb; border: 1px solid #f0dfb8; border-radius: 7px; padding: 11px 14px; color: #765717; font-size: 12px; line-height: 1.6; }
+.live-prices-source-notices ul { max-height: 160px; overflow-y: auto; }
+.live-prices-methodology { font-size: 12px; color: var(--live-prices-muted); padding: 16px 0; line-height: 1.7; }
+.live-prices-page summary { cursor: pointer; min-height: 28px; padding: 3px 0; }
+@media (max-width: 1280px) {
+    .live-prices-page { --live-prices-monthly-height: 730px; padding: 20px; }
+    .live-prices-market-section, .live-prices-markets, .live-prices-periods { grid-template-columns: minmax(0, 1fr); }
+    .live-prices-strips-panel { border-left: 0; border-top: 1px solid var(--live-prices-line); }
+}
+@media (max-width: 600px) {
+    .live-prices-page { --live-prices-monthly-height: 600px; padding: 16px 10px 28px; }
+    .live-prices-toolbar { position: static; gap: 12px; padding: 6px 0 16px; }
+    .live-prices-toolbar h1 { font-size: 25px; }
+    .live-prices-toolbar button { min-width: 96px; padding: 9px 12px; }
+    .live-prices-workspace-header { padding: 18px 16px; }
+    .live-prices-market-panel { padding: 18px 12px; }
+    .live-prices-workspace-counts { gap: 6px; }
+    .live-prices-workspace-counts > span { padding: 5px 8px; }
+    .live-prices-workspace-footer { padding: 12px 16px; }
+    .live-prices-card { padding: 16px 12px; }
+    .live-prices-snapshot-meta { gap: 5px 16px; padding-bottom: 14px; font-size: 11px; }
+    .live-prices-snapshot-meta > span:first-child { flex-basis: 100%; }
+    .live-prices-card-heading { flex-wrap: wrap; }
+    .live-prices-curve-graph { height: 360px; }
+}

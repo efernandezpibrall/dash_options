@@ -1,0 +1,47 @@
+.volatility-history-contracts-controls .inline-dropdown-multi {
+    flex: 0 1 554px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.volatility-rv-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 20px 0 12px;
+}
+
+.volatility-rv-controls .inline-dropdown-aggregation {
+    width: 160px;
+    min-width: 0;
+}
+
+.volatility-rv-window-label,
+.volatility-rv-comparison-status {
+    color: #64748b;
+    font-size: 12px;
+}
+
+.volatility-rv-comparison-status {
+    margin: 8px 0 20px;
+    overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+    .volatility-rv-controls .inline-dropdown-aggregation {
+        flex: 1 1 160px;
+    }
+
+    .volatility-rv-chart-card .volatility-chart-graph {
+        height: 540px !important;
+    }
+    .volatility-history-contracts-controls .inline-dropdown-multi {
+        flex-basis: 100%;
+        width: 100%;
+    }
+
+    .volatility-history-chart-card .volatility-chart-graph {
+        height: 480px !important;
+    }
+}

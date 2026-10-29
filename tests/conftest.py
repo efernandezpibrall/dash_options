@@ -29,7 +29,7 @@ import shutil
 
 @pytest.fixture
 def blank_database(forbid_live_postgres_connections):
-    from integration.verify_settlement_pipeline import temporary_postgres
+    from scripts.verification.verify_settlement_pipeline import temporary_postgres
     if not shutil.which("initdb") or not shutil.which("pg_ctl"):
         pytest.skip("Local PostgreSQL binaries are required for persistence verification")
     with temporary_postgres() as engine:
@@ -39,6 +39,6 @@ def blank_database(forbid_live_postgres_connections):
 
 @pytest.fixture
 def database(blank_database):
-    from integration.verify_settlement_pipeline import apply_migrations
+    from scripts.verification.verify_settlement_pipeline import apply_migrations
     apply_migrations(blank_database)
     return blank_database

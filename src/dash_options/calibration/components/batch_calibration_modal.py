@@ -1,0 +1,349 @@
+"""
+Batch calibration modal component.
+
+Provides a confirmation dialog and progress tracking for calibrating
+all expiries at once with safety measures.
+"""
+import dash_bootstrap_components as dbc
+from dash import html, dash_table
+from typing import Dict, List
+
+from dash_options.calibration.feature_flags import writes_enabled
+
+
+def create_batch_calibration_confirm_modal(
+    commodity: str,
+    *,
+    hybrid: bool = False,
+) -> dbc.Modal:
+    """
+    Create confirmation modal for batch calibration.
+
+    Parameters
+    ----------
+    commodity : str
+        Commodity code
+
+    Returns
+    -------
+    dbc.Modal
+        Confirmation modal component
+    """
+    prefix = commodity.lower()
+    expected_duration = "several minutes" if hybrid else "several seconds"
+
+    modal = dbc.Modal(
+        [
+            dbc.ModalHeader(
+                dbc.ModalTitle([
+                    html.I(className="fas fa-exclamation-triangle text-warning me-2"),
+                    "Confirm Batch Calibration"
+                ]),
+                close_button=True,
+            ),
+            dbc.ModalBody([
+                dbc.Alert([
+                    html.I(className="fas fa-info-circle me-2"),
+                    html.Strong("This action will calibrate ALL expiries."),
+                    html.P([
+                        "The optimizer will run on each expiry to find the best-fit parameters. ",
+                        (
+                            f"This operation may take {expected_duration} "
+                            "depending on the number of expiries."
+                        ),
+                    ], className="mb-0 mt-2"),
+                ], color="warning", className="mb-3"),
+
+                html.Div([
+                    html.H6("Calibration Options", className="mb-3"),
+
+                    dbc.Checklist(
+                        id=f"{prefix}-batch-auto-save",
+                        options=[
+                            {
+                                "label": " Auto-save calibrated parameters to database",
+                                "value": "auto_save",
+                                "disabled": hybrid or not writes_enabled(),
+                            }
+                        ],
+                        value=[],
+                        className="mb-2",
+                    ),
+
+                    dbc.Checklist(
+                        id=f"{prefix}-batch-skip-good-fit",
+                        options=[
+                            {
+                                "label": (
+                                    " Skip already-valid observed hybrids"
+                                    if hybrid
+                                    else " Skip expiries with RMSE < 1% (already well-calibrated)"
+                                ),
+                                "value": "skip_good",
+                            }
+                        ],
+                        value=[],
+                        className="mb-2",
+                    ),
+                ], className="mb-3"),
+
+                html.Div([
+                    html.Span("Number of expiries to calibrate: ", className="text-muted"),
+                    html.Span(id=f"{prefix}-batch-expiry-count", className="fw-bold"),
+                ]),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button(
+                    "Cancel",
+                    id=f"{prefix}-batch-cancel-btn",
+                    color="secondary",
+                    className="me-2",
+                ),
+                dbc.Button(
+                    [html.I(className="fas fa-magic me-1"), "Start Calibration"],
+                    id=f"{prefix}-batch-confirm-btn",
+                    color="success",
+                ),
+            ]),
+        ],
+        id=f"{prefix}-batch-confirm-modal",
+        is_open=False,
+        backdrop="static",
+        centered=True,
+    )
+
+    return modal
+
+
+def create_batch_calibration_progress_modal(commodity: str) -> dbc.Modal:
+    """
+    Create progress modal for batch calibration.
+
+    Parameters
+    ----------
+    commodity : str
+        Commodity code
+
+    Returns
+    -------
+    dbc.Modal
+        Progress modal component
+    """
+    prefix = commodity.lower()
+
+    modal = dbc.Modal(
+        [
+            dbc.ModalHeader(
+                dbc.ModalTitle([
+                    html.I(className="fas fa-cog fa-spin me-2"),
+                    "Calibrating All Expiries"
+                ]),
+                close_button=False,
+            ),
+            dbc.ModalBody([
+                html.Div([
+                    html.P(id=f"{prefix}-batch-progress-text", className="text-center mb-2"),
+                    dbc.Progress(
+                        id=f"{prefix}-batch-progress-bar",
+                        value=0,
+                        striped=True,
+                        animated=True,
+                        className="mb-3",
+                    ),
+                ]),
+
+                html.Div(
+                    id=f"{prefix}-batch-results-container",
+                    children=[],
+                    style={"maxHeight": "300px", "overflowY": "auto"},
+                ),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button(
+                    "Cancel job",
+                    id=f"{prefix}-batch-progress-cancel-btn",
+                    color="danger",
+                    outline=True,
+                    disabled=True,
+                    className="me-2",
+                ),
+                dbc.Button(
+                    "Close",
+                    id=f"{prefix}-batch-progress-close-btn",
+                    color="secondary",
+                    disabled=True,
+                ),
+            ]),
+        ],
+        id=f"{prefix}-batch-progress-modal",
+        is_open=False,
+        backdrop="static",
+        centered=True,
+        size="lg",
+    )
+
+    return modal
+
+
+def create_batch_results_table(results: List[Dict]) -> dash_table.DataTable:
+    """
+    Create results table showing calibration outcomes.
+
+    Parameters
+    ----------
+    results : list of dict
+        List of calibration results with keys:
+        - expiry: expiry date
+        - status: 'success', 'skipped', or 'failed'
+        - old_rmse: previous RMSE
+        - new_rmse: new RMSE after calibration
+        - improvement: percentage improvement
+
+    Returns
+    -------
+    dash_table.DataTable
+        Results table
+    """
+    columns = [
+        {'id': 'expiry', 'name': 'Expiry'},
+        {'id': 'status', 'name': 'Status'},
+        {'id': 'old_rmse', 'name': 'Old RMSE'},
+        {'id': 'new_rmse', 'name': 'New RMSE'},
+        {'id': 'improvement', 'name': 'Improvement'},
+    ]
+    if any(row.get('basis') for row in results):
+        columns.insert(1, {'id': 'basis', 'name': 'Basis'})
+    hybrid_columns = [
+        ('core_tv_rmse', 'Core TV RMSE'),
+        ('tail_fit_tv_rmse', 'Wing Tail TV RMSE'),
+        ('iv_rmse', 'IV Diagnostic'),
+        ('blend_width', 'Blend Width'),
+        ('min_g', 'Min g'),
+        ('method', 'Method'),
+    ]
+    for column_id, label in hybrid_columns:
+        if any(column_id in row for row in results):
+            columns.append({'id': column_id, 'name': label})
+    if any(row.get('error') for row in results):
+        columns.append({'id': 'error', 'name': 'Failure reason'})
+    display_results = []
+    for row in results:
+        diagnostics = row.get('fit_diagnostics') or {}
+        display_results.append({
+            key: value for key, value in row.items()
+            if key not in {'fit_diagnostics', 'retry_diagnostics', 'optimizer_attempts'}
+        })
+        if diagnostics.get('recovered'):
+            display_results[-1]['recovery'] = (
+                f"Passed with {diagnostics['stages'][-1]['start_budget']} starts"
+            )
+    if any(row.get('recovery') for row in display_results):
+        columns.append({'id': 'recovery', 'name': 'Recovery'})
+
+    return dash_table.DataTable(
+        columns=columns,
+        data=display_results,
+        style_table={'overflowX': 'auto'},
+        style_header={
+            'backgroundColor': '#f8f9fa',
+            'fontWeight': 'bold',
+            'textAlign': 'center',
+            'padding': '8px',
+        },
+        style_cell={
+            'textAlign': 'center',
+            'padding': '6px',
+            'fontSize': '12px',
+        },
+        style_data_conditional=[
+            {
+                'if': {'filter_query': '{status} = "Success"'},
+                'backgroundColor': '#d4edda',
+                'color': '#155724',
+            },
+            {
+                'if': {'filter_query': '{status} = "Skipped"'},
+                'backgroundColor': '#fff3cd',
+                'color': '#856404',
+            },
+            {
+                'if': {'filter_query': '{status} = "Failed"'},
+                'backgroundColor': '#f8d7da',
+                'color': '#721c24',
+            },
+        ],
+    )
+
+
+def create_batch_summary(results: List[Dict]) -> html.Div:
+    """
+    Create summary of batch calibration results.
+
+    Parameters
+    ----------
+    results : list of dict
+        List of calibration results
+
+    Returns
+    -------
+    html.Div
+        Summary component
+    """
+    total = len(results)
+    success = sum(1 for r in results if r['status'] == 'Success')
+    skipped = sum(1 for r in results if r['status'] == 'Skipped')
+    failed = sum(1 for r in results if r['status'] == 'Failed')
+    observed = sum(
+        1 for row in results if str(row.get('basis', '')).lower() == 'observed'
+    )
+    extrapolated = sum(
+        1
+        for row in results
+        if str(row.get('basis', '')).lower() == 'extrapolated'
+    )
+
+    basis_badges = []
+    if observed or extrapolated:
+        basis_badges = [
+            dbc.Col([
+                dbc.Badge(
+                    f"{observed} Observed",
+                    color="primary",
+                    className="me-2",
+                ),
+            ], width="auto"),
+            dbc.Col([
+                dbc.Badge(
+                    f"{extrapolated} Extrapolated",
+                    color="secondary",
+                    className="me-2",
+                ),
+            ], width="auto"),
+        ]
+
+    return html.Div([
+        dbc.Row([
+            dbc.Col([
+                dbc.Badge([
+                    html.I(className="fas fa-check me-1"),
+                    f"{success} Success"
+                ], color="success", className="me-2"),
+            ], width="auto"),
+            dbc.Col([
+                dbc.Badge([
+                    html.I(className="fas fa-forward me-1"),
+                    f"{skipped} Skipped"
+                ], color="warning", className="me-2"),
+            ], width="auto"),
+            dbc.Col([
+                dbc.Badge([
+                    html.I(className="fas fa-times me-1"),
+                    f"{failed} Failed"
+                ], color="danger", className="me-2"),
+            ], width="auto"),
+            dbc.Col([
+                html.Span(f"Total: {total}", className="text-muted"),
+            ], width="auto"),
+            *basis_badges,
+        ], className="mb-3 justify-content-center"),
+    ])

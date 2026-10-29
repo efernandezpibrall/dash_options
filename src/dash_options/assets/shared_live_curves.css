@@ -1,0 +1,17 @@
+/* Source state remains visible in the compact trading ticket. */
+.pricer-page .pricer-curve-revision { display: none !important; }
+.pricer-forward-source {
+    color: #475569;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    flex: 1 0 100%;
+    grid-column: 1 / -1;
+    order: 10;
+}
+.pricer-structure-header-controls:has(.pricer-forward-source) { flex-wrap: wrap; }
+.pricer-page .pricer-structure-header-controls .pricer-forward-basis-field {
+    flex: 0 0 150px;
+    min-width: 150px;
+}

@@ -1,0 +1,12 @@
+/* Keep both dense matrices readable; collapse when two 780px panels cannot fit. */
+.volatility-surface-page .volatility-surface-table-stack {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 780px), 1fr));
+    align-items: start;
+    gap: 14px;
+}
+
+.volatility-surface-page .volatility-surface-table-stack > * {
+    min-width: 0;
+    max-width: 100%;
+}
