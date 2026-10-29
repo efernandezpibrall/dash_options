@@ -313,6 +313,10 @@ def build_layout(ice_quotes_layout):
                     html.Div(id="vol-trades-provenance", hidden=True),
                     dcc.Loading(
                         type="circle",
+                        # Background quote/window patches must not hide the grid.
+                        target_components={"brent-vol-history-plots": "children"},
+                        overlay_style={"visibility": "visible"},
+                        delay_show=300,
                         children=html.Div(
                             [
                                 html.Div(id="brent-vol-history-plots", style={"display": "contents"}),

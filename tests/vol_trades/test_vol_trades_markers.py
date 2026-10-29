@@ -1,6 +1,11 @@
+import copy
+import json
+
 import pandas as pd
-from dash import dcc, html
+import pytest
+from dash import dcc, html, no_update
 import plotly.graph_objects as go
+from plotly.utils import PlotlyJSONEncoder
 
 from dash_options.features.vol_trades import page as history
 from dash_options.features.vol_trades.market_window import history_identity
@@ -81,6 +86,45 @@ def test_market_window_patch_keeps_the_full_snapshot_volume_scale(monkeypatch):
     full = trade_tape.trade_trace_payloads(frame, pd.Timestamp("2027-01-01"), "strike")
     assert styles[("data", 0, "marker", "opacity")] == [full["C"]["opacity"][1]]
     assert styles[("data", 1, "marker", "opacity")] == []
+
+
+@pytest.mark.parametrize("missing_size", [False, True])
+def test_clock_only_poll_preserves_figures_but_moving_window_updates_trades(monkeypatch, missing_size):
+    frame = tape()
+    if missing_size:
+        frame.loc[0, "trade_size"] = float("nan")
+    monkeypatch.setattr(history.market_data, "load_trade_tape", lambda *a, **k: frame)
+    snapshot = dict(product="TFO", snapshot_id="pinned", snapshot_kind="INTRADAY",
+                    business_date="2026-10-02", display_expiries=["2027-01-01"])
+    window = dict(history_key=history_identity(snapshot), product="TFO",
+                  start_at="2026-10-02T08:00:00Z", cutoff_at="2026-10-02T11:00:00Z")
+    figure = dict(layout=dict(meta=dict(expiry="2027-01-01"), uirevision="pinned"), data=[
+        dict(meta=dict(role="trade-tape", put_call="C"), visible=False),
+        dict(meta=dict(role="trade-tape", put_call="P"), visible=True),
+        dict(name="Calibrated", x=[75], y=[65]),
+    ])
+    initial, _ = history.update_trade_window(window, None, snapshot, [figure], "strike", 1)
+    for op in initial[0].to_plotly_json()["operations"]:
+        target = figure
+        for key in op["location"][:-1]:
+            target = target.setdefault(key, {}) if isinstance(target, dict) else target[key]
+        target[op["location"][-1]] = op["params"]["value"]
+    # Figure State comes back through JSON, so missing numbers become null.
+    figure = json.loads(json.dumps(figure, cls=PlotlyJSONEncoder))
+    before = copy.deepcopy(figure)
+    clock_only = dict(window, cutoff_at="2026-10-02T11:00:10Z")
+    unchanged, _ = history.update_trade_window(clock_only, None, snapshot, [figure], "strike", 1)
+    assert unchanged == [no_update]
+    assert figure == before
+
+    moving = dict(clock_only, start_at="2026-10-02T09:30:10Z")
+    updated, _ = history.update_trade_window(moving, None, snapshot, [figure], "strike", 1)
+    operations = updated[0].to_plotly_json()["operations"]
+    values = {tuple(op["location"]): op["params"]["value"] for op in operations}
+    assert values[("data", 0, "x")] == [75.0]
+    assert values[("data", 1, "x")] == []
+    assert all(op["location"][:2] in (["data", 0], ["data", 1]) for op in operations)
+    assert all("visible" not in op["location"] for op in operations)
 
 
 def test_ice_expiry_opacity_is_independent_of_size_and_age():

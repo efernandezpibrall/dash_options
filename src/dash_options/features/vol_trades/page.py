@@ -20,6 +20,7 @@ from typing import Any
 
 import dash_bootstrap_components as dbc
 import pandas as pd
+from plotly.utils import PlotlyJSONEncoder
 from dash import (
     ALL,
     Input,
@@ -1773,21 +1774,36 @@ def update_trade_window(market_window, detail_expiry, snapshot_reference, figure
                 filtered, pd.Timestamp(expiry_value), chart_data._normalize_x_axis(x_axis),
                 volume_reference=tape,
             )
+            # Match the browser's JSON representation, including NaN -> null.
+            payloads = json.loads(json.dumps(payloads, cls=PlotlyJSONEncoder))
             patch = Patch()
+            changed = False
             for index, trace in enumerate(figure.get("data") or []):
                 meta = trace.get("meta") if isinstance(trace, dict) else None
                 if not isinstance(meta, dict) or meta.get("role") != "trade-tape":
                     continue
                 payload = payloads[str(meta["put_call"])]
-                patch["data"][index]["x"] = payload["x"]
-                patch["data"][index]["y"] = payload["y"]
-                patch["data"][index]["customdata"] = payload["customdata"]
-                patch["data"][index]["marker"]["size"] = payload["size"]
-                patch["data"][index]["marker"]["symbol"] = payload["symbol"]
-                patch["data"][index]["marker"]["opacity"] = payload["opacity"]
-                patch["data"][index]["marker"]["line"]["color"] = payload["line_color"]
-                patch["data"][index]["marker"]["line"]["width"] = payload["line_width"]
-            figure_updates.append(patch)
+                for path, value in (
+                    (("x",), payload["x"]),
+                    (("y",), payload["y"]),
+                    (("customdata",), payload["customdata"]),
+                    (("marker", "size"), payload["size"]),
+                    (("marker", "symbol"), payload["symbol"]),
+                    (("marker", "opacity"), payload["opacity"]),
+                    (("marker", "line", "color"), payload["line_color"]),
+                    (("marker", "line", "width"), payload["line_width"]),
+                ):
+                    current = trace
+                    for key in path:
+                        current = current.get(key) if isinstance(current, dict) else None
+                    if current == value:
+                        continue
+                    target = patch["data"][index]
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = value
+                    changed = True
+            figure_updates.append(patch if changed else no_update)
         rows = tape_views._trade_tape_rows(filtered, detail_expiry, 0)
         return (
             figure_updates,
