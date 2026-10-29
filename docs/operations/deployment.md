@@ -64,6 +64,16 @@ a disposable database; an offline `--sql` export cannot establish that their
 guards pass. Preserve old revisions and their SQL resources. Enable writes only
 after the corresponding schema, source calendars, identity and role checks pass.
 
+An applied revision is still required history: Alembic and readiness checks load
+the full ancestry, and fresh installations execute it. The 27 revisions and
+three SQL resources are all referenced; none becomes removable merely because
+production reached `20261029_03`. Only generated migration caches can be removed
+without replacing and validating the migration baseline. Keep optional writer
+imports inside migration execution so older readers can inspect the graph.
+
+The [29 October schema application record](../releases/2026/2026-10-29-schema-convergence.md)
+documents the applied head and compatible runtime/rollback artifacts.
+
 From the source checkout, run `python -m pytest`. Persistence tests use owned temporary PostgreSQL clusters; install `initdb` and `pg_ctl` for that coverage. Run the analytics boundary verifier against source and staged application paths. The paired release verifier recognizes both the old `integration/` and new `scripts/verification/` resource layouts.
 
 Before a production cutover, verify the exact installed artifact, numerical/readback parity, selected-product browser interactions and exports, worker ownership and rollback. Tests of this reorganization do not constitute production activation.

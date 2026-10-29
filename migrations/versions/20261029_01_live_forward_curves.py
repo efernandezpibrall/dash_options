@@ -1,6 +1,5 @@
 """Immutable Live Prices revisions and manual desk activation audit."""
 from alembic import op
-from options.live_forward_curves import curve_tables
 
 revision = "20261029_01"
 down_revision = "20261028_01"
@@ -9,6 +8,10 @@ depends_on = None
 
 
 def upgrade():
+    # Older readers must be able to inspect the graph without installing the
+    # newer curve writer. Only migration execution needs its table definitions.
+    from options.live_forward_curves import curve_tables
+
     op.execute("SET LOCAL lock_timeout='5s'")
     op.execute("SET LOCAL statement_timeout='30s'")
     metadata, *_ = curve_tables("at_lng")

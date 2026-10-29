@@ -6,6 +6,8 @@ Every Dashboard revision runs through migrations/env.py without exclusions.
 
 from itertools import combinations, permutations
 from pathlib import Path
+import subprocess
+import sys
 
 from alembic import command
 from alembic.config import Config
@@ -22,6 +24,23 @@ from scripts.verification.verify_settlement_pipeline import prepare_external_cal
 ROOT = Path(__file__).resolve().parents[2]
 OLD_HEADS = ("20261021_01", "20261029_01", "20261029_02")
 MERGED_HEAD = "20261029_03"
+
+
+def test_readiness_graph_loads_without_live_forward_curve_writer():
+    # The deployed reader's older analytics wheel does not ship this module.
+    # Use a fresh interpreter so another test cannot satisfy it from sys.modules.
+    probe = """
+import sys
+class MissingCurveWriter:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in ('options.live_forward_curves', 'options.market_data.live_forward_curves'):
+            raise ModuleNotFoundError(fullname)
+sys.meta_path.insert(0, MissingCurveWriter())
+from dash_options.core.health import _migration_lineage_contains
+assert _migration_lineage_contains('20261029_03', '20261021_01')
+assert _migration_lineage_contains('20261029_03', '20261023_01')
+"""
+    subprocess.run([sys.executable, "-c", probe], cwd=ROOT, check=True, timeout=30)
 
 
 @pytest.fixture
