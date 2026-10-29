@@ -5,7 +5,7 @@ import pytest
 
 import dash_options.features.pricer.structures as structure_module
 
-from options.options_library import (
+from options.pricing.options_library import (
     american_on_futures_equity_style,
     asian_76,
     black_76,
@@ -13,8 +13,8 @@ from options.options_library import (
     kirk_model_with_substitution,
     kirk_spread_greeks,
 )
-from options.option_contract_conventions import FlatDiscountCurve
-from options.option_expiry_engine import (
+from options.contracts.option_contract_conventions import FlatDiscountCurve
+from options.contracts.option_expiry_engine import (
     PLATTS_ASIA_LNG_PUBLICATION,
     PLATTS_ASIA_LNG_PUBLICATION_VERSION,
     business_days_between,

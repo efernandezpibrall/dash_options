@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import math
 import pandas as pd
 
-from options.ice_quote_interpretation import assessment_summary
+from options.quotes.ice_quote_interpretation import assessment_summary
 
 
 def number(value):

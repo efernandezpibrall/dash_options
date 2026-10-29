@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import text
 
 import dash_options.core.config as runtime_config
-from options.connection_pool import database_pool_snapshot
+from options.market_data.connection_pool import database_pool_snapshot
 from options.vol_calibration.io.database import postgres_engine
 
 

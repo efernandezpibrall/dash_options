@@ -1,7 +1,7 @@
 """Shared market workspaces render frozen rows without changing their values."""
 from copy import deepcopy
 
-from options.ttf_live_curve import month_add
+from options.market_data.ttf_live_curve import month_add
 from dash_options.features.live_prices import page
 
 
@@ -83,7 +83,7 @@ def test_direct_updates_match_full_render_and_keep_static_columns(monkeypatch):
     new['products']['HH'][1]['mid'] = None
     new['warnings'] = ['Updated source notice']
     from dash import no_update
-    from options.live_prices import METHODOLOGY_VERSION
+    from options.market_data.live_prices import METHODOLOGY_VERSION
     old['methodology_version'] = new['methodology_version'] = METHODOLOGY_VERSION
     _, values = page.render_parts(new)
     kinds = ('live-prices-grid-values', 'live-prices-curve-values', 'live-prices-section-values')

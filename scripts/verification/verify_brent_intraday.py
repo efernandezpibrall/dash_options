@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 from scripts.verification.verify_settlement_pipeline import temporary_postgres, apply_migrations
 from options.vol_calibration import api
-from options.brent_quote_valuation import BrentOptionSpec, load_brent_market_snapshot, QuotePrices, value_brent_quote
+from options.quotes.brent_quote_valuation import BrentOptionSpec, load_brent_market_snapshot, QuotePrices, value_brent_quote
 from dash_options.features.pricer.surface_reference import load_published_surface_slice
 from dash_options.features.vol_trades.data import load_latest_calibrated_surface
 
@@ -96,7 +96,7 @@ def verify(engine, inputs, ice_python=None):
         program = '''import json,sys
 import pandas as pd
 from sqlalchemy import create_engine
-from options.brent_quote_valuation import BrentOptionSpec,load_brent_market_snapshot
+from options.quotes.brent_quote_valuation import BrentOptionSpec,load_brent_market_snapshot
 v=json.load(sys.stdin)
 e=create_engine(v['url'],connect_args={'options':'-c default_transaction_read_only=on'})
 result={m:load_brent_market_snapshot(e,BrentOptionSpec(pd.Timestamp(m).date(),'C',100.,pd.Timestamp.now(tz='UTC').to_pydatetime())).surface_publication_id for m in v['months']}

@@ -6,11 +6,11 @@ from uuid import uuid4
 import numpy as np
 import pandas as pd
 import pytest
-from options.options_library import asian_76, black_76_futures_style
-from options.ttf_volatility import black76_call_delta, delta_node_to_strike
+from options.pricing.options_library import asian_76, black_76_futures_style
+from options.vol_calibration.products.ttf_market import black76_call_delta, delta_node_to_strike
 
 import dash_options.features.pricer.surface_reference as surface_reference
-from options.brent_quote_valuation import (
+from options.quotes.brent_quote_valuation import (
     BrentOptionSpec, QuotePrices, build_published_brent_market_snapshot, value_brent_quote,
 )
 from dash_options.features.pricer.exchange_registry import exchange_option_mapping

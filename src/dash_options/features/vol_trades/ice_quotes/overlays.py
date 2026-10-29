@@ -10,7 +10,7 @@ from dash_options.features.vol_trades.market_window import filter_event_window
 
 def quarter_season_identity(row):
     """Use explicit ICE delivery months; a label alone is insufficient coverage."""
-    from options.ttf_strip_charts import strip_period
+    from options.quotes.ttf_strip_charts import strip_period
 
     months = row.get("strip_months") or []
     try:

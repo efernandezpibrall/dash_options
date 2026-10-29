@@ -5,9 +5,9 @@ import pandas as pd
 import pytest
 from dash import dcc
 
-from options.option_expiry_engine import calculate_option_expiry
-from options.options_library import black_76_futures_style
-from options.ttf_volatility import year_fraction
+from options.contracts.option_expiry_engine import calculate_option_expiry
+from options.pricing.options_library import black_76_futures_style
+from options.vol_calibration.products.ttf_market import year_fraction
 from dash_options.features.vol_trades.market_window import history_identity
 from dash_options.features.vol_trades.ice_quotes.overlays import prepare_strip_events
 from dash_options.features.vol_trades.strip_charts import render_strip_charts
@@ -155,7 +155,7 @@ def test_sql_loader_preserves_reference_context_for_q1_chart(blank_database, smo
     from sqlalchemy import Uuid, text
     from uuid import UUID
 
-    from options.ttf_strip_charts import build_strip_snapshot
+    from options.quotes.ttf_strip_charts import build_strip_snapshot
     from options.vol_calibration.models.smooth_call_spline import fit_smooth_call_spline
     from dash_options.features.vol_trades.data import _read_calibrated_surface_points
 

@@ -10,7 +10,7 @@ import pytest
 from dash import no_update
 from dash_options.core.snapshots import SnapshotStore
 from options.vol_calibration.products import hh_market
-from options import surface_expiry_metadata
+from options.market_data import surface_expiry_metadata
 from dash_options.calibration import auth as calibration_auth
 from dash_options.calibration.workspaces import hh as page
 

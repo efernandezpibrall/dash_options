@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 import dash_options.features.vol_surface.realized_comparison as realized_comparison_data
-from options.realized_comparison import CALENDARS, comparison_calendar
+from options.market_data.realized_comparison import CALENDARS, comparison_calendar
 
 ARCHIVE = PACKAGE_ROOT / 'resources' / 'volatility_history_archive'
 PRICE_UNITS = {'Brent':'USD/bbl','HH':'USD/MMBtu','JKM':'USD/MMBtu',

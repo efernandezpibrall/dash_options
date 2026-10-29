@@ -17,7 +17,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import text
 
-from options.ice_quote_interpretation import interpret_quote_record
+from options.quotes.ice_quote_interpretation import interpret_quote_record
 from dash_options.features.vol_trades.ice_quotes.projection import enrich_rows
 
 from dash_options.core.config import get_database_engine

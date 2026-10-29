@@ -15,8 +15,8 @@ from options.vol_calibration.api import (
     DISPLAY_MONEYNESS_BAND,
     MIN_OPEN_INTEREST,
 )
-from options.brent_single_surface import BRENT_SINGLE_SURFACE_POLICY_VERSION
-from options.hh_single_surface import HH_SINGLE_SURFACE_POLICY_VERSION
+from options.vol_calibration.api import BRENT_SINGLE_SURFACE_POLICY_VERSION
+from options.vol_calibration.api import HH_SINGLE_SURFACE_POLICY_VERSION
 import dash_options.features.vol_trades.data as market_data
 
 X_AXIS_STRIKE = "strike"

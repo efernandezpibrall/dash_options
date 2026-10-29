@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from options.option_contract_conventions import get_contract_convention
+from options.contracts.option_contract_conventions import get_contract_convention
 
 
 USER_INPUT_FORWARD_SOURCE = "USER_INPUT"

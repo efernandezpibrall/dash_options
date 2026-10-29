@@ -10,7 +10,7 @@ from options.vol_calibration.publication import service as publication_service, 
 from options.vol_calibration.calibration import ttf_candidates
 from dash_options.calibration import publication as publication_data
 from dash_options.calibration.adapters import ttf_batch
-from options.ttf_volatility import STANDARD_CALL_DELTAS, delta_node_to_strike
+from options.vol_calibration.products.ttf_market import STANDARD_CALL_DELTAS, delta_node_to_strike
 from dash_options.calibration.auth import Identity, Role
 from options.vol_calibration.adjustments.ttf import apply_ttf_smile_adjustments
 from options.vol_calibration.models.gas_hybrid import build_ttf_pchip_core

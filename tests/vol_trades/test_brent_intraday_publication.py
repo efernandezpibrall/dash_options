@@ -9,8 +9,8 @@ from options.vol_calibration import api
 from options.vol_calibration.intraday_brent import POLICY, VERSION
 from options.vol_calibration.products.brent import calibrate_brent_single_surface
 from options.vol_calibration.config.brent_sources import PRICING_MODEL, PRICING_MODEL_VERSION
-from options.option_expiry_engine import calculate_option_expiry
-from options.options_library import american_on_futures_futures_style_price
+from options.contracts.option_expiry_engine import calculate_option_expiry
+from options.pricing.options_library import american_on_futures_futures_style_price
 
 
 def fixture_inputs():
@@ -131,7 +131,7 @@ def test_full_workflow_separate_settlement_retention_and_all_readers(database, i
         pd.testing.assert_frame_equal(before, after, check_exact=True)
     from dash_options.features.pricer.surface_reference import load_published_surface_slice
     from dash_options.features.vol_trades.data import load_latest_calibrated_surface
-    from options.brent_quote_valuation import load_brent_market_snapshot, BrentOptionSpec
+    from options.quotes.brent_quote_valuation import load_brent_market_snapshot, BrentOptionSpec
     month = draft["months"][0]
     assert load_published_surface_slice("BRENT", day, [month], engine=database)["publication_id"] == receipt["publication_id"]
     chart = load_latest_calibrated_surface(day, [month], engine=database, product="BRENT", intraday=True)
@@ -194,7 +194,7 @@ def test_competing_publishers_and_reader_rollback(database, inputs, monkeypatch)
     monkeypatch.setenv("OPTIONS_BRENT_INTRADAY_READS_ENABLED", "0")
     assert api.resolve_brent_intraday_publication(database, day) is None
     from dash_options.features.pricer.surface_reference import load_published_surface_slice
-    from options.brent_quote_valuation import resolve_brent_surface_publication
+    from options.quotes.brent_quote_valuation import resolve_brent_surface_publication
     assert load_published_surface_slice("BRENT", day, first["months"], engine=database)["publication_id"] == base["publication_id"]
     assert str(resolve_brent_surface_publication(database, pd.Timestamp.now(tz="UTC").to_pydatetime())["publication_id"]) == base["publication_id"]
     with pytest.raises(ValueError, match="disabled"):

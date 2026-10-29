@@ -21,8 +21,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 from scipy.optimize import brentq
 
-from options import option_expiry_engine as expiry_engine_module
-from options.options_library import (
+from options.contracts import option_expiry_engine as expiry_engine_module
+from options.pricing.options_library import (
     american_on_futures_equity_style,
     american_on_futures_equity_style_price,
     asian_76,
@@ -31,8 +31,8 @@ from options.options_library import (
     kirk_model_with_substitution,
     kirk_spread_greeks,
 )
-from options.option_contract_conventions import FlatDiscountCurve
-from options.option_expiry_engine import (
+from options.contracts.option_contract_conventions import FlatDiscountCurve
+from options.contracts.option_expiry_engine import (
     ASIAN_AVERAGING_CONTINUOUS_16_TO_EXPIRY,
     ASIAN_AVERAGING_PLATTS_PUBLICATION_DAYS,
     PLATTS_ASIA_LNG_PUBLICATION,

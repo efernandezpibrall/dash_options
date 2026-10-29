@@ -8,7 +8,7 @@ import dash_ag_grid as dag
 import plotly.graph_objects as go
 from dash import ALL, Input, Output, Patch, State, ctx, dcc, html, no_update
 from flask import request
-from options.live_prices import period_rows, METHODOLOGY_VERSION
+from options.market_data.live_prices import period_rows, METHODOLOGY_VERSION
 
 from dash_options.bootstrap import app
 import dash_options.features.live_prices.service as data

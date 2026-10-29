@@ -9,8 +9,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import dcc, html
 
-from options.ttf_strip_charts import project_strip_quotes
-from options.ttf_strip_settlements import project_strip_settlements
+from options.quotes.ttf_strip_charts import project_strip_quotes
+from options.quotes.ttf_strip_settlements import project_strip_settlements
 from dash_options.features.vol_trades.ice_quotes.overlays import prepare_strip_events
 from dash_options.features.vol_trades.ice_quotes.ranges import empty_range_trace, quote_age_label, range_visible
 from dash_options.features.vol_trades.market_window import history_identity, utc_timestamp

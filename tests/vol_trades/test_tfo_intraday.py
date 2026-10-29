@@ -1,9 +1,9 @@
 import numpy as np,pandas as pd
 from options.vol_calibration import api
-from options.ttf_volatility import STANDARD_CALL_DELTAS,delta_node_to_strike
+from options.vol_calibration.products.ttf_market import STANDARD_CALL_DELTAS,delta_node_to_strike
 from options.vol_calibration.intraday_tfo import price,identity,POLICY,VERSION
 from uuid import uuid4
-from options.option_expiry_engine import calculate_option_expiry
+from options.contracts.option_expiry_engine import calculate_option_expiry
 
 def fixture(month_offset=2, *, base_vol=.55, market_vol=.57, curvature_pp=2.):
     now=pd.Timestamp.now(tz='UTC'); day=now.tz_convert('Asia/Dubai').normalize().tz_localize(None)
@@ -67,7 +67,7 @@ def publish_base(engine,inputs):
 
 
 def test_partial_intraday_proposal_preserves_base_months_in_quarter_chart(database):
-    from options.ttf_strip_charts import project_strip_quotes
+    from options.quotes.ttf_strip_charts import project_strip_quotes
     day = pd.Timestamp.now(tz="Asia/Dubai").tz_localize(None)
     first = (day.to_period("Q") + 1).start_time
     offset = (first.year-day.year)*12 + first.month-day.month
@@ -189,7 +189,7 @@ def test_real_source_loader_and_ice_reader_share_the_published_revision(database
     candidate=api.fit_tfo_intraday(loaded)
     draft=api.save_tfo_intraday_draft(engine,candidate,[candidate['summaries'][0]['month']],actor='alice')
     receipt=api.publish_tfo_intraday_draft(engine,draft['draft_id'],actor='alice')
-    from options.ttf_quote_valuation import load_ttf_market_snapshot,TTFOptionSpec
+    from options.quotes.ttf_quote_valuation import load_ttf_market_snapshot,TTFOptionSpec
     market=load_ttf_market_snapshot(engine,TTFOptionSpec(pd.Timestamp(candidate['summaries'][0]['month']).date(),'C',80.,pd.Timestamp.now(tz='UTC').to_pydatetime()))
     assert market.surface_publication_id==receipt['publication_id']
     assert market.forward==80.

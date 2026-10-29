@@ -5,8 +5,8 @@ import json
 import pytest
 
 import dash_options.features.live_prices.service as data
-from options.ttf_live_curve import build_ttf_curve, month_add
-from options.live_prices import METHODOLOGY_VERSION, period_rows
+from options.market_data.ttf_live_curve import build_ttf_curve, month_add
+from options.market_data.live_prices import METHODOLOGY_VERSION, period_rows
 from dash_options.core.snapshots import SnapshotStore, SnapshotReferenceError
 
 

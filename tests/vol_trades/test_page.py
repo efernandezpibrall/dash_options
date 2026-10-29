@@ -15,7 +15,7 @@ from dash_options.features.vol_trades import (
     overlays,
     trade_tape as tape_views,
 )
-from options.hh_single_surface import HH_SINGLE_SURFACE_POLICY_VERSION
+from options.vol_calibration.products.hh import HH_SINGLE_SURFACE_POLICY_VERSION
 from dash_options.features.vol_trades import page as history
 import dash_options.features.vol_trades.data as market_data
 

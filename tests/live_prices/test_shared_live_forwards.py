@@ -6,11 +6,11 @@ import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 
-from options.live_forward_curves import LiveForwardCurveRepository, reanchor_surface
+from options.market_data.live_forward_curves import LiveForwardCurveRepository, reanchor_surface
 from options.tests.test_live_forward_curves import complete_view, NOW
-from options.ttf_quote_valuation import TTFMarketSnapshot, TTFOptionSpec, value_ttf_quote
-from options.brent_quote_valuation import QuotePrices
-from options.ttf_volatility import black76_call_delta
+from options.quotes.ttf_quote_valuation import TTFMarketSnapshot, TTFOptionSpec, value_ttf_quote
+from options.quotes.brent_quote_valuation import QuotePrices
+from options.vol_calibration.products.ttf_market import black76_call_delta
 import dash_options.shared.live_forwards as desk
 from dash_options.features.pricer.structures import (
     calculate_structure,

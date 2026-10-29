@@ -217,7 +217,8 @@ def test_calendar_waiting_deadline_alert_and_immutable_import(database, enabled,
 
 
 def test_real_brent_source_loader_pins_quotes_forwards_calendar_and_rejects_correction(database, monkeypatch):
-    from options import option_expiry_engine, options_library
+    from options.contracts import option_expiry_engine
+    from options.pricing import options_library
     from options.vol_calibration.models.svi_numeric import SVIParams
     from options.vol_calibration.config.brent_sources import PRICING_MODEL, PRICING_MODEL_VERSION
     import json

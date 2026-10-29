@@ -1377,7 +1377,7 @@ def render_history(
             if selected_date == pd.Timestamp.now(tz=MARKET_TIMEZONE).date().isoformat():
                 try:
                     import dash_options.shared.live_forwards as desk
-                    from options.live_forward_curves import reanchor_surface
+                    from options.market_data.live_forward_curves import reanchor_surface
                     calibrated = desk.live_surface(product, display_expiries, selected_date)
                     calibrated = reanchor_surface(calibrated, desk.resolve(_live_curve['revision']), product,
                                                   pinned=_live_curve.get('mode') == 'pinned')

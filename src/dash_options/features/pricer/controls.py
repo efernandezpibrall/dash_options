@@ -739,7 +739,7 @@ def _build_context_form(
         fields.append(surface_proxy_note_component)
     if model in SINGLE_ASSET_MODELS and asset.upper() in {'BRENT', 'HH', 'TTF'}:
         import dash_options.shared.live_forwards as desk
-        from options.live_forward_curves import supports_mapping
+        from options.market_data.live_forward_curves import supports_mapping
         supported = supports_mapping(asset, mapping_id)
         available = desk.enabled() and supported
         mode = defaults.get('curve_mode', 'desk' if available else 'manual')

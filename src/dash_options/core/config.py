@@ -6,7 +6,7 @@ import configparser
 import os
 from functools import lru_cache
 
-from options.connection_pool import get_shared_database_engine, reset_database_pools
+from options.market_data.connection_pool import get_shared_database_engine, reset_database_pools
 
 
 from dash_options.core.paths import config_candidates as _config_candidates

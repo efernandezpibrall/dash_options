@@ -6,7 +6,7 @@ from dash_options.features.vol_trades.ice_quotes.tape_components import (
     QUOTE_COLUMN_DEFS,
     quote_details as quote_details,
 )
-from options.ice_quote_interpretation import assessment_summary
+from options.quotes.ice_quote_interpretation import assessment_summary
 
 import dash_ag_grid as dag
 import pandas as pd

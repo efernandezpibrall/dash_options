@@ -14,7 +14,7 @@ from sqlalchemy import text
 
 from dash_options.core.database_reads import DB_SCHEMA, fq_table
 from dash_options.core.config import get_database_engine
-from options.options_library import kirk_model_with_substitution, kirk_spread_greeks
+from options.pricing.options_library import kirk_model_with_substitution, kirk_spread_greeks
 
 
 VALUATION_COLUMNS = [

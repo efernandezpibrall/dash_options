@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import dash_options.features.vol_trades.data as market_data
-from options.trade_marker_opacity import trade_volume_opacities
+from options.quotes.trade_marker_opacity import trade_volume_opacities
 
 
 _TRADE_TYPE_LABELS = {

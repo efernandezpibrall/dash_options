@@ -309,7 +309,7 @@ def test_graph_loads_without_mutable_analytics_metadata():
 import sys
 class NoMutableAnalytics:
     def find_spec(self, fullname, path=None, target=None):
-        if fullname in ('options.live_forward_curves', 'options.market_data.live_forward_curves'):
+        if fullname in ('options.market_data.live_forward_curves', 'options.market_data.live_forward_curves'):
             raise ModuleNotFoundError(fullname)
 sys.meta_path.insert(0, NoMutableAnalytics())
 from dash_options.core.health import _migration_lineage_contains
