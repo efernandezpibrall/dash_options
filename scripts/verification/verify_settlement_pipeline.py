@@ -63,26 +63,31 @@ def prepare_external_calibration_fixture(connection):
 
 
 def apply_migrations(engine):
-    migrations = ("20260727_01", "20260803_01", "20260806_01", "20260831_03", "20260902_02",
-                  "20260928_01", "20260929_01", "20260929_02", "20260929_03", "20260930_01", "20261005_01", "20261005_02", "20261009_01", "20261009_02", "20261012_01", "20261021_01", "20261023_01", "20261028_01", "20261029_01", "20261029_02")
+    """Follow Alembic's graph, excluding only external trade-schema revisions.
+
+    The separate migration upgrade tests exercise every revision through the
+    real Alembic environment, including those external-schema prerequisites.
+    """
     config = Config()
     config.set_main_option("script_location", str(ROOT / "migrations"))
-    heads = set(ScriptDirectory.from_config(config).get_heads())
-    if not heads <= set(migrations):
-        raise ValueError("Calibration fixture is missing application migration heads: " + ", ".join(sorted(heads - set(migrations))))
+    script = ScriptDirectory.from_config(config)
+    excluded = {"20260831_02", "20260831_04", "20260902_01"}
+    migrations = [revision for revision in reversed(list(
+        script.iterate_revisions("heads", "base", implicit_base=True)
+    )) if revision.revision not in excluded]
     with engine.begin() as connection:
-        for prefix in migrations:
+        for revision in migrations:
+            prefix = revision.revision
             if prefix == "20261005_01":
                 connection.execute(text("GRANT SELECT ON at_lng.ttf_vol_surface_publication_current TO PUBLIC"))
                 connection.execute(text("COMMENT ON VIEW at_lng.ttf_vol_surface_publication_current IS 'preserved integration comment'"))
             if prefix == "20261028_01":
                 prepare_external_calibration_fixture(connection)
-            module = load(next((ROOT / "migrations/versions").glob(prefix + "*.py")))
             with Operations.context(MigrationContext.configure(connection)):
-                module.upgrade()
+                revision.module.upgrade()
         assert connection.execute(text("SELECT EXISTS(SELECT 1 FROM pg_class c,LATERAL aclexplode(c.relacl) acl WHERE c.oid='at_lng.ttf_vol_surface_publication_current'::regclass AND acl.grantee=0 AND acl.privilege_type='SELECT')")).scalar_one()
         assert connection.execute(text("SELECT obj_description('at_lng.ttf_vol_surface_publication_current'::regclass,'pg_class')")).scalar_one() == "preserved integration comment"
-    return list(migrations)
+    return [revision.revision for revision in migrations]
 
 
 @contextmanager

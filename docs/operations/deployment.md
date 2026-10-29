@@ -42,14 +42,27 @@ For direct loopback workstation use, `local_loopback` requires a named user and 
 
 ## Schema and verification
 
-The migration graph has multiple heads. Inspect and apply the complete additive graph from the paired artifact, using its configuration:
+The migration graph converges at `20261029_03`, following the former
+`20261021_01`, `20261029_01` and `20261029_02` heads. Inspect the graph from the
+paired artifact, using its configuration:
 
 ```sh
 python -m alembic -c /path/to/release/dashboard/alembic.ini heads
-python -m alembic -c /path/to/release/dashboard/alembic.ini upgrade heads --sql
+python -m alembic -c /path/to/release/dashboard/alembic.ini history
 ```
 
-Applying `upgrade heads` to a database is a separate operational action. Preserve old revisions and their SQL resources. Enable writes only after the corresponding schema, source calendars, identity and role checks pass.
+Applying `upgrade head` to a database is a separate operational action. The
+convergence migration repeats the existing guarded retirement after every
+history-creation branch has finished. It removes only empty obsolete tables;
+populated history still requires the verified archive/retirement procedure.
+Missing tables are accepted, unexpected dependencies prevent removal, and a
+failure rolls back table drops and the revision update together. Downgrade
+remains blocked pending verified archive restoration.
+
+These migrations inspect database contents and need an online rehearsal against
+a disposable database; an offline `--sql` export cannot establish that their
+guards pass. Preserve old revisions and their SQL resources. Enable writes only
+after the corresponding schema, source calendars, identity and role checks pass.
 
 From the source checkout, run `python -m pytest`. Persistence tests use owned temporary PostgreSQL clusters; install `initdb` and `pg_ctl` for that coverage. Run the analytics boundary verifier against source and staged application paths. The paired release verifier recognizes both the old `integration/` and new `scripts/verification/` resource layouts.
 
