@@ -9287,3 +9287,11 @@ button:hover {
 }
 
 .greeks-aspect-status-warning { background: #fff8e6; border-left: 4px solid #b7791f; color: #744210; }
+
+/* Aspect COB selection is independent of the saved-portfolio date filter. */
+.greeks-aspect-cob-modal .modal-body { min-height: 450px; }
+.greeks-aspect-cob-modal .greeks-aspect-cob-picker { display: block; margin-top: 8px; }
+.greeks-aspect-cob-modal .dash-datepicker-content { min-width: 330px; }
+.greeks-aspect-cob-modal .dash-datepicker-content .dash-input-container { min-width: 124px; }
+.greeks-aspect-cob-modal .modal-footer { gap: 8px; }
+.greeks-aspect-calendar-error { color: #9d2424; font-size: 13px; margin-top: 12px; }

@@ -42,8 +42,14 @@ refuses to collapse or discard history.
 
 ## Fetch and revalue
 
-Normal page loads and Refresh Options Data only read saved data. The Aspect COB/Live
-buttons fetch and save a new source snapshot, then value it. **Revalue saved positions**
+Normal page loads and Refresh Options Data only read saved data. The COB dropdown
+lists available saved dates. Clicking **COB** under Aspect actions opens a calendar;
+select a date (including a date not yet saved), then click **Run Aspect COB**.
+Future dates are rejected. Opening or cancelling the calendar does not fetch data.
+The existing portfolio stays visible while the job runs. A successful refresh adds
+and selects the returned COB; a failed refresh keeps the current selection and
+displays the error. **Live** fetches today's source positions directly.
+Both refresh actions save a new source snapshot, then value it. **Revalue saved positions**
 selects the latest received source for the selected COB/mode/scope and prices it
 without making an Aspect request. The selected source UUID is pinned in the job;
 subsequent fetches cannot change what that job prices. Revaluation requires database
@@ -51,7 +57,9 @@ and market-data access but no Aspect credentials.
 
 All three actions require the independent `ASPECT_PERSISTENCE_WRITES_ENABLED` flag
 and server-side `REFRESH_ASPECT` permission. Deployment keeps the flag false until
-separately enabled. Authentication modes and other product flags are unchanged.
+separately enabled. Set `ASPECT_PERSISTENCE_WRITES_ENABLED=true` in the dashboard
+launch environment to enable these actions, then restart the dashboard. The worker
+inherits this setting. Authentication modes and other product flags are unchanged.
 
 Jobs run in a separate installed Python process with a shared diskcache status store,
 two-job workstation limit, duplicate protection and a 15-minute deadline. SQL has
@@ -72,7 +80,11 @@ ASPECT_PERSISTENCE_WRITES_ENABLED=true python -m options.aspect --source-snapsho
 
 Configure `ASPECT_USERNAME`, `ASPECT_PASSWORD`, and optionally
 `ASPECT_POSITION_REPORT_URL`, `ASPECT_POSITION_REPORT_STRATEGIES`, and
-`ASPECT_POSITION_REPORT_BOOK`. `AD-LNG-Phy-OPT` remains mandatory in the configured
+`ASPECT_POSITION_REPORT_BOOK`. Alternatively, set `USERNAME` and `PASSWORD` in the
+`[ASPECT]` section of the file selected by `OPTIONS_CONFIG_PATH`. Keep
+`POSITION_REPORT_BOOK =` empty to request all books within the strategy scope.
+Missing credentials are reported before starting a fetch worker.
+`AD-LNG-Phy-OPT` remains mandatory in the configured
 scope. TLS verification defaults to enabled. Credentials and authentication headers
 are never persisted in request metadata. `pricingDate` is retained as an Aspect
 source field and is not assumed to mean report COB. Live source mode still uses the

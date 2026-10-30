@@ -6,11 +6,13 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from datetime import date, timedelta
 from functools import lru_cache
 from math import ceil
 
 import dash
 import dash_ag_grid as dag
+import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, clientside_callback, dcc, html
 import pandas as pd
 from sqlalchemy import text
@@ -2187,6 +2189,23 @@ layout = html.Div([
     dcc.Store(id='greeks-aspect-job-result', storage_type='memory'),
     dcc.Interval(id='greeks-aspect-job-poll', interval=2000, disabled=True),
     dcc.Download(id='download-greeks-monitor-workbook'),
+    dcc.Store(id='greeks-aspect-calendar-focus'),
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle('Aspect COB refresh')),
+        dbc.ModalBody([
+            html.P('Choose the COB date to fetch and value. Your current portfolio remains displayed while the refresh runs.'),
+            html.Label('COB date', htmlFor='greeks-aspect-cob-date', className='inline-filter-label'),
+            dcc.DatePickerSingle(id='greeks-aspect-cob-date', display_format='YYYY-MM-DD',
+                first_day_of_week=1, show_outside_days=True, stay_open_on_select=True,
+                clearable=False, className='greeks-aspect-cob-picker'),
+            html.Div(id='greeks-aspect-calendar-error',role='alert',className='greeks-aspect-calendar-error'),
+        ]),
+        dbc.ModalFooter([
+            html.Button('Cancel',id='greeks-aspect-cob-cancel',className='btn btn-secondary'),
+            html.Button('Run Aspect COB',id='greeks-aspect-cob-run',className='btn btn-primary'),
+        ]),
+    ],id='greeks-aspect-cob-modal',is_open=False,centered=True,zindex=2000,fade=False,
+       className='greeks-aspect-cob-modal'),
 
     html.Div([
         html.Div([
@@ -2326,7 +2345,7 @@ layout = html.Div([
                         id='greeks-aspect-settlement-btn',
                         disabled=not config_bool('ASPECT', 'PERSISTENCE_WRITES_ENABLED', fallback=False),
                         className='greeks-aspect-button greeks-aspect-button-secondary',
-                        title='Refresh and persist Aspect settlement positions; requires enabled writes and calibrator permission',
+                        title='Choose a date and refresh Aspect settlement positions',
                         **{'aria-label': 'Load Aspect COB'},
                     ),
                     html.Button(
@@ -2437,24 +2456,96 @@ def trigger_data_refresh(n_clicks):
     return dash.no_update
 
 
+def _aspect_today():
+    return pd.Timestamp.now(tz='Asia/Dubai').date()
+
+
+def _validate_aspect_cob(value):
+    try:
+        selected = date.fromisoformat(value)
+    except (TypeError,ValueError):
+        raise ValueError('Select a valid COB date.') from None
+    if selected > _aspect_today():
+        raise ValueError('The COB date cannot be in the future.')
+    return selected.isoformat()
+
+
+@callback(
+    Output('greeks-aspect-cob-modal','is_open'),
+    Output('greeks-aspect-cob-date','date'),
+    Output('greeks-aspect-cob-date','max_date_allowed'),
+    Output('greeks-aspect-cob-date','initial_visible_month'),
+    Output('greeks-aspect-calendar-error','children'),
+    Input('greeks-aspect-settlement-btn','n_clicks'),
+    Input('greeks-aspect-cob-cancel','n_clicks'),
+    Input('greeks-aspect-job-store','data'),
+    State('date-selector','value'), prevent_initial_call=True,
+)
+def aspect_cob_calendar(open_clicks,cancel_clicks,ticket,selected_date):
+    del open_clicks,cancel_clicks
+    trigger=dash.ctx.triggered_id
+    unchanged=(dash.no_update,)*3
+    if trigger=='greeks-aspect-settlement-btn':
+        today=_aspect_today()
+        selected=_format_cob_option(selected_date) or (today-timedelta(days=1)).isoformat()
+        selected=min(selected,today.isoformat())
+        return True,selected,today.isoformat(),selected,''
+    if trigger=='greeks-aspect-cob-cancel':
+        return False,*unchanged,''
+    if ticket and ticket.get('calendar_error'):
+        return True,*unchanged,ticket['error']
+    if ticket and ticket.get('job_id'):
+        return False,*unchanged,''
+    return dash.no_update,*unchanged,dash.no_update
+
+
+# DatePickerSingle has no public open property. Focus/click its visible date
+# control after the Bootstrap modal mounts, so the first click opens a calendar.
+clientside_callback(
+    """function(open) {
+        const ns=window.dash_clientside;
+        const sequence=(ns.aspectCalendarFocusSequence || 0)+1;
+        ns.aspectCalendarFocusSequence=sequence;
+        if (!open) return null;
+        let attempts=0;
+        function focusCalendar() {
+            if (ns.aspectCalendarFocusSequence!==sequence) return;
+            const root=document.getElementById('greeks-aspect-cob-date');
+            const input=root && (root.matches('input,button') ? root : root.querySelector('input,button'));
+            if (input && input.getBoundingClientRect().height>0) {
+                input.focus(); input.click();
+            } else if (++attempts<15) { setTimeout(focusCalendar,80); }
+        }
+        setTimeout(focusCalendar,250);
+        return sequence;
+    }""",
+    Output('greeks-aspect-calendar-focus','data'),
+    Input('greeks-aspect-cob-modal','is_open'),
+)
+
+
 @callback(
     Output('greeks-aspect-job-store', 'data'),
-    Input('greeks-aspect-settlement-btn', 'n_clicks'),
+    Input('greeks-aspect-cob-run', 'n_clicks'),
     Input('greeks-aspect-live-btn', 'n_clicks'),
     Input('greeks-aspect-revalue-btn', 'n_clicks'),
-    State('date-selector', 'value'), State('greeks-aspect-mode', 'value'), prevent_initial_call=True,
+    State('date-selector', 'value'), State('greeks-aspect-mode', 'value'), State('greeks-aspect-cob-date','date'), prevent_initial_call=True,
 )
-def submit_aspect_refresh(settlement_clicks, live_clicks, revalue_clicks, selected_date, selected_mode):
+def submit_aspect_refresh(settlement_clicks, live_clicks, revalue_clicks, selected_date, selected_mode, calendar_date):
     del settlement_clicks, live_clicks, revalue_clicks
+    calendar_request=dash.ctx.triggered_id=='greeks-aspect-cob-run'
     try:
         identity = current_request_identity()
         authorize(identity, Permission.REFRESH_ASPECT)
         if dash.ctx.triggered_id == 'greeks-aspect-revalue-btn':
             return aspect_jobs.submit(selected_mode,selected_date,identity.subject,action='revalue')
         mode = 'live' if dash.ctx.triggered_id == 'greeks-aspect-live-btn' else 'settlement'
+        if calendar_request:
+            selected_date=_validate_aspect_cob(calendar_date)
+        aspect_service.load_settings()  # Fail visibly before launching a worker if credentials are missing.
         return aspect_jobs.submit(mode, selected_date, identity.subject)
     except (AspectWorkflowError, AuthenticationError, AuthorizationError, ValueError) as exc:
-        return {'error':str(exc)}
+        return {'error':str(exc),'calendar_error':calendar_request}
 
 
 @callback(
@@ -2463,6 +2554,7 @@ def submit_aspect_refresh(settlement_clicks, live_clicks, revalue_clicks, select
     Output('greeks-aspect-settlement-btn', 'disabled'),
     Output('greeks-aspect-live-btn', 'disabled'),
     Output('greeks-aspect-revalue-btn', 'disabled'),
+    Output('greeks-aspect-cob-run','disabled'),
     Output('greeks-aspect-job-result', 'data'),
     Input('greeks-aspect-job-store', 'data'),
     Input('greeks-aspect-job-poll', 'n_intervals'),
@@ -2471,19 +2563,19 @@ def poll_aspect_refresh(ticket, interval):
     del interval
     disabled = not config_bool('ASPECT', 'PERSISTENCE_WRITES_ENABLED', fallback=False)
     if not ticket:
-        return '', True, disabled, disabled, disabled, dash.no_update
+        return '', True, disabled, disabled, disabled, disabled, dash.no_update
     try:
         authorize(current_request_identity(), Permission.REFRESH_ASPECT)
         if ticket.get('error'):
             raise ValueError(ticket['error'])
         state = aspect_jobs.poll(ticket)
         if state['status'] == 'failed':
-            return state['error'], True, disabled, disabled, disabled, state
+            return state['error'], True, disabled, disabled, disabled, disabled, state
         if state['status'] == 'complete':
-            return 'Aspect valuation completed.', True, disabled, disabled, disabled, state
-        return f"Aspect refresh: {state['phase']}… Previous snapshot remains displayed.", False, True, True, True, dash.no_update
+            return 'Aspect valuation completed.', True, disabled, disabled, disabled, disabled, state
+        return f"Aspect refresh: {state['phase']}… Previous snapshot remains displayed.", False, True, True, True, True, dash.no_update
     except (AuthenticationError, AuthorizationError, ValueError) as exc:
-        return str(exc), True, disabled, disabled, disabled, dash.no_update
+        return str(exc), True, disabled, disabled, disabled, disabled, dash.no_update
 
 
 @callback(
@@ -2496,8 +2588,7 @@ def load_aspect_exposure(selected_date, refresh_trigger=None, mode='settlement',
     if not selected_date:
         return _empty_aspect_store()
     try:
-        if dash.ctx.triggered_id == 'greeks-aspect-job-result' and job_result:
-            dash.set_props('date-selector', {'value':job_result['cob_date']})
+        if dash.ctx.triggered_id == 'greeks-aspect-job-result' and job_result and job_result.get('status')=='complete':
             dash.set_props('greeks-aspect-mode', {'value':job_result['mode']})
             selected_date, mode = job_result['cob_date'], job_result['mode']
         payload = _load_aspect_payload(selected_date, mode)
@@ -2521,6 +2612,8 @@ def update_date_options(refresh_trigger, selected_date, job_result=None):
     del refresh_trigger
     dates = get_available_dates()
     options = [{'label': date, 'value': date} for date in dates]
+    if dash.ctx.triggered_id=='greeks-aspect-job-result' and job_result and job_result.get('status')=='complete' and job_result.get('cob_date') in dates:
+        selected_date=job_result['cob_date']
     resolved_date = selected_date if selected_date in dates else (dates[0] if dates else None)
     return options, resolved_date
 

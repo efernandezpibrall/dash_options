@@ -879,3 +879,68 @@ def test_failed_newer_fetch_warning_does_not_mutate_published_payload():
     result=greeks._with_aspect_flow_status(payload,{'source_snapshot_id':'source-new','run':{'status':'failed'}})
     assert 'newer Aspect fetch' in result['meta']['warnings'][0]
     assert payload['meta']['warnings']==[]
+
+
+def test_calendar_open_and_cancel_do_not_submit_refresh(monkeypatch):
+    from types import SimpleNamespace
+    from datetime import date
+    monkeypatch.setattr(greeks,'_aspect_today',lambda:date(2026,10,30))
+    monkeypatch.setattr(greeks.aspect_jobs,'submit',lambda *a,**k:pytest.fail('Calendar navigation launched a job'))
+    monkeypatch.setattr(greeks.dash,'ctx',SimpleNamespace(triggered_id='greeks-aspect-settlement-btn'))
+    result=greeks.aspect_cob_calendar(1,None,None,'2026-10-29')
+    assert result==(True,'2026-10-29','2026-10-30','2026-10-29','')
+    monkeypatch.setattr(greeks.dash,'ctx',SimpleNamespace(triggered_id='greeks-aspect-cob-cancel'))
+    assert greeks.aspect_cob_calendar(1,1,None,'2026-10-29')[0] is False
+
+
+def _authorize_calendar(monkeypatch):
+    from types import SimpleNamespace
+    from datetime import date
+    from dash_options.calibration.auth import Identity,Role
+    monkeypatch.setattr(greeks.dash,'ctx',SimpleNamespace(triggered_id='greeks-aspect-cob-run'))
+    monkeypatch.setattr(greeks,'_aspect_today',lambda:date(2026,10,30))
+    monkeypatch.setattr(greeks,'current_request_identity',lambda:Identity('tester',frozenset({Role.CALIBRATOR}),True,'test'))
+
+
+def test_calendar_submission_uses_chosen_date_not_displayed_date(monkeypatch):
+    _authorize_calendar(monkeypatch)
+    monkeypatch.setattr(greeks.aspect_service,'load_settings',lambda:object())
+    calls=[]
+    monkeypatch.setattr(greeks.aspect_jobs,'submit',lambda *a,**k:calls.append((a,k)) or {'job_id':'job'})
+    result=greeks.submit_aspect_refresh(1,None,None,'2026-08-28','live','2026-10-29')
+    assert result=={'job_id':'job'}
+    assert calls==[(('settlement','2026-10-29','tester'),{})]
+
+
+@pytest.mark.parametrize('chosen',[None,'broken','2026-10-31'])
+def test_invalid_calendar_date_never_launches_job(monkeypatch,chosen):
+    _authorize_calendar(monkeypatch)
+    monkeypatch.setattr(greeks.aspect_jobs,'submit',lambda *a,**k:pytest.fail('Invalid date launched a job'))
+    result=greeks.submit_aspect_refresh(1,None,None,'2026-08-28','settlement',chosen)
+    assert result['calendar_error'] and result['error']
+
+
+def test_missing_credentials_stays_in_calendar_without_starting_worker(monkeypatch):
+    from options.aspect.errors import AspectConfigurationError
+    _authorize_calendar(monkeypatch)
+    def missing(): raise AspectConfigurationError('Aspect credentials are unavailable.')
+    monkeypatch.setattr(greeks.aspect_service,'load_settings',missing)
+    monkeypatch.setattr(greeks.aspect_jobs,'submit',lambda *a,**k:pytest.fail('Missing credentials launched a job'))
+    ticket=greeks.submit_aspect_refresh(1,None,None,'2026-08-28','settlement','2026-10-29')
+    assert ticket['calendar_error'] and 'credentials' in ticket['error']
+    from types import SimpleNamespace
+    monkeypatch.setattr(greeks.dash,'ctx',SimpleNamespace(triggered_id='greeks-aspect-job-store'))
+    result=greeks.aspect_cob_calendar(1,None,ticket,'2026-08-28')
+    assert result[0] is True and result[-1]==ticket['error']
+
+
+def test_only_completed_calendar_job_selects_new_available_cob(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(greeks,'get_available_dates',lambda:['2026-10-29','2026-08-28'])
+    monkeypatch.setattr(greeks.dash,'ctx',SimpleNamespace(triggered_id='greeks-aspect-job-result'))
+    done={'status':'complete','cob_date':'2026-10-29'}
+    options,selected=greeks.update_date_options(None,'2026-08-28',done)
+    assert selected=='2026-10-29' and [o['value'] for o in options]==['2026-10-29','2026-08-28']
+    assert greeks.update_date_options(None,'2026-08-28',{**done,'status':'failed'})[1]=='2026-08-28'
+    monkeypatch.setattr(greeks.dash,'ctx',SimpleNamespace(triggered_id='refresh-trigger-store'))
+    assert greeks.update_date_options(None,'2026-08-28',done)[1]=='2026-08-28'
