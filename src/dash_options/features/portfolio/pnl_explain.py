@@ -41,7 +41,9 @@ EXPLAIN_COLUMNS = [
 def _pnl_waterfall(explain, currency):
     if explain.empty:
         return _empty_figure('No positions are available for attribution.')
-    totals = explain.sum(numeric_only=True)
+    if explain[EXPLAIN_COLUMNS].isna().any().any():
+        return _empty_figure('Attribution is unavailable for positions with missing inputs.')
+    totals = explain.sum(numeric_only=True, min_count=len(explain))
     labels = ['Delta', 'Gamma', 'Vega', 'Correlation', 'Theta', 'Trades / quantity', 'Unexplained']
     columns = ['delta_pnl', 'gamma_pnl', 'vega_pnl', 'correlation_pnl', 'theta_pnl', 'trade_pnl', 'unexplained_pnl']
     values = [float(totals.get(column, 0)) for column in columns]
@@ -307,7 +309,7 @@ def update_pnl_explain(
         return empty, empty, [], [], [], html.Div(str(exc), className='analytics-warning')
     aggregated = aggregate_pnl_explain(explain, grouping)
     rows, columns = _grid_payload(aggregated, grouping)
-    totals = explain.sum(numeric_only=True) if not explain.empty else pd.Series(dtype=float)
+    totals = explain.sum(numeric_only=True, min_count=len(explain)) if not explain.empty else pd.Series(dtype=float)
     actual = float(totals.get('actual_pnl', 0))
     unexplained = float(totals.get('unexplained_pnl', 0))
     unexplained_ratio = abs(unexplained) / max(abs(actual), 1)
@@ -325,9 +327,9 @@ def update_pnl_explain(
             'warning' if matched_count and price_marks_changed == 0 else 'neutral',
         ),
         _stat('New / closed', f"{status_counts.get('New', 0) + status_counts.get('Closed', 0):,}", 'warning' if status_counts.get('New', 0) + status_counts.get('Closed', 0) else 'neutral'),
-        _stat('Actual change', _money(actual, currency), 'success' if actual >= 0 else 'warning'),
-        _stat('Explained', _money(totals.get('explained_pnl', 0), currency)),
-        _stat('Unexplained', f'{_money(unexplained, currency)} · {unexplained_ratio:.1%}', 'warning' if unexplained_ratio > 0.05 else 'success'),
+        _stat('Actual change', 'Unavailable' if pd.isna(actual) else _money(actual, currency), 'success' if actual >= 0 else 'warning'),
+        _stat('Explained', 'Unavailable' if pd.isna(totals.get('explained_pnl', 0)) else _money(totals.get('explained_pnl', 0), currency)),
+        _stat('Unexplained', 'Unavailable' if pd.isna(unexplained) else f'{_money(unexplained, currency)} · {unexplained_ratio:.1%}', 'warning' if pd.isna(unexplained) or unexplained_ratio > 0.05 else 'success'),
     ]
     business_days = int(explain['business_days'].iloc[0]) if not explain.empty else 0
     unchanged_price_warning = matched_count and price_marks_changed == 0 and business_days > 1
@@ -337,7 +339,8 @@ def update_pnl_explain(
         f'{status_counts.get("Matched", 0)} matched, {status_counts.get("New", 0)} new, {status_counts.get("Closed", 0)} closed. '
         f'Changed marks: price {price_marks_changed}/{matched_count}, vol {vol_marks_changed}/{matched_count}, '
         f'correlation {correlation_marks_changed}/{matched_count}. '
-        'Delta/gamma/vega/correlation/theta use prior-COB Greeks; unexplained captures higher-order and mark/model effects. '
+        'Attribution uses prior-COB Greeks; theta uses elapsed calendar days. Missing required inputs remain unavailable. '
+        'Unexplained captures higher-order and mark/model effects. '
         + ('Underlying price marks are unchanged across the interval, so delta and gamma attribution are zero; check the stale curve-source warning above.' if unchanged_price_warning else ''),
         className='analytics-warning' if unchanged_price_warning else 'analytics-info',
     )

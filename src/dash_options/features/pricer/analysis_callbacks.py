@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from options.valuation.api import futures_pnl_series
+
 import math
 import plotly.graph_objects as go
 
@@ -147,13 +149,9 @@ def update_payoff_chart(calculation_store, valuation_date, price_range, futures_
         if lots:
             # Futures lots are an independent position, not option-structure multiples.
             sizing = calculation_store["sizing"]
-            futures_scale = (
-                sizing["contract_multiplier"] * sizing["price_currency_conversion_factor"]
-            )
             entry_price = series["current_underlying"]
-            futures_values = [lots * futures_scale * (price - entry_price) for price in series["x"]]
-            if not all(math.isfinite(value) for value in futures_values):
-                raise ValueError
+            futures_values = futures_pnl_series(series["x"], entry_price, lots,
+                sizing["contract_multiplier"], sizing["price_currency_conversion_factor"])
             fig.add_trace(
                 go.Scatter(
                     x=series["x"], y=futures_values, mode="lines",

@@ -93,19 +93,6 @@ PRICER_CONTRACT_SIZE_MIGRATION_SCHEMA_VERSION = 7
 DEFAULT_STRUCTURE_ID = "structure-1"
 
 
-VOLATILITY_ADJUSTMENT_FIELDS = (
-    "atm_vol_adjustment",
-    "skew_vol_adjustment",
-    "smile_vol_adjustment",
-)
-
-
-VOLATILITY_ADJUSTMENT_SCALE = 0.01
-
-
-MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT = 50.0
-
-
 FUTURES_STYLE_RATE_NOTE = (
     "The futures-style premium convention is undiscounted; the risk-free rate "
     "and Rho are not applicable."
@@ -149,3 +136,6 @@ EXCHANGE_STRUCTURE_ID = "exchange-structure-1"
 
 
 EXCHANGE_WORKSPACE_SCHEMA_VERSION = 2
+
+from options.valuation.adjustments import (MAX_ABSOLUTE_VOLATILITY_ADJUSTMENT,
+    VOLATILITY_ADJUSTMENT_FIELDS, VOLATILITY_ADJUSTMENT_SCALE)

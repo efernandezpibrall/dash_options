@@ -365,7 +365,7 @@ def test_ttf_monthly_rebases_forward_and_reverses_existing_expiry_factor(monkeyp
         return prepare(*args, **kwargs)
 
     monkeypatch.setattr(
-        surface_reference,
+        surface_reference._valuation,
         "_prepare_component_surface",
         counted_prepare,
     )
@@ -1573,7 +1573,8 @@ def test_catalog_and_immutable_month_slice_are_cached(monkeypatch):
     def fake_catalog(_engine, asset, valuation_date):
         calls["catalog"] += 1
         return {
-            "publication_id": "00000000-0000-0000-0000-000000000010",
+            "commodity": "TTF",
+                "publication_id": "00000000-0000-0000-0000-000000000010",
             "run_id": "00000000-0000-0000-0000-000000000011",
             "commodity": asset,
             "cob_date": valuation_date.isoformat(),
@@ -1625,6 +1626,7 @@ def test_publication_queries_are_select_only_and_month_bounded(monkeypatch):
 
         def first(self):
             return {
+                "commodity": "TTF",
                 "publication_id": "00000000-0000-0000-0000-000000000010",
                 "run_id": "00000000-0000-0000-0000-000000000011",
                 "cob_date": AS_OF,

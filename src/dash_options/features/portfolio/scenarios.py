@@ -173,8 +173,9 @@ layout = html.Div(
         html.Div(
             'Full Kirk revaluation in one selected native currency. No FX '
             'conversion or cross-currency aggregation is performed. Rate is a '
-            'separate discount overlay because the production Kirk valuation '
-            'is undiscounted.',
+            'separate financing overlay because the production Kirk valuation '
+            'is undiscounted. Business-day rolls use the primary asset trading '
+            'calendar and actual elapsed calendar days.',
             className='analytics-model-note',
         ),
         html.Div(id='scenario-status', className='analytics-status'),

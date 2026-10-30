@@ -1,3 +1,4 @@
+at-options-analytics==1.4.4rc6
 alembic>=1.13,<2
 dash>=4.0,<5
 dash-ag-grid>=32.3,<33
