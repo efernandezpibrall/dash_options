@@ -229,3 +229,38 @@ def test_gas_batch_jobs_have_an_independent_explicit_flag(monkeypatch, tmp_path)
 
     assert background_jobs_enabled() is False
     assert gas_batch_jobs_enabled() is True
+
+
+@pytest.mark.parametrize('key,names', [
+    (('DATABASE', 'CONNECTION_STRING'), ('OPTIONS_DATABASE_URL', 'DATABASE_URL')),
+    (('DATABASE', 'SCHEMA'), ('OPTIONS_DB_SCHEMA', 'DB_SCHEMA')),
+    (('TRINOS', 'TOKEN'), ('OPTIONS_TRINOS_TOKEN', 'TRINOS_TOKEN')),
+])
+def test_web_and_analytics_share_alias_resolution_and_conflict_errors(monkeypatch, tmp_path, key, names):
+    from options.vol_calibration.io.database import get_config
+    _use_empty_config(monkeypatch, tmp_path)
+    for name in names: monkeypatch.setenv(name, 'same-value')
+    assert config_value(*key) == get_config().get(*key) == 'same-value'
+    monkeypatch.setenv(names[1], 'different-secret')
+    clear_runtime_config_cache()
+    for load in (lambda: config_value(*key), get_config):
+        with pytest.raises(ValueError, match='Conflicting environment aliases') as error:
+            load()
+        assert 'different-secret' not in str(error.value)
+
+
+def test_explicit_missing_config_fails_in_both_consumers(monkeypatch, tmp_path):
+    from options.vol_calibration.io.database import get_config
+    monkeypatch.setenv('OPTIONS_CONFIG_PATH', str(tmp_path / 'missing.ini'))
+    for load in (lambda: config_value('DATABASE', 'SCHEMA'), get_config):
+        with pytest.raises(FileNotFoundError): load()
+
+
+def test_empty_book_environment_clears_file_filter_for_web_and_worker(monkeypatch, tmp_path):
+    from options.vol_calibration.io.database import get_config
+    path = tmp_path / 'aspect.ini'
+    path.write_text('[ASPECT]\nPOSITION_REPORT_BOOK=old-book\n')
+    monkeypatch.setenv('OPTIONS_CONFIG_PATH', str(path))
+    monkeypatch.setenv('ASPECT_POSITION_REPORT_BOOK', '')
+    assert config_value('ASPECT', 'POSITION_REPORT_BOOK') == ''
+    assert get_config().get('ASPECT', 'POSITION_REPORT_BOOK') == ''

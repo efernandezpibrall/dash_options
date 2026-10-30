@@ -3,140 +3,21 @@
 from __future__ import annotations
 
 import configparser
-import os
 from functools import lru_cache
 
 from options.market_data.connection_pool import get_shared_database_engine, reset_database_pools
 
 
-from dash_options.core.paths import config_candidates as _config_candidates
+from options.market_data.runtime_config import load_config
 
 
 @lru_cache(maxsize=1)
 def load_runtime_config() -> configparser.ConfigParser:
     """Load the first available optional config file and environment overrides."""
-    config = configparser.ConfigParser(interpolation=None)
-    for candidate in _config_candidates():
-        if candidate.is_file():
-            config.read(candidate)
-            break
-
-    for section in (
-        "DATABASE",
-        "TRINOS",
-        "ASPECT",
-        "NETWORK",
-        "VOL_CALIBRATION",
-        "OPTIONS_AUTH",
-        "BLOOMBERG_OPTIONS",
-    ):
+    config = load_config(allow_empty=True)
+    for section in ("DATABASE", "TRINOS", "ASPECT", "NETWORK", "VOL_CALIBRATION", "OPTIONS_AUTH", "BLOOMBERG_OPTIONS"):
         if not config.has_section(section):
             config.add_section(section)
-
-    env_mappings = {
-        ("BLOOMBERG_OPTIONS", "LIVE_FORWARD_CURVES_ENABLED"): ("LIVE_FORWARD_CURVES_ENABLED",),
-        ("BLOOMBERG_OPTIONS", "LIVE_FORWARD_CURVES_SCOPE"): ("LIVE_FORWARD_CURVES_SCOPE",),
-        ("DATABASE", "CONNECTION_STRING"): ("DATABASE_URL", "OPTIONS_DATABASE_URL"),
-        ("DATABASE", "MIDDLE_OFFICE_CONNECTION_STRING"): ("MIDDLE_OFFICE_DATABASE_URL",),
-        ("DATABASE", "SCHEMA"): ("DB_SCHEMA", "OPTIONS_DB_SCHEMA"),
-        ("TRINOS", "HOST"): ("TRINOS_HOST",),
-        ("TRINOS", "USERNAME"): ("TRINOS_USERNAME",),
-        ("TRINOS", "TOKEN"): ("TRINOS_TOKEN",),
-        ("TRINOS", "PORT"): ("TRINOS_PORT",),
-        ("TRINOS", "VERIFY_SSL"): ("TRINOS_VERIFY_SSL",),
-        ("ASPECT", "USERNAME"): ("ASPECT_USERNAME",),
-        ("ASPECT", "PASSWORD"): ("ASPECT_PASSWORD",),
-        ("ASPECT", "BASE_URL"): ("ASPECT_BASE_URL",),
-        ("ASPECT", "POSITION_REPORT_URL"): ("ASPECT_POSITION_REPORT_URL",),
-        ("ASPECT", "POSITION_REPORT_STRATEGIES"): ("ASPECT_POSITION_REPORT_STRATEGIES",),
-        ("ASPECT", "POSITION_REPORT_BOOK"): ("ASPECT_POSITION_REPORT_BOOK",),
-        ("ASPECT", "PERSISTENCE_WRITES_ENABLED"): ("ASPECT_PERSISTENCE_WRITES_ENABLED",),
-        ("ASPECT", "BOOK"): ("ASPECT_BOOK",),
-        ("ASPECT", "VERIFY_SSL"): ("ASPECT_VERIFY_SSL",),
-        ("ASPECT", "REQUEST_TIMEOUT_SECONDS"): ("ASPECT_REQUEST_TIMEOUT_SECONDS",),
-        ("NETWORK", "PROXY_URL"): ("OPTIONS_PROXY_URL", "PROXY_URL"),
-        ("VOL_CALIBRATION", "ENABLED"): ("VOL_CALIBRATION_ENABLED",),
-        ("VOL_CALIBRATION", "WRITES_ENABLED"): (
-            "VOL_CALIBRATION_WRITES_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "PUBLISH_ENABLED"): (
-            "VOL_CALIBRATION_PUBLISH_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "BACKGROUND_JOBS_ENABLED"): (
-            "VOL_CALIBRATION_BACKGROUND_JOBS_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "GAS_BATCH_JOBS_ENABLED"): (
-            "VOL_CALIBRATION_GAS_BATCH_JOBS_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "TTF_INTRADAY_WRITES_ENABLED"): (
-            "VOL_CALIBRATION_TTF_INTRADAY_WRITES_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "TTF_PUBLICATION_ENABLED"): (
-            "VOL_CALIBRATION_TTF_PUBLICATION_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "VOL_TRADES_INLINE_CALIBRATION_ENABLED"): (
-            "VOL_TRADES_INLINE_CALIBRATION_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "JKM_WRITES_ENABLED"): (
-            "VOL_CALIBRATION_JKM_WRITES_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "JKM_PUBLICATION_ENABLED"): (
-            "VOL_CALIBRATION_JKM_PUBLICATION_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "NBP_WRITES_ENABLED"): (
-            "VOL_CALIBRATION_NBP_WRITES_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "NBP_PUBLICATION_ENABLED"): (
-            "VOL_CALIBRATION_NBP_PUBLICATION_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "BRENT_WRITES_ENABLED"): (
-            "VOL_CALIBRATION_BRENT_WRITES_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "BRENT_PUBLICATION_ENABLED"): (
-            "VOL_CALIBRATION_BRENT_PUBLICATION_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "HH_WRITES_ENABLED"): (
-            "VOL_CALIBRATION_HH_WRITES_ENABLED",
-        ),
-        ("VOL_CALIBRATION", "HH_PUBLICATION_ENABLED"): (
-            "VOL_CALIBRATION_HH_PUBLICATION_ENABLED",
-        ),
-        ("OPTIONS_AUTH", "MODE"): ("OPTIONS_AUTH_MODE",),
-        ("OPTIONS_AUTH", "LOCAL_USER"): ("OPTIONS_LOCAL_AUTH_USER",),
-        ("OPTIONS_AUTH", "LOCAL_ROLES"): ("OPTIONS_LOCAL_AUTH_ROLES",),
-        ("OPTIONS_AUTH", "TRUSTED_PROXY_SHARED_SECRET"): (
-            "OPTIONS_TRUSTED_PROXY_SHARED_SECRET",
-        ),
-        ("OPTIONS_AUTH", "TRUSTED_PROXY_SECRET_HEADER"): (
-            "OPTIONS_TRUSTED_PROXY_SECRET_HEADER",
-        ),
-        ("OPTIONS_AUTH", "TRUSTED_PROXY_USER_HEADER"): (
-            "OPTIONS_TRUSTED_PROXY_USER_HEADER",
-        ),
-        ("OPTIONS_AUTH", "TRUSTED_PROXY_ROLES_HEADER"): (
-            "OPTIONS_TRUSTED_PROXY_ROLES_HEADER",
-        ),
-        ("BLOOMBERG_OPTIONS", "INTRADAY_REFRESH_ENABLED"): (
-            "BBG_OPTION_CHAIN_INTRADAY_REFRESH_ENABLED",
-        ),
-        ("BLOOMBERG_OPTIONS", "SETTLEMENT_REFRESH_ENABLED"): (
-            "BBG_OPTION_CHAIN_SETTLEMENT_REFRESH_ENABLED",
-        ),
-        ("BLOOMBERG_OPTIONS", "ENABLED_PRODUCTS"): (
-            "BBG_OPTION_CHAIN_ENABLED_PRODUCTS",
-        ),
-        ("BLOOMBERG_OPTIONS", "REPOSITORY_PATH"): ("BBG_REPOSITORY_PATH",),
-        ("BLOOMBERG_OPTIONS", "LIVE_PRICES_PYTHON"): ("BBG_LIVE_PRICES_PYTHON",),
-        ("BLOOMBERG_OPTIONS", "LIVE_PRICES_REPOSITORY_PATH"): ("BBG_LIVE_PRICES_REPOSITORY_PATH",),
-        ("BLOOMBERG_OPTIONS", "LIVE_PRICES_QUOTE_TIMEZONE"): ("BBG_LIVE_PRICES_QUOTE_TIMEZONE",),
-        ("BLOOMBERG_OPTIONS", "LIVE_PRICES_SPREAD_MAPPINGS"): ("BBG_LIVE_PRICES_SPREAD_MAPPINGS",),
-    }
-    for (section, option), names in env_mappings.items():
-        for name in names:
-            value = os.getenv(name)
-            if value:
-                config.set(section, option, value)
-                break
     return config
 
 

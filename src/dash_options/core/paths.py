@@ -21,10 +21,5 @@ def application_root() -> Path:
 
 
 def config_candidates() -> list[Path]:
-    explicit = os.getenv("OPTIONS_CONFIG_PATH") or os.getenv("OPTIONS_CONFIG_FILE")
-    root = application_root()
-    return ([Path(explicit).expanduser()] if explicit else []) + [
-        root / "config.ini",
-        root.parent / "config.ini",
-        Path.cwd() / "config.ini",
-    ]
+    from options.market_data.runtime_config import config_candidates as shared_candidates
+    return shared_candidates()

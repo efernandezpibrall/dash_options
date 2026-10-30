@@ -17,3 +17,4 @@ scipy==1.16.2
 SQLAlchemy==2.0.43
 threadpoolctl==3.6.0
 trino>=0.330,<1
+packaging>=23

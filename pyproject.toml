@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "at-options-dashboard"
 version = "0.1.0"
 description = "Options trading dashboard and governed calibration application"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dynamic = ["dependencies"]
 
 [tool.setuptools.dynamic]
@@ -25,7 +25,7 @@ pythonpath = ["src", "."]
 addopts = "-q"
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 120
 exclude = [".git", "__pycache__", "build", "dist"]
 

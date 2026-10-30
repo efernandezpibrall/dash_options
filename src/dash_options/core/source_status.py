@@ -10,12 +10,12 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import text
 
-from dash_options.core.database_reads import DB_SCHEMA, safe_exception_message
+from dash_options.core.database_reads import DB_SCHEMA, safe_exception_message, read_curve_with_fallback
 from dash_options.core.config import get_database_engine
 from dash_options.core.snapshots import SnapshotReferenceError, latest_snapshot, publish_snapshot, resolve_snapshot
 
 
-SOURCE_STATUS_SNAPSHOT_NAMESPACE = 'dashboard-source-status-v2'
+SOURCE_STATUS_SNAPSHOT_NAMESPACE = 'dashboard-source-status-v3'
 SOURCE_STATUS_CACHE_TTL_SECONDS = 5 * 60
 
 
@@ -74,29 +74,31 @@ def _load_dashboard_source_statuses_uncached(as_of=None):
             SELECT cob_date FROM {DB_SCHEMA}.vol_surface_publications
             WHERE commodity IN ('BRENT', 'HH') AND is_active AND status = 'published'
         ) surface_dates
-        UNION ALL
-        SELECT 'Forward Curves', max(cob)::date
-        FROM {DB_SCHEMA}.curve
         """
     )
+    statuses = []
     try:
         engine = get_database_engine()
         with engine.connect() as connection:
             frame = pd.read_sql(query, connection)
+        latest_by_label = dict(zip(frame['label'], frame['latest_cob']))
+        for label in ('Portfolio', 'Vol Surface'):
+            statuses.append(make_source_status(sources[label], latest_by_label.get(label), as_of=as_of).to_dict() | {'label': label})
     except Exception as exc:
-        message = safe_exception_message(exc)
-        return [
-            make_source_status(source, error=message, as_of=as_of).to_dict()
-            | {'label': label}
-            for label, source in sources.items()
-        ]
-
-    latest_by_label = dict(zip(frame['label'], frame['latest_cob']))
-    return [
-        make_source_status(source, latest_by_label.get(label), as_of=as_of).to_dict()
-        | {'label': label}
-        for label, source in sources.items()
-    ]
+        for label in ('Portfolio', 'Vol Surface'):
+            statuses.append(make_source_status(sources[label], error=safe_exception_message(exc), as_of=as_of).to_dict() | {'label': label})
+    try:
+        frame, source = read_curve_with_fallback(
+            "SELECT CAST(max(ondate) AS date) AS latest_cob FROM enverus.curve "
+            "WHERE category='FINANCIAL' AND version_name='FINAL' AND forward_curve_tenors_value IS NOT NULL",
+            text(f'SELECT max(cob)::date AS latest_cob FROM {DB_SCHEMA}.curve'),
+        )
+        latest = frame['latest_cob'].iloc[0] if not frame.empty else None
+        status = make_source_status(source, latest, fallback_used=source != 'transformed.enverus.curve', as_of=as_of)
+    except Exception as exc:
+        status = make_source_status(sources['Forward Curves'], error=safe_exception_message(exc), as_of=as_of)
+    statuses.append(status.to_dict() | {'label': 'Forward Curves'})
+    return statuses
 
 
 def load_dashboard_source_statuses(as_of=None, *, force=False):

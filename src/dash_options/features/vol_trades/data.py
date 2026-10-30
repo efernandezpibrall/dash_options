@@ -19,6 +19,7 @@ from sqlalchemy import bindparam, text
 
 from options.vol_calibration.api import delta_to_strike, prepare_brent_calibration_observations
 from dash_options.core.config import get_database_engine
+from dash_options.core.database_reads import read_curve_with_fallback, DB_SCHEMA
 
 PRODUCT = "BRENT"
 
@@ -224,36 +225,47 @@ def load_available_jkm_cobs(engine=None, *, limit: int = SNAPSHOT_LIMIT) -> pd.D
     db_engine = engine or get_database_engine(required=False)
     if db_engine is None:
         return pd.DataFrame()
-    return pd.read_sql(
-        text(
-            f"""
-            SELECT s.cob_date AS business_date,
-                   MAX(COALESCE(s.vendor_published_at, s.ingested_at)) AS observed_at,
-                   COUNT(*)::integer AS option_quote_count,
-                   (
-                       SELECT COUNT(*)::integer
-                       FROM at_lng.curve AS c
-                       WHERE c.code = 'ICE_JKM_MO'
-                         AND c.cob = s.cob_date
-                         AND c.value IS NOT NULL
-                   ) AS forward_count
-            FROM {PUBLISHED_TABLE} AS s
-            WHERE s.product = 'JKM'
-              AND EXISTS (
-                  SELECT 1
-                  FROM at_lng.curve AS c
-                  WHERE c.code = 'ICE_JKM_MO'
-                    AND c.cob = s.cob_date
-                    AND c.value IS NOT NULL
-              )
-            GROUP BY s.cob_date
-            ORDER BY s.cob_date DESC
-            LIMIT :limit
-            """
-        ),
-        db_engine,
-        params={"limit": int(limit)},
-    )
+    surfaces = pd.read_sql(text(f"""
+        SELECT s.cob_date AS business_date,
+               MAX(COALESCE(s.vendor_published_at, s.ingested_at)) AS observed_at,
+               COUNT(*)::integer AS option_quote_count
+        FROM {PUBLISHED_TABLE} AS s WHERE s.product = 'JKM'
+        GROUP BY s.cob_date ORDER BY s.cob_date DESC
+    """), db_engine)
+    if surfaces.empty:
+        return surfaces.assign(forward_count=pd.Series(dtype=int))
+    dates = pd.to_datetime(surfaces['business_date']).dt.date.tolist()
+    date_indexes = ', '.join(str(int(day.strftime('%Y%m%d'))) for day in dates)
+    trino_query = f"""
+        SELECT CAST(ondate AS date) AS business_date, COUNT(*) AS forward_count
+        FROM enverus.curve WHERE code = 'ICE_JKM_MO'
+          AND category = 'FINANCIAL' AND version_name = 'FINAL'
+          AND ondate_index IN ({date_indexes})
+          AND forward_curve_tenors_value IS NOT NULL
+          AND forward_curve_tenors_absolute NOT IN ('M-1', 'M-2', 'M-3')
+        GROUP BY CAST(ondate AS date)
+    """
+    postgres_query = text(f"""SELECT cob AS business_date, COUNT(*) AS forward_count
+        FROM {DB_SCHEMA}.curve WHERE code = 'ICE_JKM_MO' AND cob IN :dates
+        AND value IS NOT NULL GROUP BY cob""").bindparams(bindparam('dates', expanding=True))
+    forwards, source = read_curve_with_fallback(trino_query, postgres_query,
+                                               params={'dates': dates}, engine=db_engine)
+    if source == 'transformed.enverus.curve':
+        present = set(pd.to_datetime(forwards['business_date']).dt.date)
+        missing = [day for day in dates if day not in present]
+        if missing:
+            # A date absent from Trino may still have its exact-date PG fallback.
+            # If the optional PG table is absent, keep the proven Trino dates.
+            try:
+                extra = pd.read_sql(postgres_query, db_engine, params={'dates': missing})
+            except Exception:
+                extra = pd.DataFrame()
+            if not extra.empty:
+                forwards = pd.concat([forwards, extra], ignore_index=True)
+    for frame in (surfaces, forwards):
+        frame['business_date'] = pd.to_datetime(frame['business_date']).dt.date
+    return surfaces.merge(forwards, on='business_date', validate='one_to_one').sort_values(
+        'business_date', ascending=False).head(int(limit)).reset_index(drop=True)
 
 
 def load_jkm_official_market(cob_date: str) -> tuple[pd.DataFrame, dict[str, Any]]:

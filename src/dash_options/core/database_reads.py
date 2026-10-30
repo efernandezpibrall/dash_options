@@ -13,10 +13,11 @@ IDENTIFIER_PATTERN = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 DB_CONNECTION_STRING = config_value('DATABASE', 'CONNECTION_STRING')
 DB_SCHEMA = config_value('DATABASE', 'SCHEMA', fallback='at_lng') or 'at_lng'
-TRINOS_HOST = config_value('TRINOS', 'HOST')
+TRINOS_HOST = config_value('TRINOS', 'HOST', fallback='trinolakehouse.adnoc.ae')
 TRINOS_USERNAME = config_value('TRINOS', 'USERNAME')
 TRINOS_TOKEN = config_value('TRINOS', 'TOKEN')
 TRINOS_PORT = config_value('TRINOS', 'PORT', fallback='443') or '443'
+TRINOS_HTTP_SCHEME = config_value('TRINOS', 'HTTP_SCHEME', fallback='https')
 TRINOS_VERIFY_SSL = config_bool('TRINOS', 'VERIFY_SSL', fallback=True)
 
 
@@ -68,7 +69,7 @@ def read_trino_query(query, catalog='raw', schema='ice_gas'):
         port=int(TRINOS_PORT) if TRINOS_PORT else 443,
         user=TRINOS_USERNAME,
         auth=JWTAuthentication(TRINOS_TOKEN),
-        http_scheme="https",
+        http_scheme=TRINOS_HTTP_SCHEME,
         verify=TRINOS_VERIFY_SSL,
         catalog=catalog,
         schema=schema,
@@ -108,3 +109,21 @@ def read_with_fallback(
             f"{context_label} failed via both Trino and PostgreSQL. "
             f"Trino error: {trino_message} | PostgreSQL error: {postgres_message}"
         ) from postgres_exc
+
+
+def read_curve_with_fallback(trino_query, postgres_query, *, params=None, engine=None):
+    """Read curve data from Trino first, including when a PG connection is supplied.
+
+    Return the selected provider for display provenance. Empty Trino results use
+    the same PostgreSQL fallback as an unavailable source. Raw driver errors are
+    not logged here because they may contain authentication details.
+    """
+    try:
+        frame = read_trino_query(trino_query, catalog='transformed', schema='enverus')
+    except Exception:
+        frame = None
+    if frame is not None and not frame.dropna(how='all').empty:
+        return frame, 'transformed.enverus.curve'
+    target = engine if engine is not None else get_database_engine()
+    query = text(postgres_query) if isinstance(postgres_query, str) else postgres_query
+    return pd.read_sql(query, target, params=params or {}), f'{DB_SCHEMA}.curve'

@@ -5,6 +5,7 @@ import pandas as pd
 from sqlalchemy import bindparam, text
 
 from dash_options.core.config import get_database_engine
+from dash_options.core.database_reads import read_curve_with_fallback, DB_SCHEMA
 from dash_options.core.source_identity import source_config_fingerprint
 from dash_options.features.vol_trades.data import (
     _read_calibrated_surface_points,
@@ -93,12 +94,23 @@ def load_strip_inputs(history, months, *, engine=None):
                 curve["contract"] = pd.to_datetime(curve["contract_date"]).dt.strftime("%YM%m")
                 curve["currency"], curve["units"], curve["cob"] = "EUR", "MWH", cob.date()
             else:
-                curve = pd.read_sql(
+                contract_literals = ', '.join("'" + contract + "'" for contract in contracts)
+                trino_query = f"""
+                    SELECT forward_curve_tenors_absolute AS contract,
+                           forward_curve_tenors_value AS value, currency, units,
+                           CAST(ondate AS date) AS cob
+                    FROM enverus.curve
+                    WHERE code = 'ICE_TTF' AND ondate_index = {int(cob.strftime('%Y%m%d'))}
+                      AND category = 'FINANCIAL' AND version_name = 'FINAL'
+                      AND forward_curve_tenors_absolute IN ({contract_literals or "NULL"})
+                """
+                curve, _ = read_curve_with_fallback(
+                    trino_query,
                     text(
-                        "SELECT contract, value, currency, units, cob FROM at_lng.curve "
+                        f"SELECT contract, value, currency, units, cob FROM {DB_SCHEMA}.curve "
                         "WHERE code = 'ICE_TTF' AND cob = :cob AND contract IN :contracts"
                     ).bindparams(bindparam("contracts", expanding=True)),
-                    connection,
+                    engine=connection,
                     params={"cob": cob.date(), "contracts": contracts},
                 )
         surface["publication_id"] = str(publication_id)

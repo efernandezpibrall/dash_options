@@ -92,3 +92,69 @@ python -m scripts.verification.rehearse_daily_release --help
 Restore web and workers together with their recorded analytics dependency. Keep additive schema, published revisions and immutable history. A code rollback never reactivates a superseded publication. The installed-reader probe supports both packaged and legacy rollback layouts and checks that it imported the selected artifact.
 
 [Daily settlement operations](daily-settlements.md) documents explicit preparation/publication commands and their recovery rules.
+
+## Portable configuration and Linux/SFTP preflight
+
+The dashboard requires Python **3.11 or newer** (including the pinned NumPy/SciPy
+requirements). The analytics package can still be used independently on its own
+supported Python versions. Use the same Linux virtual environment for web and
+workers. Upload the complete paired release into a new directory through SFTP;
+keep credentials and each installation's database external to that bundle.
+
+Web, analytics, Aspect workers and the Brent/HH/gas command-line tools share
+`options.market_data.runtime_config`. The configuration contract is:
+
+1. An explicit CLI `--config` selects that file; otherwise `OPTIONS_CONFIG_PATH`
+   precedes `OPTIONS_CONFIG_FILE`.
+2. An explicitly selected missing file fails; it never silently selects another
+   machine's config. Without an explicit file, shared discovery checks the app
+   root/parent, repository parent and working directory. Production should always
+   specify `OPTIONS_CONFIG_PATH` and `OPTIONS_APP_ROOT`.
+3. Environment values override the selected file. Both names in an alias pair
+   may be present only if their nonempty values agree: `OPTIONS_DATABASE_URL` /
+   `DATABASE_URL`, `OPTIONS_DB_SCHEMA` / `DB_SCHEMA`, and `OPTIONS_TRINOS_*` /
+   `TRINOS_*`. Conflicts report variable names without their values.
+4. An explicitly empty `ASPECT_POSITION_REPORT_BOOK` clears a file-based book
+   filter. Configuration changes require restarting web and workers together.
+
+Run the new preflight **on Linux using the runtime interpreter**, after installing
+both packages, before starting the service:
+
+```sh
+export OPTIONS_CONFIG_PATH=/path/to/external/config.ini
+export OPTIONS_APP_ROOT=/path/to/release/dashboard
+python -m dash_options.core.release_diagnostics
+python -m dash_options.core.release_diagnostics --database
+# Optional exact-COB source probe; does not ingest, value or publish:
+python -m dash_options.core.release_diagnostics --curve-cob 2026-10-29
+```
+
+The default command performs no network calls. It reports Python/dependency
+compatibility, imported module paths and hashes, analytics implementation identity,
+and configuration consistency. Add `--expected-dashboard-root` and
+`--expected-analytics-root` pointing to the intended installed package directories
+(or editable source roots) to reject imports from stale/shadowing installations.
+A package version alone does not establish source identity: compare the release
+manifest and reported hashes as well. The paired release verifier remains the
+complete wheel/source identity check.
+
+`--database` uses a read-only transaction to inspect required relations and the
+recorded migration heads. Each separate database must pass independently. Older
+recorded schemas are labelled for normal or archived upgrades; the diagnostic never
+runs or stamps migrations. `at_lng.curve` is an optional PostgreSQL fallback, so its
+absence alone is a warning. `--curve-cob` additionally checks all three gas curves
+for the exact date and reports their selected source and content identity. Database
+and source exceptions report their types without printing connection strings,
+tokens, passwords or raw driver messages. A nonzero exit status means the selected
+checks did not pass. Offline success does not establish database/source readiness.
+
+Daily gas curve reads prefer `transformed.enverus.curve` in Trino, with the
+configured PostgreSQL `curve` table as fallback for unavailable/empty exact-date
+Trino results. Nonempty invalid results fail validation. Once prepared, a job pins
+its source and complete curve evidence: publication re-reads that same source and
+rejects changed inputs or source unavailability instead of switching providers.
+PostgreSQL curve locks are taken only for PostgreSQL-sourced candidates. The gas
+surface/calendar tables remain PostgreSQL-backed. Trino revalidation is a fresh
+read, not a distributed lock; source changes after that read are not prevented by
+the PostgreSQL publication transaction. Exact COB, pricing, quote-error, financing,
+expiry and arbitrage policies are unchanged.
