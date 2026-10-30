@@ -1,5 +1,4 @@
 import base64
-import datetime as dt
 import io
 
 import pandas as pd
@@ -13,9 +12,16 @@ from dash_options.core.config import clear_runtime_config_cache
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_config():
+def _reset_runtime_config(monkeypatch, tmp_path):
+    from dash_options.core import snapshots
+    store = snapshots.SnapshotStore(tmp_path / "snapshots")
+    monkeypatch.setattr(snapshots, "snapshot_store", store)
+    monkeypatch.setattr(greeks, "snapshot_store", store)
+    greeks._fetch_options_data_cached.cache_clear()
+    greeks.fetch_instrument_unit_map.cache_clear()
     clear_runtime_config_cache()
     yield
+    store.close()
     clear_runtime_config_cache()
 
 
@@ -567,63 +573,22 @@ def test_calendar_marker_is_preserved_outside_annual_aggregation():
     ) == '2029-CAL / 2029-Q1'
 
 
-def test_aspect_request_uses_json_auth_timeout_and_ssl_verification(
-    monkeypatch,
-    tmp_path,
-):
-    config_path = tmp_path / 'empty.ini'
-    config_path.write_text('')
-    monkeypatch.setenv('OPTIONS_CONFIG_PATH', str(config_path))
-    monkeypatch.setenv('ASPECT_USERNAME', 'user')
-    monkeypatch.setenv('ASPECT_PASSWORD', 'password')
-    monkeypatch.setenv('ASPECT_REQUEST_TIMEOUT_SECONDS', '45')
-    monkeypatch.delenv('ASPECT_VERIFY_SSL', raising=False)
-    clear_runtime_config_cache()
-
-    captured = {}
-
-    class _Response:
-        status_code = 200
-        ok = True
-
-        @staticmethod
-        def json():
-            return _aspect_frame().to_dict('records')
-
-    def fake_post(url, **kwargs):
-        captured['url'] = url
-        captured.update(kwargs)
-        return _Response()
-
-    monkeypatch.setattr(greeks.requests, 'post', fake_post)
-    monkeypatch.setattr(greeks, '_dubai_today', lambda: dt.date(2026, 7, 28))
-
-    result = greeks.fetch_aspect_exposure_report(dt.date(2026, 7, 27))
-
-    assert len(result) == 2
-    assert captured['url'] == greeks.ASPECT_DEFAULT_URL
-    assert captured['json'] == {
-        'cobDate': '2026-07-27',
-        'todayPricing': 1,
-        'book': 'AD-LNG',
-        'displayExchangeTradeOtc': True,
-    }
-    assert captured['auth'] == ('user', 'password')
-    assert captured['timeout'] == (10.0, 45.0)
-    assert captured['verify'] is True
-    assert 'proxies' not in captured
+def test_aspect_page_reads_persisted_snapshot_without_http_or_writes(monkeypatch):
+    payload = {'meta': _aspect_meta(), 'rows': _aspect_frame().to_dict('records'), 'option_valuations': []}
+    monkeypatch.setattr(greeks, 'get_database_engine', lambda: object())
+    monkeypatch.setattr(greeks.aspect_service, 'load_snapshot', lambda *args, **kwargs: payload)
+    monkeypatch.setattr(greeks.aspect_service, 'configured_scope', lambda: 'scope')
+    monkeypatch.setattr(greeks.aspect_repository, 'snapshot_header', lambda *a, **k: {'snapshot_id':'version-1'})
+    assert greeks._load_aspect_payload('2026-07-28') == payload
+    assert greeks._load_aspect_payload('2026-07-28') == payload
 
 
-def test_missing_aspect_credentials_fails_closed(monkeypatch, tmp_path):
-    config_path = tmp_path / 'empty.ini'
-    config_path.write_text('')
-    monkeypatch.setenv('OPTIONS_CONFIG_PATH', str(config_path))
-    monkeypatch.delenv('ASPECT_USERNAME', raising=False)
-    monkeypatch.delenv('ASPECT_PASSWORD', raising=False)
-    clear_runtime_config_cache()
-
-    with pytest.raises(greeks.AspectConfigurationError, match='credentials are unavailable'):
-        greeks.fetch_aspect_exposure_report(dt.date(2026, 7, 28))
+def test_missing_persisted_aspect_snapshot_fails_explicitly(monkeypatch):
+    monkeypatch.setattr(greeks, 'get_database_engine', lambda: object())
+    monkeypatch.setattr(greeks.aspect_service, 'configured_scope', lambda: 'scope')
+    monkeypatch.setattr(greeks.aspect_repository, 'snapshot_header', lambda *a, **k: None)
+    with pytest.raises(greeks.AspectSourceError, match='No persisted Aspect settlement snapshot'):
+        greeks._load_aspect_payload('2026-07-28')
 
 
 def test_prepare_aspect_records_rejects_invalid_rows():
@@ -634,7 +599,7 @@ def test_prepare_aspect_records_rejects_invalid_rows():
     invalid['maturityForwardDate'] = 'not-a-date'
     data = pd.concat([data, invalid], ignore_index=True)
 
-    prepared, rejected_rows = greeks._prepare_aspect_records(data)
+    prepared, rejected_rows = greeks.aspect_service.prepare_positions(data)
 
     assert len(prepared) == 2
     assert rejected_rows == 1
@@ -643,7 +608,7 @@ def test_prepare_aspect_records_rejects_invalid_rows():
 
 
 def test_aspect_normalization_applies_mapping_and_lot_conventions(monkeypatch):
-    prepared, _ = greeks._prepare_aspect_records(_aspect_frame())
+    prepared, _ = greeks.aspect_service.prepare_positions(_aspect_frame())
     monkeypatch.setattr(
         greeks,
         'fetch_instrument_unit_map',
@@ -667,10 +632,11 @@ def test_aspect_normalization_applies_mapping_and_lot_conventions(monkeypatch):
     }
     assert set(normalized['greek']) == {'delta'}
     assert set(normalized['source']) == {greeks.ASPECT_SOURCE_LABEL}
+    assert set(normalized['unit']) == {'Lots'}
 
 
 def test_aspect_only_export_contains_source_sheets(monkeypatch):
-    prepared, _ = greeks._prepare_aspect_records(_aspect_frame())
+    prepared, _ = greeks.aspect_service.prepare_positions(_aspect_frame())
     monkeypatch.setattr(
         greeks,
         'fetch_instrument_unit_map',
@@ -702,7 +668,7 @@ def test_aspect_only_export_contains_source_sheets(monkeypatch):
         'Aspect Unit Delta',
         'Aspect Raw',
     ]
-    assert workbook['Aspect Metadata']['B3'].value == 'settlement'
+    assert dict(list(workbook['Aspect Metadata'].values)[1:])['Mode'] == 'settlement'
     assert workbook['Aspect Raw']['A2'].value == 'ICE_TTF'
     aspect_summary = workbook['Aspect Summary']
     summary_headers = [
@@ -716,7 +682,7 @@ def test_aspect_only_export_contains_source_sheets(monkeypatch):
 
 
 def test_export_uses_shared_maturity_axis_and_preserves_blank_vs_zero(monkeypatch):
-    prepared, _ = greeks._prepare_aspect_records(_aspect_frame())
+    prepared, _ = greeks.aspect_service.prepare_positions(_aspect_frame())
     monkeypatch.setattr(
         greeks,
         'fetch_instrument_unit_map',
@@ -783,3 +749,133 @@ def test_quantity_greek_displays_show_no_decimal_places():
     assert rounded.loc[0, 'Delta'] == pytest.approx(1234)
     assert greeks._format_grid_number(rounded.loc[0, 'Delta']) == '1,234'
     assert greeks._format_currency(-12.3456784) == '-$12'
+
+
+def _valued_option(**changes):
+    return {
+        **dict.fromkeys(greeks.DATA_COLUMNS),
+        'cob_date': '2026-07-28', 'substrategy': 'Aspect Options', 'type_trade': 'Exchange Trade',
+        'type_option': 'european', 'asset_a': 'ICE_TTF', 'asset_b': None,
+        'quantity': 1000., 'unit_quantity': 'MWh', 'currency': 'EUR',
+        'maturity_date_a': '2026-10-01', 'maturity_date_type_a': 'month',
+        'qty_delta_asset_a': -250., 'qty_gamma_asset_a': -5., 'qty_vega_sigma1': -30., 'qty_theta': 2.,
+        'qty_value': -100., 'qty_pnl': 50., 'aspect_source_row_id': 'aspect-option-2', **changes,
+    }
+
+
+def _mixed_aspect_payload():
+    raw = _aspect_frame().to_dict('records')
+    raw.append({**raw[0], 'dealType': 'ETO', 'qty': -1000., 'strategy': 'Aspect Options'})
+    return {'meta': {**_aspect_meta(), 'option_rows': 1, 'valued_option_rows': 1},
+            'rows': raw, 'option_valuations': [_valued_option()]}
+
+
+def test_aspect_options_combine_once_and_filter_with_core_portfolio(monkeypatch):
+    monkeypatch.setattr(greeks, 'fetch_instrument_unit_map', lambda: {})
+    core = _valued_option(aspect_source_row_id=None, substrategy='Core Options', qty_delta_asset_a=100.)
+    monkeypatch.setattr(greeks, 'fetch_options_data', lambda cob: pd.DataFrame([core]))
+    aspect = _mixed_aspect_payload()
+    payload = greeks._build_unfiltered_greeks_store('2026-07-28', 'month', None, None, 'native', aspect)
+    rows = pd.DataFrame(payload['rows'])
+    assert payload['meta']['raw_rows'] == 2
+    assert rows.loc[rows.greek.eq('delta'), 'exposure'].sum() == -150.
+    assert set(rows.source) == {'Options valuation', greeks.ASPECT_SOURCE_LABEL}
+    assert set(rows.source_row_id) == {0, 'aspect-option-2'}
+    linear = greeks._normalize_aspect_payload_rows(aspect, 'month', None, None, 'native')
+    assert len(linear) == 2
+    assert linear.exposure.sum() == 8000.
+    filtered = greeks._filter_greeks_store(payload, ['Aspect Options'], ['Exchange Trade'], ['instrument::ICE_TTF'])
+    assert {row['source_row_id'] for row in filtered['rows']} == {'aspect-option-2'}
+    assert sum(row['exposure'] for row in filtered['rows'] if row['greek'] == 'delta') == -250.
+    strategies, types, _ = greeks.fetch_filter_values('2026-07-28', aspect)
+    assert strategies == ['Aspect Options', 'Core Options']
+    assert types == ['Exchange Trade']
+
+
+def test_aspect_options_cannot_mix_cobs_and_work_without_core_positions(monkeypatch):
+    monkeypatch.setattr(greeks, 'fetch_instrument_unit_map', lambda: {})
+    monkeypatch.setattr(greeks, 'fetch_options_data', lambda cob: pd.DataFrame(columns=greeks.DATA_COLUMNS))
+    aspect = _mixed_aspect_payload()
+    assert greeks._combined_option_data('2026-07-29', aspect).empty
+    result = greeks._build_unfiltered_greeks_store('2026-07-28', 'month', None, None, 'native', aspect)
+    assert result['meta']['raw_rows'] == 1
+    assert sum(row['exposure'] for row in result['rows'] if row['greek'] == 'delta') == -250.
+
+
+def test_export_uses_same_combined_greeks_and_retains_source_ids(monkeypatch):
+    monkeypatch.setattr(greeks, 'fetch_instrument_unit_map', lambda: {})
+    core = _valued_option(aspect_source_row_id=None, substrategy='Core Options', qty_delta_asset_a=100.)
+    monkeypatch.setattr(greeks, 'fetch_options_data', lambda cob: pd.DataFrame([core]))
+    aspect = _mixed_aspect_payload()
+    payload = greeks._build_unfiltered_greeks_store('2026-07-28', 'month', None, None, 'native', aspect)
+    download = greeks.export_greeks_workbook(1, payload, aspect, 'month', None, None, 'native')
+    workbook = load_workbook(io.BytesIO(base64.b64decode(download['content'])))
+    raw = list(workbook['Raw Normalized'].values)
+    header = raw[0]
+    assert {row[header.index('Source')] for row in raw[1:]} == {'Options valuation', greeks.ASPECT_SOURCE_LABEL}
+    assert {row[header.index('Source Row')] for row in raw[1:]} == {0, 'aspect-option-2'}
+    assert sum(row[header.index('Exposure')] for row in raw[1:] if row[header.index('Greek')] == 'Delta') == -150.
+
+
+def test_all_selected_filters_expand_for_new_aspect_options_without_resetting_subsets():
+    previous = [{'value': 'A'}, {'value': 'B'}]
+    assert greeks._preserve_or_default(['A', 'B'], ['A', 'B', 'C'], previous) == ['A', 'B', 'C']
+    assert greeks._preserve_or_default(['A'], ['A', 'B', 'C'], previous) == ['A']
+    assert greeks._preserve_or_default([], ['A', 'B', 'C'], previous) == []
+
+
+def test_aspect_refresh_requires_server_side_permission_before_source_access(monkeypatch):
+    from dash_options.calibration.auth import Identity, Role, AuthorizationError
+    monkeypatch.setattr(greeks, 'current_request_identity', lambda: Identity('viewer', frozenset({Role.VIEWER}), True, 'test'))
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unauthorized refresh reached source service')
+    monkeypatch.setattr(greeks.aspect_service, 'refresh_snapshot', forbidden)
+    with pytest.raises(AuthorizationError):
+        greeks._refresh_aspect_payload('settlement', '2026-07-28')
+
+
+def test_filter_cache_does_not_alias_all_and_cleared_selection():
+    base = {'meta':{'cob_date':'2026-07-28'}, 'rows':[_normalized_greek_row('2026-09', 10)]}
+    all_ref = greeks.update_filtered_greeks_store(base, None, None, None)
+    clear_ref = greeks.update_filtered_greeks_store(base, [], None, None)
+    assert all_ref['snapshot_id'] != clear_ref['snapshot_id']
+    assert len(greeks._resolve_greeks_payload(all_ref)['rows']) == 1
+    assert greeks._resolve_greeks_payload(clear_ref)['rows'] == []
+    assert greeks.resolve_snapshot(all_ref, expected_namespace=all_ref['namespace']) == greeks._resolve_greeks_payload(all_ref)
+    forged = {**all_ref, 'source_revision':'wrong'}
+    assert greeks._resolve_greeks_payload(forged)['rows'] == []
+
+
+def test_database_failure_is_not_cached_as_empty(monkeypatch):
+    calls = []
+    def read(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError('temporary outage')
+        return pd.DataFrame(columns=greeks.DATA_COLUMNS)
+    monkeypatch.setattr(greeks, '_read_sql', read)
+    with pytest.raises(greeks.PortfolioSourceUnavailable):
+        greeks.fetch_options_data('2026-10-29')
+    assert greeks.fetch_options_data('2026-10-29').empty
+    assert len(calls) == 2
+
+
+def test_unavailable_core_is_labelled_as_error_not_missing_snapshot(monkeypatch):
+    def fail(*args):
+        raise greeks.PortfolioSourceUnavailable('trades_options source unavailable; totals incomplete')
+    monkeypatch.setattr(greeks, 'fetch_options_data', fail)
+    data = greeks._combined_option_data('2026-10-29')
+    assert 'unavailable' in data.attrs['source_warning']
+    assert 'No trades_options valuation exists' not in data.attrs['source_warning']
+
+
+@pytest.fixture(autouse=True)
+def isolate_aspect_flow_status(monkeypatch):
+    monkeypatch.setattr(greeks.aspect_storage,'flow_status',lambda *a,**k:None)
+
+
+def test_failed_newer_fetch_warning_does_not_mutate_published_payload():
+    payload={'meta':{'source_snapshot_id':'source-old','warnings':[]},'rows':[]}
+    result=greeks._with_aspect_flow_status(payload,{'source_snapshot_id':'source-new','run':{'status':'failed'}})
+    assert 'newer Aspect fetch' in result['meta']['warnings'][0]
+    assert payload['meta']['warnings']==[]

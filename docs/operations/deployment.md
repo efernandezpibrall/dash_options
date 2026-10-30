@@ -42,8 +42,11 @@ For direct loopback workstation use, `local_loopback` requires a named user and 
 
 ## Schema and verification
 
+Aspect portfolio snapshots add revisions `20261030_01`, `20261030_02` and `20261030_03` after the frozen baseline;
+see [Aspect Greeks](aspect-greeks.md) for the read path, import and rollback rules.
+
 The active graph has a single frozen root, `20261029_03`. Existing databases
-at that checkpoint require no restamping or schema changes. Fresh dashboard
+at that checkpoint upgrade through additive successors without restamping. Fresh dashboard
 installations execute the final schema and seed data once, after provisioning
 the external shared trade/catalogue schema.
 

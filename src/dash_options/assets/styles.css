@@ -9285,3 +9285,5 @@ button:hover {
 .vol-trades-icap-date-warning:empty {
     display: none;
 }
+
+.greeks-aspect-status-warning { background: #fff8e6; border-left: 4px solid #b7791f; color: #744210; }

@@ -34,7 +34,7 @@ def migration_database(blank_database):
     return blank_database
 
 
-def migrate(engine, target="head", *, legacy=False):
+def migrate(engine, target=CHECKPOINT, *, legacy=False):
     with engine.begin() as db:
         if legacy:
             with archived_migrations() as archive:
@@ -52,12 +52,12 @@ def snapshot(engine):
     return catalog(engine), data_state(engine), oids(engine)
 
 
-def assert_retired(engine):
+def assert_retired(engine, expected_head=CHECKPOINT):
     with engine.connect() as db:
         assert not any(
             db.execute(text("SELECT to_regclass(:name)"), {"name": "at_lng." + name}).scalar() for name in RETIRED
         )
-    assert heads(engine) == [CHECKPOINT]
+    assert heads(engine) == [expected_head]
 
 
 def rows(engine):
@@ -76,8 +76,9 @@ def rows(engine):
 
 def test_single_baseline_and_checksum_pinned_archive():
     scripts = ScriptDirectory(str(ROOT / "migrations"))
-    assert scripts.get_heads() == [CHECKPOINT]
-    assert len(list(scripts.walk_revisions())) == 1
+    assert scripts.get_heads() == ["20261030_03"]
+    assert scripts.get_bases() == [CHECKPOINT]
+    assert len(list(scripts.walk_revisions())) == 4
     assert not list((ROOT / "migrations").glob("*.sql"))
     with archived_migrations() as archive:
         historical = ScriptDirectory(str(archive))
@@ -120,7 +121,7 @@ def test_current_checkpoint_is_select_only_and_preserves_data(migration_database
             statements.append(statement)
 
         event.listen(db, "before_cursor_execute", reject_writes)
-        command.upgrade(migration_config(db), "head")
+        command.upgrade(migration_config(db), CHECKPOINT)
     assert statements
     assert snapshot(engine) == before
     # Existing rollback artifacts recognize the unchanged checkpoint.
@@ -322,8 +323,8 @@ assert _migration_lineage_contains('20261029_03', '20261023_01')
 def test_future_revision_retains_baseline_capabilities(migration_database, tmp_path, monkeypatch):
     future = tmp_path / "migrations"
     shutil.copytree(ROOT / "migrations", future)
-    (future / "versions/20261030_01_test.py").write_text(
-        "from alembic import op\nrevision='20261030_01'\ndown_revision='20261029_03'\n"
+    (future / "versions/20990101_01_test.py").write_text(
+        "from alembic import op\nrevision='20990101_01'\ndown_revision='20261030_03'\n"
         "def upgrade(): op.execute('CREATE TABLE at_lng.baseline_test_child(id integer PRIMARY KEY)')\n"
     )
     migrate(migration_database)
@@ -333,16 +334,16 @@ def test_future_revision_retains_baseline_capabilities(migration_database, tmp_p
         command.upgrade(config, "head")
     monkeypatch.setattr(health, "application_root", lambda: tmp_path)
     for required in (CHECKPOINT, "20260902_02", "20260928_01", "20261023_01"):
-        assert health._migration_lineage_contains("20261030_01", required)
-    assert not health._migration_lineage_contains("20261030_01", "20990101_99")
+        assert health._migration_lineage_contains("20990101_01", required)
+    assert not health._migration_lineage_contains("20990101_01", "20990101_99")
 
 
 @pytest.mark.parametrize("start", (CHECKPOINT, "20261021_01"))
 def test_release_rehearsal_uses_real_baseline_and_archive(blank_database, start):
     report = rehearse_schema(blank_database, start)
-    assert report["heads"] == [CHECKPOINT]
+    assert report["heads"] == ["20261030_03"]
     assert report["all_dashboard_migrations_included"]
-    assert_retired(blank_database)
+    assert_retired(blank_database, "20261030_03")
 
 
 def test_tampered_archive_is_rejected_before_loading(monkeypatch):

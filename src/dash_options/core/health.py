@@ -7,7 +7,7 @@ from dash_options.core.paths import application_root
 from flask import jsonify
 from sqlalchemy import text
 
-from dash_options.core.config import get_database_engine
+from dash_options.core.config import config_bool, get_database_engine
 from dash_options.features.vol_trades.refresh import (
     enabled_products,
     intraday_refresh_enabled,
@@ -36,6 +36,7 @@ from dash_options.calibration.feature_flags import (
 
 INLINE_PUBLICATION_MIGRATION_HEAD = "20260902_02"
 GAS_BATCH_MIGRATION_HEAD = "20260928_01"
+ASPECT_PERSISTENCE_MIGRATION_HEAD = "20261030_03"
 
 
 def _migration_lineage_contains(current_revision: str | None, required_revision: str) -> bool:
@@ -67,7 +68,12 @@ def _migration_lineage_contains(current_revision: str | None, required_revision:
 
 def readiness_status() -> tuple[bool, dict]:
     """Return fail-closed readiness details without exposing credentials."""
+    try:
+        aspect_writes = config_bool("ASPECT", "PERSISTENCE_WRITES_ENABLED", fallback=False)
+    except ValueError as exc:
+        return False, {"error": str(exc)}
     details = {
+        "aspect_persistence_writes_enabled": aspect_writes,
         "writes_enabled": writes_enabled(),
         "ttf_intraday_writes_enabled": ttf_intraday_writes_enabled(),
         "ttf_publication_enabled": ttf_publication_enabled(),
@@ -108,7 +114,7 @@ def readiness_status() -> tuple[bool, dict]:
         )
     )
     if not (
-        mutation_enabled
+        mutation_enabled or aspect_writes
         or details["bbg_option_chain_intraday_refresh_enabled"]
         or details["bbg_option_chain_settlement_refresh_enabled"]
     ):
@@ -127,6 +133,8 @@ def readiness_status() -> tuple[bool, dict]:
         return False, details
 
     required_relations = []
+    if aspect_writes:
+        required_relations.extend(("at_lng.aspect_position_snapshot", "at_lng.aspect_position", "at_lng.aspect_valuation_run", "at_lng.aspect_option_valuation"))
     publication_enabled = any(
         details[name]
         for name in (
@@ -201,7 +209,7 @@ def readiness_status() -> tuple[bool, dict]:
         details["missing_relations"] = missing
         return False, details
 
-    if publication_enabled or details["gas_batch_jobs_enabled"] or details["brent_intraday_writes_enabled"]:
+    if publication_enabled or details["gas_batch_jobs_enabled"] or details["brent_intraday_writes_enabled"] or aspect_writes:
         try:
             with engine.connect() as connection:
                 migration_head = connection.execute(
@@ -217,9 +225,13 @@ def readiness_status() -> tuple[bool, dict]:
             GAS_BATCH_MIGRATION_HEAD if details["gas_batch_jobs_enabled"]
             else INLINE_PUBLICATION_MIGRATION_HEAD
         )
-        if not any(_migration_lineage_contains(head, required_head) for head in migration_heads):
+        if (publication_enabled or details["gas_batch_jobs_enabled"] or details["brent_intraday_writes_enabled"]) and not any(_migration_lineage_contains(head, required_head) for head in migration_heads):
             details["error"] = "required calibration migration head is unavailable"
             details["required_migration_head"] = required_head
+            return False, details
+        if aspect_writes and not any(_migration_lineage_contains(head, ASPECT_PERSISTENCE_MIGRATION_HEAD) for head in migration_heads):
+            details["error"] = "required Aspect persistence migration is unavailable"
+            details["required_migration_head"] = ASPECT_PERSISTENCE_MIGRATION_HEAD
             return False, details
         if (details["brent_intraday_writes_enabled"] or details["brent_intraday_publication_enabled"]) and not any(
             _migration_lineage_contains(head, "20261023_01") for head in migration_heads

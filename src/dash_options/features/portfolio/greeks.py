@@ -3,47 +3,44 @@ import hashlib
 import io
 import json
 import logging
+import os
 import threading
 from collections import OrderedDict
 from functools import lru_cache
 from math import ceil
-from zoneinfo import ZoneInfo
 
 import dash
 import dash_ag_grid as dag
 from dash import Input, Output, State, callback, clientside_callback, dcc, html
 import pandas as pd
-import requests
 from sqlalchemy import text
 
 from dash_options.core.dataframes import concat_dataframes
 from dash_options.core.database_reads import DB_SCHEMA
-from dash_options.core.config import config_bool, config_value, get_database_engine
+from dash_options.core.source_identity import source_config_fingerprint
+from dash_options.features.portfolio import aspect_jobs
+from dash_options.core.config import config_bool, get_database_engine
+from dash_options.calibration.auth import (
+    AuthenticationError, AuthorizationError, Permission, authorize, current_request_identity,
+)
+from options.aspect import service as aspect_service
+from options.aspect.errors import AspectWorkflowError, AspectSourceError
+from options.aspect import repository as aspect_repository
+from options.aspect import storage as aspect_storage
+from options.aspect.valuation import is_aspect_option_deal_type
 from dash_options.core.snapshots import (
     SnapshotReferenceError,
     bump_snapshot_generation,
     publish_snapshot,
     resolve_snapshot,
-    snapshot_generation,
+    snapshot_generation, snapshot_store, snapshot_lock,
 )
 
 logger = logging.getLogger(__name__)
 
 VALUATION_TABLE = f'{DB_SCHEMA}.trades_options_valuation_current'
 ASPECT_SOURCE_LABEL = 'Aspect Position Exposure Report'
-ASPECT_DEFAULT_URL = (
-    'https://at.myaspect.net/webservice/aspectrs/'
-    '_MiddleOffice_POSITION_ExposureReport'
-)
 ASPECT_DEFAULT_BOOK = 'AD-LNG'
-ASPECT_REQUIRED_COLUMNS = {
-    'instrument',
-    'qty',
-    'uoM',
-    'maturityForwardDate',
-    'strategy',
-    'entityType',
-}
 
 STRATEGY_DROPDOWN_LABELS = {
     'select_all': 'Select all',
@@ -250,18 +247,12 @@ def _empty_aspect_store(message='Aspect exposure has not been loaded', status='i
     }
 
 
-class AspectConfigurationError(RuntimeError):
-    """Raised when the Aspect source is not configured for this runtime."""
-
-
-class AspectSourceError(RuntimeError):
-    """Raised when the Aspect source cannot provide a usable exposure snapshot."""
-
-
 def _greeks_cache_key(namespace, parts):
     payload = json.dumps(
         {
             'namespace': namespace,
+            'source': source_config_fingerprint(),
+            'release': os.getenv('APP_CODE_REVISION', 'checkout'),
             'generation': snapshot_generation('greeks'),
             'parts': parts,
         },
@@ -273,53 +264,26 @@ def _greeks_cache_key(namespace, parts):
 
 
 def _cache_greeks_payload(payload, namespace, parts):
-    cache_key = _greeks_cache_key(namespace, parts)
-    reference = publish_snapshot(
-        f'greeks-{namespace}-v1',
-        cache_key,
-        payload,
-        metadata=payload.get('meta', {}),
-        group='greeks',
-    )
-    snapshot_id = reference['snapshot_id']
-    with _GREEKS_SERVER_CACHE_LOCK:
-        _GREEKS_SERVER_CACHE[snapshot_id] = payload
-        _GREEKS_SERVER_CACHE.move_to_end(snapshot_id)
-        while len(_GREEKS_SERVER_CACHE) > _GREEKS_SERVER_CACHE_MAX_ENTRIES:
-            _GREEKS_SERVER_CACHE.popitem(last=False)
-    return reference
+    # The content digest prevents two distinct payloads sharing an immutable reference.
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str, separators=(',', ':')).encode()).hexdigest()
+    cache_key = _greeks_cache_key(namespace, [parts, digest])
+    return publish_snapshot(f'greeks-{namespace}-v2', cache_key, payload,
+                            metadata=payload.get('meta', {}), group='greeks')
 
 
 def _resolve_greeks_payload(reference):
-    if not reference:
-        return _empty_store('No data available')
-    if not isinstance(reference, dict):
+    if not reference or not isinstance(reference, dict):
         return _empty_store('Server snapshot expired; refresh the page')
     if 'rows' in reference:
         return reference
-    snapshot_id = reference.get('snapshot_id')
     namespace = reference.get('namespace')
     if not isinstance(namespace, str) or not namespace.startswith('greeks-'):
         return _empty_store('Server snapshot expired; refresh the page')
-    with _GREEKS_SERVER_CACHE_LOCK:
-        payload = _GREEKS_SERVER_CACHE.get(snapshot_id)
-        if payload is not None:
-            _GREEKS_SERVER_CACHE.move_to_end(snapshot_id)
-    if payload is not None:
-        return payload
     try:
-        payload = resolve_snapshot(
-            reference,
-            expected_namespace=namespace,
-        )
+        # Always validate namespace, source revision and expiry, including warm reads.
+        return resolve_snapshot(reference, expected_namespace=namespace)
     except SnapshotReferenceError:
         return _empty_store('Server snapshot expired; refresh the page')
-    with _GREEKS_SERVER_CACHE_LOCK:
-        _GREEKS_SERVER_CACHE[snapshot_id] = payload
-        _GREEKS_SERVER_CACHE.move_to_end(snapshot_id)
-        while len(_GREEKS_SERVER_CACHE) > _GREEKS_SERVER_CACHE_MAX_ENTRIES:
-            _GREEKS_SERVER_CACHE.popitem(last=False)
-    return payload
 
 
 def _resolve_aspect_payload(reference):
@@ -706,162 +670,103 @@ def _format_cob_option(value):
     return date_value.strftime('%Y-%m-%d')
 
 
-def _dubai_today():
-    return pd.Timestamp.now(tz=ZoneInfo('Asia/Dubai')).date()
+def _load_aspect_payload(selected_date, mode='settlement'):
+    """Resolve the current version cheaply; share decoded data by immutable ID."""
+    engine = get_database_engine()
+    flow = aspect_storage.flow_status(engine,selected_date,mode,aspect_service.configured_scope(),schema=DB_SCHEMA)
+    header = aspect_repository.snapshot_header(engine, selected_date, schema=DB_SCHEMA,
+                                               mode=mode, scope=aspect_service.configured_scope())
+    if header is None:
+        if flow:
+            raise AspectSourceError(f"Aspect source {flow['source_snapshot_id']} saved, but no complete {mode} valuation is published for {selected_date}. Revalue saved positions after resolving the source or market-data error.")
+        raise AspectSourceError(f'No persisted Aspect {mode} snapshot for {selected_date}.')
+    snapshot_id = str(header['snapshot_id'])
+    key = _greeks_cache_key('aspect-version', [snapshot_id])
+    cache_key = 'aspect-decoded:' + key
+    with snapshot_lock(cache_key, expire=60):
+        ref = snapshot_store.cache.get(cache_key)
+        if ref:
+            try:
+                return _with_aspect_flow_status(resolve_snapshot(ref, expected_namespace='greeks-aspect-version-v2'),flow)
+            except SnapshotReferenceError:
+                pass
+        payload = aspect_service.load_snapshot(engine=engine, schema=DB_SCHEMA, snapshot_id=snapshot_id)
+        ref = publish_snapshot('greeks-aspect-version-v2', snapshot_id, payload, group='greeks')
+        snapshot_store.cache.set(cache_key, ref, expire=3600, tag='greeks')
+        return _with_aspect_flow_status(payload,flow)
 
 
-def _resolve_aspect_request_date(mode, selected_date):
-    if mode == 'live':
-        return _dubai_today()
-    if mode != 'settlement':
-        raise ValueError(f'Unsupported Aspect pricing mode: {mode}')
-
-    date_value = _to_timestamp(selected_date)
-    if date_value is None:
-        raise AspectSourceError('Select a COB date before loading Aspect settlement exposure.')
-    return date_value.date()
-
-
-def _aspect_request_timeout():
-    raw_value = config_value('ASPECT', 'REQUEST_TIMEOUT_SECONDS', fallback='90')
-    try:
-        timeout = float(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise AspectConfigurationError(
-            'ASPECT.REQUEST_TIMEOUT_SECONDS must be a number.'
-        ) from exc
-    if not 1 <= timeout <= 300:
-        raise AspectConfigurationError(
-            'ASPECT.REQUEST_TIMEOUT_SECONDS must be between 1 and 300 seconds.'
-        )
-    return timeout
-
-
-def _extract_aspect_response_records(payload):
-    if isinstance(payload, list):
+def _with_aspect_flow_status(payload,flow):
+    if not flow:
         return payload
-    if isinstance(payload, dict):
-        for key in ('data', 'rows', 'result'):
-            candidate = payload.get(key)
-            if isinstance(candidate, list):
-                return candidate
-        if ASPECT_REQUIRED_COLUMNS.issubset(payload):
-            return [payload]
-    raise AspectSourceError('Aspect returned an unsupported response shape.')
+    meta = dict(payload['meta'])
+    warnings = list(meta.get('warnings',[]))
+    run = flow.get('run') or {}
+    if flow['source_snapshot_id'] != meta.get('source_snapshot_id'):
+        warnings.append('A newer Aspect fetch has no published valuation. Showing the previous complete valuation and its matching positions.')
+    elif run.get('status') in {'failed','running'}:
+        warnings.append('Latest revaluation '+run['status']+'; showing the previous complete valuation.')
+    meta.update(warnings=warnings,latest_source_snapshot_id=flow['source_snapshot_id'])
+    return {**payload,'meta':meta}
 
 
-def fetch_aspect_exposure_report(request_date):
-    username = config_value('ASPECT', 'USERNAME')
-    password = config_value('ASPECT', 'PASSWORD')
-    if not username or not password:
-        raise AspectConfigurationError(
-            'Aspect credentials are unavailable. Configure ASPECT_USERNAME and '
-            'ASPECT_PASSWORD for the dashboard runtime.'
-        )
+def _aligned_aspect_payload(payload, selected_date):
+    meta = (payload or {}).get('meta', {})
+    if meta.get('status') == 'ok' and (
+        _format_cob_option(meta.get('requested_cob_date')) != _format_cob_option(selected_date)
+    ):
+        return _empty_aspect_store('Aspect COB does not match the selected portfolio COB.', status='error')
+    return payload or _empty_aspect_store()
 
-    endpoint = config_value('ASPECT', 'BASE_URL', fallback=ASPECT_DEFAULT_URL) or ASPECT_DEFAULT_URL
-    book = config_value('ASPECT', 'BOOK', fallback=ASPECT_DEFAULT_BOOK) or ASPECT_DEFAULT_BOOK
+
+def _refresh_aspect_payload(mode, selected_date):
+    authorize(current_request_identity(), Permission.REFRESH_ASPECT)
+    return aspect_service.refresh_snapshot(selected_date, mode=mode, engine=get_database_engine(), schema=DB_SCHEMA)
+
+
+class PortfolioSourceUnavailable(RuntimeError):
+    """Source failures are distinct from successful empty portfolios."""
+
+
+def _combined_option_data(cob_date, aspect_payload=None):
+    aspect_meta = (aspect_payload or {}).get('meta', {})
+    aspect_identity = aspect_meta.get('snapshot_id') or hashlib.sha256(json.dumps(aspect_payload, sort_keys=True, default=str).encode()).hexdigest()
+    key = 'greeks-combined:' + _greeks_cache_key('combined', [cob_date, aspect_identity, aspect_meta.get('warnings',[])])
+    with snapshot_lock(key, expire=60):
+        data = snapshot_store.cache.get(key)
+        if data is not None:
+            return data.copy()
+        data = _build_combined_option_data(cob_date, aspect_payload)
+        if not data.attrs.get('source_unavailable'):
+            snapshot_store.cache.set(key, data, expire=300, tag='greeks')
+        return data
+
+
+def _build_combined_option_data(cob_date, aspect_payload=None):
+    warnings = []
+    unavailable = False
     try:
-        verify_ssl = config_bool('ASPECT', 'VERIFY_SSL', fallback=True)
-    except ValueError as exc:
-        raise AspectConfigurationError(str(exc)) from exc
-    proxy_url = config_value('NETWORK', 'PROXY_URL')
-    timeout = _aspect_request_timeout()
-    today_pricing = 0 if request_date == _dubai_today() else 1
-    request_payload = {
-        'cobDate': request_date.strftime('%Y-%m-%d'),
-        'todayPricing': today_pricing,
-        'book': book,
-        'displayExchangeTradeOtc': True,
-    }
-    request_options = {
-        'json': request_payload,
-        'auth': (username, password),
-        'timeout': (min(10.0, timeout), timeout),
-        'verify': verify_ssl,
-    }
-    if proxy_url:
-        request_options['proxies'] = {'http': proxy_url, 'https': proxy_url}
-
-    try:
-        response = requests.post(endpoint, **request_options)
-    except requests.RequestException as exc:
-        raise AspectSourceError('Aspect service could not be reached.') from exc
-
-    if response.status_code in {401, 403}:
-        raise AspectSourceError('Aspect authentication was rejected.')
-    if not response.ok:
-        raise AspectSourceError(
-            f'Aspect service request failed with HTTP {response.status_code}.'
-        )
-
-    try:
-        response_payload = response.json()
-    except ValueError as exc:
-        raise AspectSourceError('Aspect returned a non-JSON response.') from exc
-
-    records = _extract_aspect_response_records(response_payload)
-    return pd.DataFrame.from_records(records)
-
-
-def _prepare_aspect_records(data):
-    missing_columns = sorted(ASPECT_REQUIRED_COLUMNS - set(data.columns))
-    if missing_columns:
-        raise AspectSourceError(
-            'Aspect response is missing required fields: ' + ', '.join(missing_columns)
-        )
-
-    prepared = data.copy()
-    for column in ASPECT_EXPORT_COLUMNS:
-        if column not in prepared.columns:
-            prepared[column] = None
-
-    prepared['instrument'] = prepared['instrument'].astype('string').str.strip()
-    prepared['qty'] = pd.to_numeric(prepared['qty'], errors='coerce')
-    prepared['maturityForwardDate'] = pd.to_datetime(
-        prepared['maturityForwardDate'],
-        errors='coerce',
-    )
-    valid_rows = (
-        prepared['instrument'].notna()
-        & prepared['instrument'].ne('')
-        & prepared['qty'].notna()
-        & prepared['maturityForwardDate'].notna()
-    )
-    rejected_rows = int((~valid_rows).sum())
-    prepared = prepared.loc[valid_rows, ASPECT_EXPORT_COLUMNS].copy()
-    if prepared.empty and not data.empty:
-        raise AspectSourceError(
-            'Aspect returned rows, but none had a valid instrument, quantity, and maturity.'
-        )
-
-    for column in ('uoM', 'strategy', 'dealType', 'entityType', 'exchangeTradeOtc'):
-        prepared[column] = prepared[column].fillna('N/A').astype(str)
-    prepared['qty'] = prepared['qty'].astype(float)
-    prepared['maturityForwardDate'] = prepared['maturityForwardDate'].dt.strftime('%Y-%m-%d')
-    return prepared, rejected_rows
-
-
-def _load_aspect_payload(mode, selected_date):
-    request_date = _resolve_aspect_request_date(mode, selected_date)
-    source_data = fetch_aspect_exposure_report(request_date)
-    prepared, rejected_rows = _prepare_aspect_records(source_data)
-    fetched_at = pd.Timestamp.now(tz=ZoneInfo('Asia/Dubai')).isoformat()
-    meta = {
-        'status': 'ok',
-        'message': 'Aspect exposure loaded',
-        'source': ASPECT_SOURCE_LABEL,
-        'mode': mode,
-        'requested_cob_date': request_date.strftime('%Y-%m-%d'),
-        'fetched_at': fetched_at,
-        'source_rows': int(source_data.shape[0]),
-        'accepted_rows': int(prepared.shape[0]),
-        'rejected_rows': rejected_rows,
-        'instruments': int(prepared['instrument'].nunique()),
-        'strategies': int(prepared['strategy'].nunique()),
-        'book': config_value('ASPECT', 'BOOK', fallback=ASPECT_DEFAULT_BOOK) or ASPECT_DEFAULT_BOOK,
-    }
-    return {'meta': meta, 'rows': prepared.to_dict('records')}
+        data = fetch_options_data(cob_date)
+    except PortfolioSourceUnavailable as exc:
+        data = pd.DataFrame(columns=DATA_COLUMNS)
+        warnings.append(str(exc))
+        unavailable = True
+    else:
+        if data.empty:
+            warnings.append('No trades_options valuation exists for this COB; option totals contain Aspect only.')
+    payload = _aligned_aspect_payload(aspect_payload, cob_date)
+    if payload.get('meta', {}).get('status') == 'ok':
+        options = pd.DataFrame(payload.get('option_valuations', []))
+        if not options.empty:
+            options['source'] = ASPECT_SOURCE_LABEL
+            options['source_row_id'] = options['aspect_source_row_id']
+            data = concat_dataframes([data, options], ignore_index=True)
+        warnings.extend(payload.get('meta', {}).get('warnings', []))
+    else:
+        warnings.append(payload.get('meta', {}).get('message') or 'Aspect snapshot unavailable; totals exclude Aspect.')
+    data.attrs['source_warning'] = ' | '.join(warnings) or None
+    data.attrs['source_unavailable'] = unavailable or payload.get('meta', {}).get('status') != 'ok'
+    return data
 
 
 def _read_sql(query, params=None):
@@ -876,16 +781,22 @@ def get_available_dates():
             ORDER BY cob_date DESC
         '''
         dates = _read_sql(query)
-        return [_format_cob_option(value) for value in dates['cob_date'].dropna()]
     except Exception:
-        return []
+        option_dates = []
+    else:
+        option_dates = [_format_cob_option(value) for value in dates['cob_date'].dropna()]
+    try:
+        aspect_dates = aspect_service.available_snapshot_dates(engine=get_database_engine(), schema=DB_SCHEMA)
+    except AspectWorkflowError:
+        aspect_dates = []
+    return sorted(set(option_dates + aspect_dates), reverse=True)
 
 
-def fetch_filter_values(cob_date):
+def fetch_filter_values(cob_date, aspect_payload=None):
     if not cob_date:
         return [], [], []
 
-    data = fetch_options_data(cob_date)
+    data = _combined_option_data(cob_date, aspect_payload)
     if data.empty:
         return [], [], []
 
@@ -910,11 +821,12 @@ def fetch_filter_values(cob_date):
 
 
 def fetch_options_data(cob_date):
-    return _fetch_options_data_cached(cob_date).copy()
+    return _fetch_options_data_cached(cob_date, snapshot_generation('greeks')).copy()
 
 
 @lru_cache(maxsize=8)
-def _fetch_options_data_cached(cob_date):
+def _fetch_options_data_cached(cob_date, generation=None):
+    del generation
     if not cob_date:
         return pd.DataFrame(columns=DATA_COLUMNS)
 
@@ -925,8 +837,9 @@ def _fetch_options_data_cached(cob_date):
     '''
     try:
         data = _read_sql(query, {'cob_date': cob_date})
-    except Exception:
-        return pd.DataFrame(columns=DATA_COLUMNS)
+    except Exception as exc:
+        logger.warning('Core portfolio valuation read failed', exc_info=True)
+        raise PortfolioSourceUnavailable('trades_options source unavailable; option totals are incomplete. Retry Refresh.') from exc
 
     for column in ['cob_date', 'trade_date', 'expiration_date', 'maturity_date_a', 'maturity_date_b']:
         if column in data.columns:
@@ -935,12 +848,12 @@ def _fetch_options_data_cached(cob_date):
     return data
 
 
-def fetch_max_maturity_date(cob_date):
+def fetch_max_maturity_date(cob_date, aspect_payload=None):
     if not cob_date:
         return None
 
     try:
-        data = fetch_options_data(cob_date)
+        data = _combined_option_data(cob_date, aspect_payload)
     except Exception:
         return None
 
@@ -983,12 +896,12 @@ def _iter_year_ends(start_date, end_date):
     return values
 
 
-def build_maturity_cutoff_options(cob_date):
+def build_maturity_cutoff_options(cob_date, aspect_payload=None):
     cob_ts = _to_timestamp(cob_date)
     if cob_ts is None:
         return [], None, [], None
 
-    max_maturity = fetch_max_maturity_date(cob_date) or cob_ts
+    max_maturity = fetch_max_maturity_date(cob_date, aspect_payload) or cob_ts
     default_month = _default_month_cutoff(cob_ts)
     default_quarter = _default_quarter_cutoff(cob_ts)
     option_end = max(max_maturity, default_month, default_quarter)
@@ -1010,8 +923,13 @@ def build_maturity_cutoff_options(cob_date):
     )
 
 
-@lru_cache(maxsize=1)
 def fetch_instrument_unit_map():
+    return _fetch_instrument_unit_map_cached(snapshot_generation('greeks'))
+
+
+@lru_cache(maxsize=1)
+def _fetch_instrument_unit_map_cached(generation):
+    del generation
     try:
         query = f'''
             SELECT
@@ -1024,8 +942,8 @@ def fetch_instrument_unit_map():
                 ON a."Marker" = b."Instrument"
         '''
         mapping = _read_sql(query)
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise PortfolioSourceUnavailable('Instrument unit mappings are unavailable; exposures cannot be converted safely.') from exc
 
     unit_map = {}
     for row in mapping.to_dict('records'):
@@ -1038,6 +956,9 @@ def fetch_instrument_unit_map():
             'conv_factor': _safe_number(row.get('Conv_factor'), 1.0) or 1.0,
         }
     return unit_map
+
+
+fetch_instrument_unit_map.cache_clear = _fetch_instrument_unit_map_cached.cache_clear
 
 
 def _instrument_unit_info(asset, unit_map, fallback_unit):
@@ -1073,8 +994,8 @@ def normalize_greek_contributions(
         pair = _standard_pair(row.get('asset_a'), row.get('asset_b'))
         underlying_sides = _underlying_sides(row)
         base = {
-            'source_row_id': int(source_row_id),
-            'source': 'Options valuation',
+            'source_row_id': (row['aspect_source_row_id'] if pd.notna(row.get('aspect_source_row_id')) else int(source_row_id)),
+            'source': (ASPECT_SOURCE_LABEL if pd.notna(row.get('aspect_source_row_id')) else 'Options valuation'),
             'cob_date': _format_cob_option(row.get('cob_date')),
             'strategy': row.get('substrategy') or 'N/A',
             'trade_type': row.get('type_trade') or 'N/A',
@@ -1225,6 +1146,8 @@ def normalize_aspect_contributions(
         )
 
     for source_row_id, row in enumerate(data.to_dict('records')):
+        if row.get('is_option') is True or is_aspect_option_deal_type(row.get('dealType')):
+            continue
         instrument = str(row.get('instrument') or '').strip()
         if not instrument:
             continue
@@ -1245,7 +1168,7 @@ def normalize_aspect_contributions(
             cob_date,
         )
         base = {
-            'source_row_id': f'aspect-{source_row_id}',
+            'source_row_id': f"aspect-linear-{row.get('source_row_id', source_row_id)}",
             'source': ASPECT_SOURCE_LABEL,
             'cob_date': _format_cob_option(cob_date),
             'strategy': row.get('strategy') or 'N/A',
@@ -1266,7 +1189,7 @@ def normalize_aspect_contributions(
                 'bucket_type': 'Instrument',
                 'risk_bucket': instrument,
                 'instrument': instrument,
-                'unit': display_unit,
+                'unit': 'Lots' if unit_mode == 'lots' else display_unit,
                 'maturity_bucket': maturity_bucket,
                 'maturity_pair': maturity_bucket,
                 'exposure': allocated_value,
@@ -1605,6 +1528,7 @@ def create_raw_rows_df(rows):
     columns = [
         'cob_date',
         'source_row_id',
+        'source',
         'strategy',
         'trade_type',
         'option_type',
@@ -1624,6 +1548,7 @@ def create_raw_rows_df(rows):
         columns={
             'cob_date': 'COB Date',
             'source_row_id': 'Source Row',
+            'source': 'Source',
             'strategy': 'Strategy',
             'trade_type': 'Trade Type',
             'option_type': 'Option Type',
@@ -1737,16 +1662,19 @@ def _aspect_status_text(meta):
     if status != 'ok':
         return meta.get('message') or 'Aspect exposure is unavailable.'
 
-    mode_label = 'Live' if meta.get('mode') == 'live' else 'Settlement'
+    mode_label = {'live': 'Live', 'imported': 'Imported'}.get(meta.get('mode'), 'Settlement')
     message = (
         f"{mode_label} Aspect exposure | COB {meta.get('requested_cob_date')} | "
         f"{meta.get('accepted_rows', 0):,} accepted rows | "
+        f"{meta.get('valued_option_rows', 0):,} valued options available to portfolio filters | "
         f"{meta.get('instruments', 0):,} instruments | "
-        f"book {meta.get('book') or ASPECT_DEFAULT_BOOK}"
+        f"book {meta.get('book') or 'all requested books'}"
     )
     rejected_rows = int(meta.get('rejected_rows') or 0)
     if rejected_rows:
         message += f' | {rejected_rows:,} invalid rows excluded'
+    if meta.get('volatility_cob_dates'):
+        message += ' | Volatility COB ' + ', '.join(meta['volatility_cob_dates'])
     return message
 
 
@@ -2234,7 +2162,13 @@ def build_kpi_strip(rows, meta):
     ], className='greeks-kpi-strip')
 
 
-def _preserve_or_default(current_values, available_values):
+def _preserve_or_default(current_values, available_values, previous_options=None):
+    if previous_options:
+        previous_values = _option_values(previous_options)
+        if set(current_values or []) == previous_values:
+            return available_values
+        if current_values == []:
+            return []
     available_set = set(available_values)
     preserved = [value for value in (current_values or []) if value in available_set]
     return preserved if preserved else available_values
@@ -2249,6 +2183,9 @@ layout = html.Div([
     dcc.Store(id='greeks-unfiltered-normalized-store', storage_type='memory'),
     dcc.Store(id='greeks-normalized-store', storage_type='memory'),
     dcc.Store(id='greeks-aspect-store', storage_type='memory'),
+    dcc.Store(id='greeks-aspect-job-store', storage_type='memory'),
+    dcc.Store(id='greeks-aspect-job-result', storage_type='memory'),
+    dcc.Interval(id='greeks-aspect-job-poll', interval=2000, disabled=True),
     dcc.Download(id='download-greeks-monitor-workbook'),
 
     html.Div([
@@ -2387,15 +2324,17 @@ layout = html.Div([
                     html.Button(
                         'COB',
                         id='greeks-aspect-settlement-btn',
+                        disabled=not config_bool('ASPECT', 'PERSISTENCE_WRITES_ENABLED', fallback=False),
                         className='greeks-aspect-button greeks-aspect-button-secondary',
-                        title='Load the selected COB settlement exposure from Aspect',
+                        title='Refresh and persist Aspect settlement positions; requires enabled writes and calibrator permission',
                         **{'aria-label': 'Load Aspect COB'},
                     ),
                     html.Button(
                         'Live',
                         id='greeks-aspect-live-btn',
+                        disabled=not config_bool('ASPECT', 'PERSISTENCE_WRITES_ENABLED', fallback=False),
                         className='greeks-aspect-button greeks-aspect-button-live',
-                        title='Load today’s live exposure from Aspect',
+                        title='Refresh and persist today’s Aspect positions; requires enabled writes and calibrator permission',
                         **{'aria-label': 'Load Aspect Live'},
                     ),
                     html.Button(
@@ -2428,8 +2367,13 @@ layout = html.Div([
                     type='circle',
                     children=html.Div([
                         html.Div([
-                            html.H3('Aspect Delta Overlay', className='section-title-inline greeks-monitor-title'),
+                            html.H3('Aspect Linear Delta Overlay', className='section-title-inline greeks-monitor-title'),
+                            html.Div([html.Label('Aspect mode', className='inline-filter-label'),
+                                dcc.Dropdown(id='greeks-aspect-mode', options=[{'label':'Settlement', 'value':'settlement'}, {'label':'Live', 'value':'live'}, {'label':'Imported', 'value':'imported'}], value='settlement', clearable=False),
+                            ], style={'width':'160px', 'marginLeft':'auto'}),
+                            html.Button('Revalue saved positions',id='greeks-aspect-revalue-btn',n_clicks=0,disabled=not config_bool('ASPECT','PERSISTENCE_WRITES_ENABLED',fallback=False),className='btn btn-secondary',style={'marginLeft':'12px'},title='Value the latest saved positions using governed market data, without fetching Aspect'),
                         ], className='inline-section-header supply-dest-section-header greeks-monitor-section-header'),
+                        html.Div(id='greeks-aspect-job-status', role='status', **{'aria-live':'polite'}),
                         html.Div(
                             id='greeks-aspect-status',
                             className='greeks-aspect-status greeks-aspect-status-idle',
@@ -2494,51 +2438,86 @@ def trigger_data_refresh(n_clicks):
 
 
 @callback(
-    Output('greeks-aspect-store', 'data'),
+    Output('greeks-aspect-job-store', 'data'),
     Input('greeks-aspect-settlement-btn', 'n_clicks'),
     Input('greeks-aspect-live-btn', 'n_clicks'),
-    State('date-selector', 'value'),
-    prevent_initial_call=True,
-    running=[
-        (Output('greeks-aspect-settlement-btn', 'disabled'), True, False),
-        (Output('greeks-aspect-live-btn', 'disabled'), True, False),
-    ],
+    Input('greeks-aspect-revalue-btn', 'n_clicks'),
+    State('date-selector', 'value'), State('greeks-aspect-mode', 'value'), prevent_initial_call=True,
 )
-def load_aspect_exposure(settlement_clicks, live_clicks, selected_date):
-    del settlement_clicks, live_clicks
-    triggered_id = dash.ctx.triggered_id
-    mode = 'live' if triggered_id == 'greeks-aspect-live-btn' else 'settlement'
+def submit_aspect_refresh(settlement_clicks, live_clicks, revalue_clicks, selected_date, selected_mode):
+    del settlement_clicks, live_clicks, revalue_clicks
     try:
-        payload = _load_aspect_payload(mode, selected_date)
-    except (AspectConfigurationError, AspectSourceError) as exc:
-        logger.warning('Aspect exposure load failed: %s', exc)
+        identity = current_request_identity()
+        authorize(identity, Permission.REFRESH_ASPECT)
+        if dash.ctx.triggered_id == 'greeks-aspect-revalue-btn':
+            return aspect_jobs.submit(selected_mode,selected_date,identity.subject,action='revalue')
+        mode = 'live' if dash.ctx.triggered_id == 'greeks-aspect-live-btn' else 'settlement'
+        return aspect_jobs.submit(mode, selected_date, identity.subject)
+    except (AspectWorkflowError, AuthenticationError, AuthorizationError, ValueError) as exc:
+        return {'error':str(exc)}
+
+
+@callback(
+    Output('greeks-aspect-job-status', 'children'),
+    Output('greeks-aspect-job-poll', 'disabled'),
+    Output('greeks-aspect-settlement-btn', 'disabled'),
+    Output('greeks-aspect-live-btn', 'disabled'),
+    Output('greeks-aspect-revalue-btn', 'disabled'),
+    Output('greeks-aspect-job-result', 'data'),
+    Input('greeks-aspect-job-store', 'data'),
+    Input('greeks-aspect-job-poll', 'n_intervals'),
+)
+def poll_aspect_refresh(ticket, interval):
+    del interval
+    disabled = not config_bool('ASPECT', 'PERSISTENCE_WRITES_ENABLED', fallback=False)
+    if not ticket:
+        return '', True, disabled, disabled, disabled, dash.no_update
+    try:
+        authorize(current_request_identity(), Permission.REFRESH_ASPECT)
+        if ticket.get('error'):
+            raise ValueError(ticket['error'])
+        state = aspect_jobs.poll(ticket)
+        if state['status'] == 'failed':
+            return state['error'], True, disabled, disabled, disabled, state
+        if state['status'] == 'complete':
+            return 'Aspect valuation completed.', True, disabled, disabled, disabled, state
+        return f"Aspect refresh: {state['phase']}… Previous snapshot remains displayed.", False, True, True, True, dash.no_update
+    except (AuthenticationError, AuthorizationError, ValueError) as exc:
+        return str(exc), True, disabled, disabled, disabled, dash.no_update
+
+
+@callback(
+    Output('greeks-aspect-store', 'data'),
+    Input('date-selector', 'value'), Input('refresh-trigger-store', 'data'),
+    Input('greeks-aspect-mode', 'value'), Input('greeks-aspect-job-result', 'data'),
+)
+def load_aspect_exposure(selected_date, refresh_trigger=None, mode='settlement', job_result=None):
+    del refresh_trigger
+    if not selected_date:
+        return _empty_aspect_store()
+    try:
+        if dash.ctx.triggered_id == 'greeks-aspect-job-result' and job_result:
+            dash.set_props('date-selector', {'value':job_result['cob_date']})
+            dash.set_props('greeks-aspect-mode', {'value':job_result['mode']})
+            selected_date, mode = job_result['cob_date'], job_result['mode']
+        payload = _load_aspect_payload(selected_date, mode)
+    except AspectWorkflowError as exc:
+        logger.warning('Aspect exposure read failed: %s', exc)
         return _empty_aspect_store(str(exc), status='error')
     except Exception:
         logger.exception('Unexpected Aspect exposure load failure')
-        return _empty_aspect_store(
-            'Aspect exposure could not be loaded because of an unexpected source error.',
-            status='error',
-        )
-
+        return _empty_aspect_store('Aspect snapshot could not be read. Retry Refresh.', status='error')
     meta = payload.get('meta', {})
-    return _cache_greeks_payload(
-        payload,
-        'aspect',
-        [
-            meta.get('mode'),
-            meta.get('requested_cob_date'),
-            meta.get('fetched_at'),
-        ],
-    )
+    return _cache_greeks_payload(payload, 'aspect', [meta.get('snapshot_id')])
 
 
 @callback(
     Output('date-selector', 'options'),
     Output('date-selector', 'value'),
     Input('refresh-trigger-store', 'data'),
-    State('date-selector', 'value'),
+    State('date-selector', 'value'), Input('greeks-aspect-job-result','data'),
 )
-def update_date_options(refresh_trigger, selected_date):
+def update_date_options(refresh_trigger, selected_date, job_result=None):
     del refresh_trigger
     dates = get_available_dates()
     options = [{'label': date, 'value': date} for date in dates]
@@ -2558,19 +2537,24 @@ def update_date_options(refresh_trigger, selected_date):
     State('strategy-selector', 'value'),
     State('trade-type-selector', 'value'),
     State('risk-bucket-selector', 'value'),
+    Input('greeks-aspect-store', 'data'),
+    State('strategy-selector', 'options'),
+    State('trade-type-selector', 'options'),
+    State('risk-bucket-selector', 'options'),
 )
-def update_filter_options(selected_date, refresh_trigger, selected_strategies, selected_trade_types, selected_buckets):
+def update_filter_options(selected_date, refresh_trigger, selected_strategies, selected_trade_types, selected_buckets, aspect_store=None,
+                          previous_strategies=None, previous_trade_types=None, previous_buckets=None):
     del refresh_trigger
-    strategies, trade_types, bucket_options = fetch_filter_values(selected_date)
+    strategies, trade_types, bucket_options = fetch_filter_values(selected_date, _resolve_aspect_payload(aspect_store))
     bucket_values = [option['value'] for option in bucket_options]
 
     return (
         [{'label': strategy, 'value': strategy} for strategy in strategies],
-        _preserve_or_default(selected_strategies, strategies),
+        _preserve_or_default(selected_strategies, strategies, previous_strategies),
         [{'label': trade_type, 'value': trade_type} for trade_type in trade_types],
-        _preserve_or_default(selected_trade_types, trade_types),
+        _preserve_or_default(selected_trade_types, trade_types, previous_trade_types),
         bucket_options,
-        _preserve_or_default(selected_buckets, bucket_values),
+        _preserve_or_default(selected_buckets, bucket_values, previous_buckets),
     )
 
 
@@ -2586,6 +2570,7 @@ def update_filter_options(selected_date, refresh_trigger, selected_strategies, s
     Input('refresh-trigger-store', 'data'),
     State('month-through-selector', 'value'),
     State('quarter-through-selector', 'value'),
+    Input('greeks-aspect-store', 'data'),
 )
 def update_maturity_cutoff_controls(
     selected_date,
@@ -2593,9 +2578,10 @@ def update_maturity_cutoff_controls(
     refresh_trigger,
     selected_month_through,
     selected_quarter_through,
+    aspect_store=None,
 ):
     del refresh_trigger
-    month_options, default_month, quarter_options, default_quarter = build_maturity_cutoff_options(selected_date)
+    month_options, default_month, quarter_options, default_quarter = build_maturity_cutoff_options(selected_date, _resolve_aspect_payload(aspect_store))
     if not month_options or not quarter_options:
         return month_options, default_month, quarter_options, default_quarter, True, True
 
@@ -2635,13 +2621,17 @@ def _build_unfiltered_greeks_store(
     month_through,
     quarter_through,
     unit_mode,
+    aspect_payload=None,
 ):
     if not selected_date:
         return _empty_store('No COB date selected')
 
-    data = fetch_options_data(selected_date)
+    data = _combined_option_data(selected_date, aspect_payload)
     if data.empty:
-        return _empty_store('No option Greeks found')
+        result = _empty_store(data.attrs.get('source_warning') or 'No option Greeks found')
+        result['meta'].update(cob_date=selected_date, source_warning=data.attrs.get('source_warning'),
+                              aspect_snapshot_id=(aspect_payload or {}).get('meta', {}).get('snapshot_id'))
+        return result
 
     month_cutoff, quarter_cutoff = _resolve_maturity_cutoffs(selected_date, month_through, quarter_through)
     normalized = normalize_greek_contributions(
@@ -2668,12 +2658,28 @@ def _build_unfiltered_greeks_store(
         'month_through': _format_cutoff_value(month_cutoff),
         'quarter_through': _format_cutoff_value(quarter_cutoff),
         'unit_mode': unit_mode,
+        'source_warning': data.attrs.get('source_warning'),
+        'aspect_snapshot_id': (aspect_payload or {}).get('meta', {}).get('snapshot_id'),
     }
 
     return {'meta': meta, 'rows': normalized.to_dict('records')}
 
 
+
+def _safe_build_unfiltered_greeks_store(*args, **kwargs):
+    try:
+        return _build_unfiltered_greeks_store(*args, **kwargs)
+    except PortfolioSourceUnavailable as exc:
+        result = _empty_store(str(exc))
+        result['meta']['source_warning'] = str(exc)
+        return result
+
 def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, selected_buckets):
+    def empty(message):
+        result = _empty_store(message)
+        result['meta'].update({k:base_store.get('meta', {}).get(k) for k in ('cob_date', 'aspect_snapshot_id', 'source_warning')})
+        return result
+
     if not base_store:
         return _empty_store('No COB date selected')
 
@@ -2681,18 +2687,18 @@ def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, 
     if base_message == 'No COB date selected':
         return base_store
     if selected_strategies == []:
-        return _empty_store('No strategies selected')
+        return empty('No strategies selected')
     if selected_trade_types == []:
-        return _empty_store('No trade types selected')
+        return empty('No trade types selected')
     if selected_buckets == []:
-        return _empty_store('No instruments or pairs selected')
+        return empty('No instruments or pairs selected')
 
     if not base_store or not base_store.get('rows'):
-        return _empty_store(base_message or 'No data available')
+        return empty(base_message or 'No data available')
 
     rows = pd.DataFrame(base_store['rows'])
     if rows.empty:
-        return _empty_store(base_message or 'No data available')
+        return empty(base_message or 'No data available')
 
     if selected_strategies:
         rows = rows[rows['strategy'].astype(str).isin(selected_strategies)]
@@ -2700,17 +2706,14 @@ def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, 
         rows = rows[rows['trade_type'].astype(str).isin(selected_trade_types)]
 
     if rows.empty:
-        return _empty_store('No rows match selected strategy/trade-type filters')
+        return empty('No rows match selected strategy/trade-type filters')
 
     source_order = rows['source_row_id'].drop_duplicates().tolist()
-    source_id_map = {source_row_id: dense_id for dense_id, source_row_id in enumerate(source_order)}
-    rows = rows.copy()
-    rows['source_row_id'] = rows['source_row_id'].map(source_id_map).astype(int)
     strategy_trade_rows = rows
 
     normalized = filter_normalized_rows(strategy_trade_rows, selected_buckets)
     if normalized.empty:
-        return _empty_store('No Greek rows match selected risk buckets')
+        return empty('No Greek rows match selected risk buckets')
 
     normalized = normalized.sort_values(['greek', 'bucket_type', 'risk_bucket', 'maturity_bucket']).reset_index(drop=True)
     base_meta = base_store.get('meta', {})
@@ -2727,6 +2730,8 @@ def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, 
         'month_through': base_meta.get('month_through'),
         'quarter_through': base_meta.get('quarter_through'),
         'unit_mode': base_meta.get('unit_mode'),
+        'source_warning': base_meta.get('source_warning'),
+        'aspect_snapshot_id': base_meta.get('aspect_snapshot_id'),
     }
 
     return {'meta': meta, 'rows': normalized.to_dict('records')}
@@ -2740,6 +2745,7 @@ def _filter_greeks_store(base_store, selected_strategies, selected_trade_types, 
     Input('quarter-through-selector', 'value'),
     Input('unit-mode-selector', 'value'),
     Input('refresh-trigger-store', 'data'),
+    Input('greeks-aspect-store', 'data'),
 )
 def update_unfiltered_greeks_store(
     selected_date,
@@ -2748,19 +2754,21 @@ def update_unfiltered_greeks_store(
     quarter_through,
     unit_mode,
     refresh_trigger,
+    aspect_store=None,
 ):
     del refresh_trigger
-    payload = _build_unfiltered_greeks_store(
+    payload = _safe_build_unfiltered_greeks_store(
         selected_date,
         aggregation,
         month_through,
         quarter_through,
         unit_mode,
+        _resolve_aspect_payload(aspect_store),
     )
     return _cache_greeks_payload(
         payload,
         'unfiltered',
-        [selected_date, aggregation, month_through, quarter_through, unit_mode],
+        [selected_date, aggregation, month_through, quarter_through, unit_mode, (aspect_store or {}).get('snapshot_id')],
     )
 
 
@@ -2784,9 +2792,9 @@ def update_filtered_greeks_store(base_store, selected_strategies, selected_trade
         'filtered',
         [
             (base_store or {}).get('snapshot_id'),
-            sorted(selected_strategies or []),
-            sorted(selected_trade_types or []),
-            sorted(selected_buckets or []),
+            None if selected_strategies is None else sorted(selected_strategies),
+            None if selected_trade_types is None else sorted(selected_trade_types),
+            None if selected_buckets is None else sorted(selected_buckets),
         ],
     )
 
@@ -2804,14 +2812,16 @@ def _normalize_aspect_payload_rows(
     raw_rows = pd.DataFrame(payload.get('rows', []))
     if raw_rows.empty:
         return pd.DataFrame()
-    return normalize_aspect_contributions(
-        raw_rows,
-        aggregation or 'mixed',
-        unit_mode or 'native',
-        month_through,
-        quarter_through,
-        meta.get('requested_cob_date'),
-    )
+    key = 'greeks-linear:' + _greeks_cache_key('linear', [meta.get('snapshot_id'), raw_rows.to_json(date_format='iso'), aggregation, month_through, quarter_through, unit_mode])
+    cached = snapshot_store.cache.get(key)
+    if cached is not None:
+        return cached
+    normalized = normalize_aspect_contributions(raw_rows, aggregation or 'mixed', unit_mode or 'native',
+                                                month_through, quarter_through, meta.get('requested_cob_date'))
+    snapshot_store.cache.set(key, normalized, expire=300, tag='greeks')
+    return normalized
+
+
 @callback(
     Output('greeks-kpi-strip', 'children'),
     Output('greeks-bucket-greek-tables-container', 'children'),
@@ -2837,19 +2847,20 @@ def update_monitor_tables(
     payload = _resolve_greeks_payload(store_data)
     aspect_payload = _resolve_aspect_payload(aspect_store)
     aspect_meta = aspect_payload.get('meta', {})
+    if payload.get('meta', {}).get('aspect_snapshot_id') != aspect_meta.get('snapshot_id'):
+        return (dash.no_update,) * 6
     aspect_status = aspect_meta.get('status') or 'idle'
-    aspect_status_class = (
-        f'greeks-aspect-status greeks-aspect-status-{aspect_status}'
-    )
+    warning = payload.get('meta', {}).get('source_warning') or aspect_meta.get('warnings')
+    aspect_status_class = f"greeks-aspect-status greeks-aspect-status-{'warning' if warning and aspect_status == 'ok' else aspect_status}"
 
     rows = pd.DataFrame(payload.get('rows', []))
-    aspect_rows = _normalize_aspect_payload_rows(
-        aspect_payload,
-        aggregation,
-        month_through,
-        quarter_through,
-        unit_mode,
-    )
+    try:
+        aspect_rows = _normalize_aspect_payload_rows(aspect_payload, aggregation, month_through, quarter_through, unit_mode)
+    except PortfolioSourceUnavailable as exc:
+        aspect_rows = pd.DataFrame()
+        aspect_status = 'error'
+        aspect_meta = {**aspect_meta, 'status':'error', 'message':str(exc)}
+        aspect_status_class = 'greeks-aspect-status greeks-aspect-status-error'
     maturity_axis = _common_maturity_axis(rows, aspect_rows)
 
     if rows.empty:
@@ -2867,12 +2878,13 @@ def update_monitor_tables(
 
     if aspect_status != 'ok':
         aspect_content = html.Div(
-            'The option Greeks tables below remain available and are not changed.',
+            'The option Greeks below use the available sources for the selected COB.',
             className='greeks-empty-state',
         )
     elif aspect_rows.empty:
         aspect_content = html.Div(
-            'Aspect returned no exposure rows for this snapshot.',
+            'Aspect confirmed an empty portfolio for this scope and COB.' if aspect_meta.get('accepted_rows') == 0
+            else 'No linear Aspect positions in this snapshot. Valued options appear in the portfolio Greeks.',
             className='greeks-empty-state',
         )
     else:
@@ -2885,7 +2897,7 @@ def update_monitor_tables(
         kpis,
         bucket_sections,
         ladder_sections,
-        _aspect_status_text(aspect_meta),
+        ' | '.join(filter(None, [_aspect_status_text(aspect_meta), payload.get('meta', {}).get('source_warning')])),
         aspect_status_class,
         aspect_content,
     )
@@ -2913,7 +2925,9 @@ def export_greeks_workbook(
 ):
     payload = _resolve_greeks_payload(store_data)
     aspect_payload = _resolve_aspect_payload(aspect_store)
-    if not n_clicks or (not payload.get('rows') and not aspect_payload.get('rows')):
+    if payload.get('meta', {}).get('aspect_snapshot_id') != aspect_payload.get('meta', {}).get('snapshot_id'):
+        return dash.no_update
+    if not n_clicks or (not payload.get('rows') and aspect_payload.get('meta', {}).get('status') != 'ok'):
         return dash.no_update
 
     rows = pd.DataFrame(payload.get('rows', []))
@@ -2958,12 +2972,25 @@ def export_greeks_workbook(
                 'Raw Normalized': tables['raw'],
             })
 
-        if aspect_meta.get('status') == 'ok' and not aspect_raw.empty:
+        if aspect_meta.get('status') == 'ok':
             aspect_metadata = pd.DataFrame([
                 {'Field': 'Source', 'Value': aspect_meta.get('source')},
+                {'Field': 'Snapshot ID', 'Value': aspect_meta.get('snapshot_id')},
+                {'Field': 'Source Snapshot ID', 'Value': aspect_meta.get('source_snapshot_id')},
+                {'Field': 'Valuation Run ID', 'Value': aspect_meta.get('valuation_run_id')},
+                {'Field': 'Source Origin', 'Value': aspect_meta.get('origin')},
+                {'Field': 'Engine Revision', 'Value': aspect_meta.get('engine_revision')},
+                {'Field': 'Portfolio Scope', 'Value': aspect_meta.get('scope_key')},
+                {'Field': 'Request Started', 'Value': aspect_meta.get('request_started_at')},
+                {'Field': 'Valuation Started', 'Value': aspect_meta.get('valuation_started_at')},
+                {'Field': 'Valuation Finished', 'Value': aspect_meta.get('valuation_finished_at')},
+                {'Field': 'Input Warnings', 'Value': ' | '.join(aspect_meta.get('warnings', []))},
                 {'Field': 'Mode', 'Value': aspect_meta.get('mode')},
                 {'Field': 'COB Date', 'Value': aspect_meta.get('requested_cob_date')},
                 {'Field': 'Fetched At', 'Value': aspect_meta.get('fetched_at')},
+                {'Field': 'Persisted At', 'Value': aspect_meta.get('persisted_at')},
+                {'Field': 'Imported At', 'Value': aspect_meta.get('ingested_at')},
+                {'Field': 'Source Warning', 'Value': payload.get('meta', {}).get('source_warning')},
                 {'Field': 'Book', 'Value': aspect_meta.get('book')},
                 {'Field': 'Source Rows', 'Value': aspect_meta.get('source_rows')},
                 {'Field': 'Accepted Rows', 'Value': aspect_meta.get('accepted_rows')},
@@ -2984,6 +3011,16 @@ def export_greeks_workbook(
                 ),
                 'Aspect Raw': _sanitize_excel_text(create_aspect_raw_export_df(aspect_raw)),
             })
+            if aspect_meta.get('snapshot_id'):
+                audit = aspect_repository.load_snapshot_audit(get_database_engine(), aspect_meta['snapshot_id'], schema=DB_SCHEMA) or {}
+                rejected = pd.DataFrame(audit.get('rejected_details') or [])
+                if not rejected.empty:
+                    sheet_map['Aspect Rejected Rows'] = _sanitize_excel_text(rejected.map(lambda v: json.dumps(v, default=str) if isinstance(v, (dict,list)) else v))
+            if aspect_payload.get('option_valuations'):
+                option_audit = pd.DataFrame(aspect_payload['option_valuations']).map(
+                    lambda value: json.dumps(value, default=str) if isinstance(value, (list, dict)) else value
+                )
+                sheet_map['Aspect Option Valuations'] = _sanitize_excel_text(option_audit)
 
         for sheet_name, table in sheet_map.items():
             export_df = table.drop(columns=['_row_type'], errors='ignore')

@@ -37,6 +37,7 @@ class Permission(str, Enum):
     SUPERSEDE = "supersede"
     CANCEL_JOB = "cancel_job"
     REFRESH_BLOOMBERG = "refresh_bloomberg"
+    REFRESH_ASPECT = "refresh_aspect"
 
 
 ROLE_PERMISSIONS = {
@@ -48,6 +49,7 @@ ROLE_PERMISSIONS = {
             Permission.SUBMIT,
             Permission.CANCEL_JOB,
             Permission.REFRESH_BLOOMBERG,
+            Permission.REFRESH_ASPECT,
         }
     ),
     Role.APPROVER: frozenset(
