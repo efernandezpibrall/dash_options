@@ -869,14 +869,14 @@ def _clean_vol_table_records(dataframe):
 
 def _format_vol_table_sample(value, signed=False):
     if value is None or pd.isna(value):
-        return ''
+        return '—'
     try:
         number = float(value) * 100
     except (TypeError, ValueError):
         return str(value)
+    number = 0.0 if abs(number) < .005 else number
     sign = '+' if signed and number > 0 else ''
-    suffix = ' pp' if signed else '%'
-    return f'{sign}{number:.2f}{suffix}'
+    return f'{sign}{number:.2f}'
 
 
 def _clamp_vol_width(value, min_width, max_width):
@@ -966,7 +966,7 @@ def _build_vol_table_column_defs(dataframe, period_columns, include_diff_colors=
         'pinned': 'left',
         'lockPinned': True,
         'suppressMovable': True,
-        'sortable': True,
+        'sortable': False,
         'filter': False,
         'resizable': True,
         'width': product_width,
@@ -987,7 +987,7 @@ def _build_vol_table_column_defs(dataframe, period_columns, include_diff_colors=
             'sortable': False,
             'filter': False,
             'resizable': True,
-            'width': _estimate_vol_table_width(dataframe, column, signed=include_diff_colors),
+            'width': 78,
             'minWidth': 64,
             'maxWidth': 110,
             'headerTooltip': str(column),
@@ -1003,8 +1003,8 @@ def _build_vol_table_column_defs(dataframe, period_columns, include_diff_colors=
         if include_diff_colors:
             column_def['cellClass'] += ' volatility-table-change-cell'
             column_def['cellClassRules'].update({
-                'volatility-positive-cell': f"Number(params.data['{raw_field}']) > 0",
-                'volatility-negative-cell': f"Number(params.data['{raw_field}']) < 0",
+                'volatility-positive-cell': f"Number(params.data['{raw_field}']) >= 0.00005",
+                'volatility-negative-cell': f"Number(params.data['{raw_field}']) <= -0.00005",
             })
 
         if index == 0 or _vol_period_group(period_columns[index - 1])[0] != group_label:
@@ -1040,6 +1040,7 @@ def _create_volatility_ag_grid(table_id, dataframe, period_columns, include_diff
             'ensureDomOrder': True,
             'animateRows': False,
             'alwaysShowHorizontalScroll': True,
+            'alignedGrids': ['changes-table' if table_id == 'volatility-table' else 'volatility-table'],
         },
         className=(
             'ag-theme-alpine mckinsey-ag-grid supply-dest-summary-grid volatility-data-grid'
@@ -1184,8 +1185,8 @@ def _build_surface_grid_column_defs(display_df, delta_columns, include_diff_colo
         if include_diff_colors:
             column_def['cellClass'] += ' volatility-surface-change-cell'
             column_def['cellClassRules'].update({
-                'volatility-positive-cell': f"Number(params.data['{raw_field}']) > 0",
-                'volatility-negative-cell': f"Number(params.data['{raw_field}']) < 0",
+                'volatility-positive-cell': f"Number(params.data['{raw_field}']) >= 0.00005",
+                'volatility-negative-cell': f"Number(params.data['{raw_field}']) <= -0.00005",
             })
         column_defs.append(column_def)
 
@@ -1308,6 +1309,13 @@ def _build_vol_surface_filter_bar():
                 ),
             ),
             surface_selector.layout(),
+            html.Div([
+                html.Label('Delivery', htmlFor='vol-overview-window', className='filter-group-header'),
+                dcc.Dropdown(id='vol-overview-window', options=[
+                    {'label':'12 months', 'value':12}, {'label':'24 months', 'value':24},
+                    {'label':'All', 'value':'all'}], value=24, clearable=False,
+                    persistence=True, persistence_type='session'),
+            ], className='filter-group volatility-surface-sticky-filter-group volatility-delivery-group'),
             html.Div(
                 [
                     html.Div('Group By', className='filter-group-header'),
@@ -1759,21 +1767,19 @@ def initialize_vol_surface_page(
     )
 
 
-def update_tables(n_clicks, selected_date, prev_selected_date, selected_products, grouping_mode, frames=None, source='settlement'):
+def update_tables(n_clicks, selected_date, prev_selected_date, selected_products, grouping_mode, frames=None, source='settlement', delivery_context=None):
     if selected_date is None or not selected_products:
         return html.Div()
 
     current_pivot, changes_pivot, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode, frames=frames)
 
+    if delivery_context is not None and grouping_mode == 'monthly':
+        sorted_date_cols = [pd.Timestamp(m).strftime('%m-%y') for m in delivery_context.get('months', [])]
+    current_pivot = current_pivot.set_index('product').reindex(selected_products).reindex(columns=sorted_date_cols).reset_index()
+
     current_table = html.Div([
         _build_vol_table_panel_header(
-            'Current ATM IV',
-            chips=[
-                _build_vol_chart_chip('COB', _format_vol_date(selected_date), tone='primary'),
-                _build_vol_chart_chip('Products', current_pivot['product'].nunique() if not current_pivot.empty else 0),
-                _build_vol_chart_chip('Tenors', len(sorted_date_cols)),
-                _build_vol_chart_chip('Mode', _format_vol_mode(grouping_mode or 'monthly')),
-            ],
+            'ATM volatility (%)',
         ),
         _create_volatility_ag_grid(
             table_id='volatility-table',
@@ -1782,16 +1788,12 @@ def update_tables(n_clicks, selected_date, prev_selected_date, selected_products
         )
     ], className='volatility-table-panel volatility-current-table-panel')
 
+    changes_pivot = changes_pivot.set_index('product').reindex(current_pivot['product']).reindex(columns=sorted_date_cols).reset_index()
     changes_table = html.Div()
-    if not changes_pivot.empty:
+    if not current_pivot.empty:
         changes_table = html.Div([
             _build_vol_table_panel_header(
-                'Change vs Previous COB' if source == 'settlement' else 'Change vs Comparison',
-                chips=[
-                    _build_vol_chart_chip('COB', _format_vol_date(selected_date), tone='primary'),
-                    *([_build_vol_chart_chip('Prev', _format_vol_date(prev_selected_date))] if source == 'settlement' else []),
-                    _build_vol_chart_chip('Tenors', len(sorted_date_cols)),
-                ],
+                'Change vs comparison (vol pts)',
             ),
             _create_volatility_ag_grid(
                 table_id='changes-table',
@@ -1830,6 +1832,7 @@ def update_tables(n_clicks, selected_date, prev_selected_date, selected_products
     Input('table-grouping-dropdown', 'value'),
     Input('surface-selection-ref', 'data'), Input('surface-source-dropdown', 'value'),
     Input('surface-revision-dropdown', 'value'), Input('surface-comparison-dropdown', 'value'),
+    Input('vol-overview-context', 'data'),
     prevent_initial_call=True,
 )
 def render_volatility_tables(
@@ -1837,12 +1840,12 @@ def render_volatility_tables(
     selected_date,
     prev_selected_date,
     selected_products,
-    grouping_mode, selection=None, source='settlement', revision=None, comparison=None,
-):
+    grouping_mode, selection=None, source='settlement', revision=None, comparison=None, delivery_context=None):
     surface_data._ensure_cached_data(snapshot_reference)
     frames = overview.atm_frames(snapshot_reference, selected_date, prev_selected_date, selected_products,
                                  source, selection, revision, comparison)
-    return update_tables(None, selected_date, prev_selected_date, selected_products, grouping_mode, frames, source)
+    frames = overview.complete_bucket_frames(frames, delivery_context, grouping_mode)
+    return update_tables(None, selected_date, prev_selected_date, selected_products, grouping_mode, frames, source, delivery_context)
 
 
 
@@ -1902,11 +1905,12 @@ def update_surface_tabs(snapshot_reference, selected_products, selected_date, na
      Input('surface-revision-dropdown', 'value'),
      Input('surface-comparison-dropdown', 'value'),
      Input('vol-overview-navigation', 'data')],
+    Input('vol-overview-context', 'data'),
     State('surface-expiry-dropdown', 'value'),
     prevent_initial_call=True
 )
 def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_product, selection,
-                                   source, revision, comparison, navigation, current_expiry):
+                                   source, revision, comparison, navigation, delivery_context, current_expiry):
     surface_data._ensure_cached_data(snapshot_reference)
     hidden_style = {'display': 'none', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}
     visible_style = {'display': 'flex', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}
@@ -1923,6 +1927,7 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
     if current_surface.empty:
         return [], None, hidden_style
 
+    current_surface = overview.filter_delivery(current_surface, delivery_context)
     expiry_options = [o for o in _build_surface_expiry_options(current_surface) if o['value'].startswith('month:')]
     if not expiry_options:
         return [], None, hidden_style
@@ -1939,7 +1944,7 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
     selected_expiry = (
         normalized_current_expiry
         if normalized_current_expiry in valid_expiries
-        else (None if navigation_triggered and isinstance(navigation, dict) and navigation.get('product') == active_product else expiry_options[0]['value'])
+        else (None if requested_expiry or navigation_triggered and isinstance(navigation, dict) and navigation.get('product') == active_product else expiry_options[0]['value'])
     )
     return expiry_options, selected_expiry, visible_style
 
@@ -1988,9 +1993,11 @@ def update_comparison_contracts(snapshot_reference,selected_date,product,current
           Input('surface-rv-contract-dropdown','value'),Input('surface-history-range','value'),
           Input('surface-history-mode-dropdown','value'),
           Input('surface-selection-ref','data'), Input('surface-source-dropdown','value'),
-          Input('surface-revision-dropdown','value'), Input('surface-comparison-dropdown','value'),prevent_initial_call=True)
+          Input('surface-revision-dropdown','value'), Input('surface-comparison-dropdown','value'), Input('vol-overview-context','data'),prevent_initial_call=True)
 def update_realized_comparison(snapshot_reference,selected_date,product,contract,lookback,history_mode="fixed_expiry",
-                               selection=None,source='settlement',revision=None,comparison=None):
+                               selection=None,source='settlement',revision=None,comparison=None,delivery_context=None):
+    if delivery_context is not None and contract not in delivery_context.get('months', []):
+        contract = None
     if product not in realized_comparison_data.CALENDARS or not selected_date or not contract:
         return _empty_figure('Select a product and maturity.','Realized vs Implied Volatility'),''
     surface_data._ensure_cached_data(snapshot_reference)
@@ -2039,13 +2046,15 @@ def update_history_contracts(snapshot_reference,end,product,lookback,current):
           Input('vol-surface-snapshot-ref','data'), Input('table-date-picker','date'),
           Input('surface-product-tabs','value'), Input('surface-history-range','value'),
           Input('surface-expiry-dropdown', 'value'),
+          Input('vol-overview-context', 'data'),
           State('surface-rv-contract-dropdown','value'), State('surface-history-compare','value'),
-          State('surface-history-context','data'))
-def select_linked_history_contracts(reference, end, product, lookback, selected_expiry, primary, comparison, previous):
-    return select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry)
+          State('surface-history-context','data'),
+)
+def select_linked_history_contracts(reference, end, product, lookback, selected_expiry, delivery_context, primary, comparison, previous):
+    return select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry, delivery_context)
 
 
-def select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry='legacy'):
+def select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry='legacy', delivery_context=None):
     if not reference or not end or product not in delta_history_data.CALENDARS:
         return {'display':'none'}, [], None, [], None, {'product':product}
     frame = overview.snapshot_frame(reference)
@@ -2064,6 +2073,11 @@ def select_history_contracts(reference, end, product, lookback, primary, compari
         months = sorted([*months, primary])
     if comparison not in months or comparison == primary:
         comparison = None
+    if delivery_context is not None:
+        allowed = set(delivery_context.get('months', []))
+        months = [m for m in months if m in allowed]
+        primary = primary if primary in allowed else None
+        comparison = comparison if comparison in allowed else None
     options = [{'label':pd.Timestamp(m).strftime('%b-%y'), 'value':m} for m in months]
     return {'display':'block'}, options, primary, options, comparison, {'product':product}
 
@@ -2108,9 +2122,12 @@ def history_coverage(figure):
           State('surface-history-range','value'), State('surface-history-mode-dropdown','value'),
           State('surface-selection-ref','data'), State('surface-source-dropdown','value'),
           State('surface-revision-dropdown','value'), State('surface-comparison-dropdown','value'),
+          State('vol-overview-context','data'),
           prevent_initial_call=True)
 def export_surface_history(clicks, reference, end, product, contracts, lookback, mode,
-                           selection=None, source='settlement', revision=None, comparison=None):
+                           selection=None, source='settlement', revision=None, comparison=None, delivery_context=None):
+    if delivery_context is not None:
+        contracts = [m for m in (contracts or []) if m in delivery_context.get('months', [])]
     if not clicks or not contracts:
         return no_update
     frame = overview.snapshot_frame(reference)
@@ -2167,6 +2184,7 @@ def export_surface_history(clicks, reference, end, product, contracts, lookback,
      Input('surface-revision-dropdown', 'value'),
      Input('surface-comparison-dropdown', 'value'),
      Input('surface-history-range', 'value')],
+    Input('vol-overview-context', 'data'),
     prevent_initial_call=True
 )
 def update_surface_section(
@@ -2184,9 +2202,14 @@ def update_surface_section(
     source='settlement',
     revision=None,
     comparison=None,
-    history_range=None,
-):
+    history_range=None, delivery_context=None):
     surface_data._ensure_cached_data(snapshot_reference)
+    if delivery_context is not None:
+        allowed = set(delivery_context.get('months', []))
+        kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
+        if month not in allowed:
+            selected_expiry = None
+        history_contracts = [m for m in (history_contracts or []) if m in allowed]
     history_range = history_range or lookback_days
     history_expiry = 'month:' + history_contracts[0] if history_contracts else selected_expiry
 
@@ -2209,6 +2232,8 @@ def update_surface_section(
                     history_contracts=history_contracts, snapshot_reference=snapshot_reference),
                 html.Div(message, className='volatility-table-empty-state'),
                 _build_message_span(message, tone='warning'))
+    current_surface = overview.filter_delivery(current_surface, delivery_context)
+    previous_surface = overview.filter_delivery(previous_surface, delivery_context)
     # Routine source identity is already controlled in the page toolbar and exports.
     status_line = ''
 
@@ -2299,6 +2324,8 @@ def update_surface_section(
      State('vol-surface-snapshot-ref', 'data'),
      State('surface-selection-ref','data'), State('surface-source-dropdown','value'),
      State('surface-revision-dropdown','value'), State('surface-comparison-dropdown','value')],
+    State('vol-overview-context', 'data'),
+    State('table-prev-date-picker', 'date'),
     prevent_initial_call=True
 )
 def export_volatility_table(
@@ -2306,16 +2333,19 @@ def export_volatility_table(
     selected_date,
     selected_products,
     grouping_mode,
-    snapshot_reference=None, selection=None, source='settlement', revision=None, comparison=None,
-):
+    snapshot_reference=None, selection=None, source='settlement', revision=None, comparison=None, delivery_context=None, previous_date=None):
     if not n_clicks or not selected_date or not selected_products:
         return None
 
     try:
         surface_data._ensure_cached_data(snapshot_reference)
 
-        frames = overview.atm_frames(snapshot_reference, selected_date, None, selected_products, source, selection, revision, comparison)
-        current_pivot, _, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, None, selected_products, grouping_mode, frames=frames)
+        frames = overview.atm_frames(snapshot_reference, selected_date, previous_date, selected_products, source, selection, revision, comparison)
+        frames = overview.complete_bucket_frames(frames, delivery_context, grouping_mode)
+        current_pivot, changes_pivot, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, previous_date, selected_products, grouping_mode, frames=frames)
+        if delivery_context is not None and grouping_mode == 'monthly':
+            sorted_date_cols = [pd.Timestamp(m).strftime('%m-%y') for m in delivery_context.get('months', [])]
+        current_pivot = current_pivot.set_index('product').reindex(selected_products).reindex(columns=sorted_date_cols).reset_index()
         if current_pivot.empty:
             return None
 
@@ -2323,7 +2353,10 @@ def export_volatility_table(
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             export_df.to_excel(writer, sheet_name='Volatility Data', index=False)
-            pairs = overview.surface_pairs(snapshot_reference, selected_date, None, selected_products,
+            changes_pivot = changes_pivot.set_index('product').reindex(current_pivot['product']).reindex(columns=sorted_date_cols).reset_index()
+            changes_pivot.to_excel(writer, sheet_name='Change vs comparison', index=False)
+            pd.DataFrame({'delivery_month': (delivery_context or {}).get('months', [])}).to_excel(writer, sheet_name='Delivery scope', index=False)
+            pairs = overview.surface_pairs(snapshot_reference, selected_date, previous_date, selected_products,
                                            None, source, selection, revision, comparison)
             pd.DataFrame([{'product':p, 'source':pair['source'], 'revision':pair['current_label'],
                            'comparison':pair['comparison_label'], 'revision_id':((selection or {}).get('products',{}).get(p.upper()) or {}).get('revision'), 'comparison_id':comparison if str(comparison).startswith('settlement:') else ((selection or {}).get('products',{}).get(p.upper()) or {}).get('comparison'), 'status':pair['error'] or 'available'}
@@ -2348,6 +2381,7 @@ def export_volatility_table(
      State('surface-source-dropdown', 'value'),
      State('surface-revision-dropdown', 'value'),
      State('surface-comparison-dropdown', 'value')],
+    State('vol-overview-context', 'data'),
     prevent_initial_call=True
 )
 def export_surface_table(
@@ -2360,8 +2394,7 @@ def export_surface_table(
     selection=None,
     source='settlement',
     revision=None,
-    comparison=None,
-):
+    comparison=None, delivery_context=None):
     if not n_clicks or not selected_date or not active_product:
         return None
 
@@ -2371,6 +2404,8 @@ def export_surface_table(
         current_surface, previous_surface, selected_metadata = _selected_surface_pair(
             active_product, selected_date, prev_selected_date, source, selection, revision, comparison,
         )
+        current_surface = overview.filter_delivery(current_surface, delivery_context)
+        previous_surface = overview.filter_delivery(previous_surface, delivery_context)
         if current_surface.empty:
             return None
 

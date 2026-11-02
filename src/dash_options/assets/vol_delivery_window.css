@@ -1,0 +1,10 @@
+.volatility-surface-sticky-filter-bar .volatility-delivery-group { flex: 0 0 auto; }
+.volatility-surface-sticky-filter-bar #vol-overview-window { width: 112px; }
+.volatility-data-section .volatility-table-body { gap: 8px; padding: 10px 12px; }
+.volatility-data-section .volatility-table-panel { border-radius: 5px; background: #fff; box-shadow: none; }
+.volatility-data-section .volatility-table-panel-header { min-height: 30px; padding: 5px 9px; background: #f8fafc; }
+.volatility-data-section .volatility-table-panel-title { font-size: 12px; font-weight: 650; }
+.volatility-data-section .volatility-table-panel-chips:empty { display: none; }
+.volatility-data-section .ag-theme-alpine.mckinsey-ag-grid.volatility-data-grid .ag-header-cell { background: #f1f5f9 !important; box-shadow: none !important; }
+.volatility-data-section .ag-theme-alpine.mckinsey-ag-grid.volatility-data-grid .ag-header-cell.volatility-table-product-header { background: #eaf0f6 !important; }
+.volatility-data-section .volatility-data-grid .volatility-table-product-cell { font-weight: 650; }

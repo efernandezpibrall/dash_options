@@ -138,7 +138,7 @@ def test_month_navigation_updates_existing_smile(immutable_snapshot, monkeypatch
     monkeypatch.setattr(page, 'ctx', SimpleNamespace(triggered_id='vol-overview-navigation'))
     output = page.update_surface_expiry_dropdown(None, '2026-10-29', 'TTF', None, 'settlement',
                                                 'settlement', 'previous',
-                                                {'product': 'TTF', 'month': '2027-02-01'}, 'month:2027-01-01')
+                                                {'product': 'TTF', 'month': '2027-02-01'}, None, 'month:2027-01-01')
     assert output[1] == 'month:2027-02-01'
 
     # A revision completing in the same browser batch must not discard navigation.
@@ -149,7 +149,7 @@ def test_month_navigation_updates_existing_smile(immutable_snapshot, monkeypatch
     ))
     output = page.update_surface_expiry_dropdown(None, '2026-10-29', 'TTF', None, 'settlement',
                                                 'settlement', 'previous',
-                                                {'product': 'TTF', 'month': '2027-02-01'}, 'month:2027-01-01')
+                                                {'product': 'TTF', 'month': '2027-02-01'}, None, 'month:2027-01-01')
     assert output[1] == 'month:2027-02-01'
 
 

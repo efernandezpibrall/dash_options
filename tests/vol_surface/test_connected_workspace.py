@@ -17,9 +17,9 @@ def test_primary_contract_follows_shared_selector_even_without_history(monkeypat
     monkeypatch.setattr(overview, 'snapshot_frame', lambda _: frame)
     monkeypatch.setattr(page.delta_history_data, 'available_contracts', lambda *a: ['2027-01-01'])
     result = page.select_linked_history_contracts({'snapshot_id':'test'}, '2026-10-29', 'HH', 90,
-        'month:2027-02-01','2027-01-01',None,{'product':'HH'})
+        'month:2027-02-01',None,'2027-01-01',None,{'product':'HH'})
     assert result[2] == '2027-02-01'
     assert '2027-02-01' in [o['value'] for o in result[1]]
     result = page.select_linked_history_contracts({'snapshot_id':'test'}, '2026-10-29', 'HH', 90,
-        None,'2027-01-01',None,{'product':'HH'})
+        None,None,'2027-01-01',None,{'product':'HH'})
     assert result[2] is None

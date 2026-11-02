@@ -27,14 +27,6 @@ def controls():
         dcc.Store(id='vol-overview-navigation', storage_type='memory'),
         dcc.Store(id='vol-overview-context', data={'months': [], 'fronts': {}}, storage_type='memory'),
         html.Div([
-            html.Label('Delivery window', htmlFor='vol-overview-window'),
-            dcc.Dropdown(id='vol-overview-window', options=[
-                {'label': '12 months', 'value': 12},
-                {'label': '24 months', 'value': 24},
-                {'label': 'All maturities', 'value': 'all'},
-            ], value=24, clearable=False),
-        ], className='vol-overview-field'),
-        html.Div([
             html.Label('Wing delta', htmlFor='vol-overview-delta'),
             dcc.Dropdown(id='vol-overview-delta', options=[
                 {'label': f'{delta}Δ', 'value': delta} for delta in WING_DELTAS
@@ -260,3 +252,39 @@ def atm_frames(reference, date, previous_date, products, source='settlement', se
             nodes['code'], nodes['cob_date'] = product, pd.Timestamp(selected_date)
             frames.append(nodes)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=['code','cob_date','contract_date','volatility'])
+
+
+def filter_delivery(frame, context):
+    """Apply the shared monthly display scope without touching historical warm-up."""
+    if context is None:
+        return frame.copy()
+    months = pd.to_datetime(context.get('months', []))
+    return frame.loc[frame.contract_date.dt.to_period('M').dt.to_timestamp().isin(months)].copy()
+
+
+def complete_bucket_frames(frame, context, grouping):
+    """Exclude boundary buckets and missing-node aggregates, never average partial strips."""
+    frame = filter_delivery(frame, context)
+    if context is None or grouping == 'monthly' or frame.empty:
+        return frame
+    months = pd.DatetimeIndex(pd.to_datetime(context.get('months', [])))
+    def bucket(month):
+        if grouping == 'quarterly':
+            start = month.to_period('Q').start_time
+            return pd.date_range(start, periods=3, freq='MS')
+        if grouping == 'calendar':
+            return pd.date_range(f'{month.year}-01-01', periods=12, freq='MS')
+        if grouping == 'season':
+            start = pd.Timestamp(month.year if month.month >= 4 else month.year-1,
+                                 4 if 4 <= month.month <= 9 else 10, 1)
+            return pd.date_range(start, periods=6, freq='MS')
+        return pd.DatetimeIndex([month])
+    scope = set(months)
+    allowed = {m for m in months if set(bucket(m)) <= scope}
+    frame = frame.loc[frame.contract_date.isin(allowed)].copy()
+    # Each product/date needs all the nodes belonging to its displayed bucket.
+    keep = []
+    for _, rows in frame.groupby(['code', 'cob_date']):
+        available = set(rows.loc[rows.volatility.notna(), 'contract_date'])
+        keep.extend(rows.index[rows.contract_date.map(lambda m: set(bucket(m)) <= available)])
+    return frame.loc[keep].copy()
