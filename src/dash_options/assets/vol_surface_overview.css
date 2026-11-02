@@ -30,3 +30,42 @@
  .vol-overview-legend {margin-left:0;}
  .vol-overview-grid {grid-template-columns:1fr;}
 }
+
+/* Overview controls share the section title's single-line header. */
+.volatility-atm-section > .volatility-section-header {
+    flex-wrap: nowrap;
+    gap: 24px;
+    padding-top: 9px;
+    padding-bottom: 9px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+.volatility-atm-section > .volatility-section-header .volatility-section-title-row {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+.volatility-atm-section > .volatility-section-header .volatility-section-actions {
+    flex: 1 0 auto;
+    flex-wrap: nowrap;
+    margin-left: 0;
+}
+.volatility-atm-section .vol-overview-controls {
+    flex: 1 0 auto;
+    flex-wrap: nowrap;
+    padding: 0;
+    gap: 16px;
+    white-space: nowrap;
+}
+.volatility-atm-section .vol-overview-field { flex: 0 0 auto; }
+.volatility-atm-section .vol-overview-field label { font-size: 11px; }
+.volatility-atm-section .vol-overview-field .dash-dropdown {
+    flex: 0 0 auto;
+    width: 140px;
+    min-height: 30px;
+    height: 30px;
+    font-size: 11px;
+}
+.volatility-atm-section .vol-overview-delta-field .dash-dropdown { width: 75px; }
+.volatility-atm-section .vol-overview-legend { margin-left: auto; white-space: nowrap; }
+.volatility-atm-section #atm-status-line { margin: 0; padding: 0; font-size: 11px; }
+.volatility-atm-section #atm-status-line:empty { display: none; }

@@ -1353,9 +1353,10 @@ layout = html.Div([
     html.Div(id='vol-surface-publication-status', role='status', **{'aria-live': 'polite'}),
 
     html.Div([
-        _build_volatility_section_header('Volatility Overview'),
-        overview.controls(),
-        html.Div(id='atm-status-line', className='volatility-status-line volatility-status-neutral'),
+        _build_volatility_section_header('Volatility Overview', actions=[
+            overview.controls(),
+            html.Div(id='atm-status-line', role='status', className='volatility-status-line volatility-status-neutral'),
+        ]),
         html.Div(id='graphs-container', className='volatility-section-body volatility-atm-body'),
         html.Div('Monthly delivery · ATM = 50C; RR = selected-delta call − put; BF = average wings − ATM. '
                  '≈ linear IV interpolation between saved deltas; no extrapolation. Group By applies to the Volatility Data tables.',
@@ -2479,8 +2480,4 @@ def render_overview(reference, date, previous_date, products, window, wing_delta
                'fronts': {product: front.strftime('%Y-%m-%d') for product, front in fronts.items() if front is not None}}
     label = f"{months[0]:%b %Y} – {months[-1]:%b %Y} · monthly" if len(months) else 'No unexpired maturities'
     cards = [overview.product_card(product, pair, months, active_product, wing_delta) for product, pair in pairs.items()]
-    message = (f'Settlement COB: {date or "n/a"} · comparison: {previous_date or "n/a"}. '
-               if source in (None, 'settlement') else
-               f'Selected surfaces · COB: {date or "n/a"} · comparison: {"settlement anchors" if comparison == "anchor" else comparison.replace("settlement:", "settlement ") if str(comparison).startswith("settlement:") else "selected revisions"}. ')
-    message += 'All three metrics use the same saved surface. Gaps are unavailable nodes; Δ is in vol points.'
-    return _build_message_span(message), html.Div(cards, className='vol-overview-grid'), context, label
+    return '', html.Div(cards, className='vol-overview-grid'), context, label
