@@ -51,3 +51,8 @@
   .volatility-surface-section > .volatility-section-header { flex-wrap: wrap; }
   .volatility-surface-section > .volatility-section-header .volatility-section-actions { overflow-x: auto; }
 }
+.volatility-surface-section > .volatility-section-header .volatility-section-title-row { flex: 0 0 auto; }
+.volatility-surface-section .surface-header-product-selector {
+  flex: 0 0 auto; width: max-content; overflow: visible;
+}
+.volatility-surface-section .surface-header-product-tabs { width: max-content; min-width: max-content; }
