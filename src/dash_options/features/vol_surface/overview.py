@@ -79,7 +79,7 @@ def surface_pairs(reference, date, previous_date, products, active_product=None,
             'comparison_label': f'Settlement {previous_date or "unavailable"}',
             'origins': {}, 'source': 'settlement', 'error': None,
         }
-        if product == active_product and source not in (None, 'settlement'):
+        if (product == active_product or (selection or {}).get('products') is not None) and source not in (None, 'settlement'):
             # Explicit unavailable/unauthorized replays must not leave settlement curves behind.
             pair.update(current=surfaces._empty_surface_df(), previous=surfaces._empty_surface_df(),
                         source=source, current_label='Selected surface unavailable', comparison_label='Unavailable')
@@ -239,3 +239,24 @@ def product_card(product, pair, months, active_product, wing_delta=25):
     ], className='vol-overview-card-footer'))
     return html.Div(children, className='volatility-chart-card vol-overview-card' +
                     (' vol-overview-card-active' if product == active_product else ''))
+
+
+def atm_frames(reference, date, previous_date, products, source='settlement', selection=None, revision=None, comparison=None):
+    if not date or not products:
+        return pd.DataFrame(columns=['code','cob_date','contract_date','volatility'])
+    pairs = surface_pairs(reference, date, previous_date, products, None, source, selection, revision, comparison)
+    frames = []
+    for product, pair in pairs.items():
+        for side, selected_date in [('current', date), ('previous', previous_date)]:
+            frame = pair[side]
+            if frame.empty or not selected_date:
+                continue
+            # Project the exact same saved ATM node used by overview cards.
+            metrics = metric_frame(frame).reset_index()
+            if 'contract_date' not in metrics or 'atm' not in metrics:
+                continue
+            nodes = metrics[['contract_date', 'atm']].rename(columns={'atm':'volatility'})
+            nodes['volatility'] /= 100
+            nodes['code'], nodes['cob_date'] = product, pd.Timestamp(selected_date)
+            frames.append(nodes)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=['code','cob_date','contract_date','volatility'])

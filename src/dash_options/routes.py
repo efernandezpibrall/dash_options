@@ -472,6 +472,7 @@ def render_dashboard_source_status(
             '/greeks',
             '/trades',
             '/vol_trades',
+            '/vol_surface',
             '/live_prices',
         )
         or (

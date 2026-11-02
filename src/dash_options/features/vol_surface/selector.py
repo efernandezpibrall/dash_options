@@ -42,7 +42,7 @@ def layout():
                 [
                     html.Div(
                         [
-                            html.Label("Surface source", htmlFor="surface-source-dropdown"),
+                            html.Label("Source", htmlFor="surface-source-dropdown"),
                             dcc.Dropdown(
                                 id="surface-source-dropdown",
                                 options=[
@@ -69,7 +69,9 @@ def layout():
                     ),
                     html.Div(
                         [
-                            html.Label("Compare with", htmlFor="surface-comparison-dropdown"),
+                            html.Label("Compare", htmlFor="surface-comparison-dropdown"),
+                            html.Div(dcc.DatePickerSingle(id='table-prev-date-picker', display_format='YYYY-MM-DD',
+                                persistence=True, persistence_type='session', with_portal=True), id='surface-settlement-comparison'),
                             dcc.Dropdown(
                                 id="surface-comparison-dropdown",
                                 options=[],
@@ -116,10 +118,18 @@ def revision_label(row):
     return f"{stamp.tz_convert('Asia/Dubai'):%Y-%m-%d %H:%M} GST · {row['revision_id'][:8]}"
 
 
+def _catalog_rows(engine, product, source, owner):
+    rows = api.list_intraday_surface_revisions(engine, commodity=product, source=source, actor=owner)
+    # Legacy draft catalogs omit business date; resolve exact authorized headers once per cache fill.
+    return [row if row.get('business_date') else {**row, 'business_date':
+                api.load_intraday_surface_revision(engine, row['revision_id'], commodity=product,
+                    source=source, actor=owner)['business_date']} for row in rows]
+
+
 def _catalog(engine, product, source, owner, *, refresh=False):
     return CATALOG.get_or_load(
         (product, source, owner or ""),
-        lambda: api.list_intraday_surface_revisions(engine, commodity=product, source=source, actor=owner),
+        lambda: _catalog_rows(engine, product, source, owner),
         force_refresh=refresh,
         degraded=lambda rows: not rows,
         healthy_ttl_seconds=30,
@@ -181,6 +191,7 @@ def _build_view(engine, product, source, revision, comparison, owner):
     if selected["business_date"] != pd.Timestamp.now(tz="Asia/Dubai").date().isoformat():
         kind += " replay"
     metadata.update(
+        revision_id=selected["revision_id"],
         current_label=f"{kind} {revision_label(selected)}",
         comparison_label=comparison_label,
         comparison_id=comparison_id,
@@ -198,6 +209,28 @@ def _build_view(engine, product, source, revision, comparison, owner):
 def resolve_view(selection, product, source, revision=None, comparison=None):
     """Authorize every consumer, including cached chart and export requests."""
     product = str(product or "").upper()
+    if isinstance(selection, dict) and 'products' in selection:
+        if selection.get('revision') != revision or selection.get('comparison') != comparison or selection.get('source') != source:
+            raise SelectionError("Loading page selection…")
+        child = selection['products'].get(product)
+        view = resolve_view(child, product, source, (child or {}).get('revision'), (child or {}).get('comparison'))
+        view = {**view, 'metadata': {**view['metadata'], 'revision_id': child['revision']}}
+        if str(comparison).startswith('settlement:'):
+            date = comparison.split(':', 1)[1]
+            try:
+                payload = resolve_snapshot(selection.get('settlement_reference'),
+                                           expected_namespace=surfaces.VOL_SURFACE_SNAPSHOT_NAMESPACE)
+                frame = payload['surface_dataset']
+                previous = frame.loc[frame.code.str.upper().eq(product) &
+                                     frame.cob_date.dt.normalize().eq(pd.Timestamp(date).normalize())].copy()
+            except (SnapshotReferenceError, KeyError, ValueError, AttributeError) as exc:
+                raise SelectionError('Selected settlement comparison is unavailable; refresh the selection.') from exc
+            if previous.empty:
+                raise SelectionError(f'No settlement surface for {product} on {date}.')
+            view = {**view, 'previous': previous, 'metadata': {**view['metadata'],
+                    'comparison_label': f'Settlement {date}', 'comparison_id': comparison,
+                    'comparison_snapshot_reference': selection['settlement_reference']}}
+        return view
     _enabled(product, source)
     owner = _owner(source)
     if not isinstance(selection, dict) or selection.get("error"):
@@ -216,13 +249,15 @@ def resolve_view(selection, product, source, revision=None, comparison=None):
     return view
 
 
-def select_revision(product, source, revision, comparison, previous, *, refresh=False):
+def select_revision(product, source, revision, comparison, previous, *, refresh=False, cob=None):
     """Return coherent dropdowns and a small, immutable server reference."""
     product = str(product or "").upper()
     _enabled(product, source)
     owner = _owner(source)
     engine = get_database_engine(required=True)
     rows = _catalog(engine, product, source, owner, refresh=refresh)
+    if cob:
+        rows = [r for r in rows if str(r['business_date'])[:10] == str(cob)[:10]]
     same_context = previous and previous.get("product") == product and previous.get("source") == source
     valid_ids = {r["revision_id"] for r in rows}
     if revision and revision not in valid_ids and same_context and revision == previous.get("revision"):
@@ -295,7 +330,7 @@ def select_revision(product, source, revision, comparison, previous, *, refresh=
     Output("surface-comparison-dropdown", "value"),
     Output("surface-selection-ref", "data"),
     Output("surface-selector-status", "children"),
-    Input("surface-product-tabs", "value"),
+    Input("table-product-dropdown", "value"),
     Input("surface-source-dropdown", "value"),
     Input("surface-revision-dropdown", "value"),
     Input("surface-comparison-dropdown", "value"),
@@ -303,28 +338,70 @@ def select_revision(product, source, revision, comparison, previous, *, refresh=
     Input("table-prev-date-picker", "date"),
     Input("refresh-options-data", "n_clicks"),
     State("surface-selection-ref", "data"),
+    Input("vol-surface-snapshot-ref", "data"),
 )
-def update_selector(product, source, revision, comparison, date, previous_date, _refresh, previous):
-    if source == "settlement":
-        return (
-            [{"label": f"{date or 'Select COB'} · settlement", "value": "settlement"}],
-            "settlement",
-            [{"label": f"{previous_date or 'No previous COB'} · settlement", "value": "previous"}],
-            "previous",
-            None,
-            "Uses the existing Current / Previous COB selection. History remains settlement-based.",
-        )
-    if not product:
-        return [], None, [], None, None, "Select a product."
-    try:
-        return select_revision(
-            product, source, revision, comparison, previous, refresh=ctx.triggered_id == "refresh-options-data"
-        )
-    except Exception as exc:
-        LOG.warning("Surface selection unavailable (%s)", type(exc).__name__)
-        message = (
-            str(exc)
-            if isinstance(exc, SelectionError)
-            else "Selected surface could not be loaded. Refresh or use Settlement."
-        )
-        return [], None, [], None, {**_key(str(product).upper(), source, revision, comparison), "error": True}, message
+def update_selector(products, source, revision, comparison, date, previous_date, _refresh, previous, snapshot_reference=None):
+    if source == 'settlement':
+        return ([{'label': f'{date or "Select COB"} · settlement', 'value':'settlement'}],
+                'settlement', [{'label':f'{previous_date or "Select date"}', 'value':'previous'}],
+                'previous', None, '')
+    products = products if isinstance(products, list) else [products] if products else []
+    selections, options, comparisons, errors = {}, [{'label':'Latest on COB', 'value':'latest'}], [{'label':'Settlement anchor', 'value':'anchor'}], []
+    if snapshot_reference:
+        try:
+            frame = resolve_snapshot(snapshot_reference, expected_namespace=surfaces.VOL_SURFACE_SNAPSHOT_NAMESPACE)['surface_dataset']
+            dates = frame.loc[frame.code.str.upper().isin([p.upper() for p in products]), 'cob_date'].dropna().dt.strftime('%Y-%m-%d').unique()
+            comparisons.extend({'label':'Settlement · '+d, 'value':'settlement:'+d} for d in sorted(dates, reverse=True))
+        except (SnapshotReferenceError, KeyError, AttributeError):
+            pass  # Anchor and exact intraday comparisons remain available.
+    valid_context = isinstance(previous, dict) and previous.get('source') == source and previous.get('cob') == date
+    revision = revision if revision not in (None,'settlement') and valid_context else 'latest'
+    comparison = comparison if comparison not in (None,'previous') and valid_context else 'anchor'
+    for product in products:
+        code = product.upper()
+        prior = previous.get('products', {}).get(code) if valid_context else None
+        selected = revision.split('|',1)[1] if revision.startswith(code+'|') else (prior or {}).get('revision')
+        compared = comparison.split('|',1)[1] if comparison.startswith(code+'|') else ((prior or {}).get('comparison','anchor') if comparison != 'anchor' else 'anchor')
+        if comparison.startswith('settlement:'):
+            compared = 'anchor'
+        if ctx.triggered_id == 'refresh-options-data' or not valid_context or (revision == 'latest' and revision != (previous or {}).get('revision')):
+            if not revision.startswith(code+'|'):
+                selected = None
+        try:
+            result = select_revision(code, source, selected, compared, prior,
+                refresh=ctx.triggered_id == 'refresh-options-data', cob=date)
+            ro, _, co, _, child, _ = result
+            selections[code] = child
+            options.extend({'label':product+' · '+o['label'], 'value':code+'|'+o['value']} for o in ro)
+            comparisons.extend({'label':product+' · '+o['label'], 'value':code+'|'+o['value']} for o in co if o['value'] != 'anchor')
+        except Exception as exc:
+            LOG.warning('Page surface selection unavailable for %s (%s)', code, type(exc).__name__)
+            selections[code] = {'error':True}
+            errors.append(product)
+    values = {o['value'] for o in options}
+    if revision not in values:
+        revision = 'latest'
+    if comparison not in {o['value'] for o in comparisons}:
+        comparison = 'anchor'
+    context = {'products':selections, 'source':source, 'revision':revision, 'comparison':comparison, 'cob':date, 'settlement_reference':snapshot_reference}
+    return options, revision, comparisons, comparison, context, ('Unavailable: '+', '.join(errors) if errors else '')
+
+
+@callback(Output('surface-settlement-comparison','style'), Output('surface-comparison-dropdown','style'),
+          Output('surface-revision-dropdown','disabled'), Input('surface-source-dropdown','value'))
+def selector_visibility(source):
+    settlement = source == 'settlement'
+    return ({'display':'block' if settlement else 'none'}, {'display':'none' if settlement else 'block'}, settlement)
+
+
+@callback(Output('surface-toolbar-source-cards','children'), Input('dashboard-source-status-store','data'))
+def toolbar_source_cards(statuses):
+    return [html.Span([html.Strong(item['label']), html.Span(item.get('latest_cob') or 'Unavailable')],
+                className='surface-toolbar-source-card',
+                title=f"{item.get('source', '')} · {item.get('error') or item.get('latest_cob') or 'Unavailable'}")
+            for item in statuses or [] if item.get('label') in {'Vol Surface','Forward Curves'}]
+
+
+@callback(Output('surface-selector-status', 'title'), Input('surface-selector-status', 'children'))
+def selection_status_tooltip(message):
+    return message or ''

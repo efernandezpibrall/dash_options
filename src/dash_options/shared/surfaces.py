@@ -1054,14 +1054,14 @@ def _sort_grouped_period_columns(date_cols, grouping_mode):
     return list(date_cols)
 
 
-def _build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode):
-    if selected_date is None or not selected_products or atm_dataset.empty:
+def _build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode, frames=None):
+    if selected_date is None or not selected_products or (frames is None and atm_dataset.empty):
         return pd.DataFrame(columns=['product']), pd.DataFrame(columns=['product']), []
 
     selected_date = pd.to_datetime(selected_date)
     prev_date = pd.to_datetime(prev_selected_date) if prev_selected_date else None
 
-    atm_df = atm_dataset.copy()
+    atm_df = atm_dataset.copy() if frames is None else frames.copy()
     atm_df['cob_date'] = pd.to_datetime(atm_df['cob_date'], errors='coerce')
     atm_df['contract_date'] = pd.to_datetime(atm_df['contract_date'], errors='coerce')
 

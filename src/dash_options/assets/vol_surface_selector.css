@@ -26,3 +26,67 @@
 @media (max-width: 800px) {
     .volatility-surface-page .volatility-surface-source-fields { grid-template-columns: 1fr; }
 }
+/* All toolbar content shares one baseline; narrow screens scroll without wrapping. */
+.volatility-surface-page .professional-section-header.volatility-surface-sticky-filter-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 0;
+    min-height: 48px;
+    padding: 7px 12px;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    background: #fff;
+    box-shadow: 0 2px 7px rgba(15, 23, 42, .05);
+}
+.volatility-surface-sticky-filter-bar > *,
+.volatility-surface-sticky-filter-bar .volatility-surface-source-fields > div {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+.volatility-surface-page .volatility-surface-sticky-filter-bar .volatility-surface-source-selector,
+.volatility-surface-page .volatility-surface-sticky-filter-bar .volatility-surface-source-fields { display: contents; }
+.volatility-surface-sticky-filter-bar .volatility-surface-sticky-filter-group,
+.volatility-surface-sticky-filter-bar .volatility-surface-source-fields > div {
+    display: inline-flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 7px;
+    min-height: 30px;
+    margin: 0;
+    padding: 0 10px;
+    border: 0;
+    border-right: 1px solid #e4e9ef;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+}
+.volatility-surface-sticky-filter-bar .volatility-surface-source-fields label,
+.volatility-surface-sticky-filter-bar .filter-group-header {
+    margin: 0;
+    flex: 0 0 auto;
+    color: #64748b;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0;
+    text-transform: none;
+    line-height: 30px;
+}
+.volatility-surface-sticky-filter-bar .volatility-surface-products-group { flex: 0 0 250px; max-width: 250px; padding-left: 0; }
+.volatility-surface-sticky-filter-bar .volatility-surface-filter-dropdown { min-width: 0; width: 190px; }
+.volatility-surface-sticky-filter-bar .volatility-surface-date-group { flex: 0 0 auto; }
+.volatility-surface-sticky-filter-bar .volatility-surface-date-control { padding: 0; border: 0; border-radius: 0; box-shadow: none; }
+.volatility-surface-sticky-filter-bar .volatility-surface-source-fields > div { flex: 0 0 auto; min-width: 0; }
+.volatility-surface-sticky-filter-bar #surface-source-dropdown { width: 155px; }
+.volatility-surface-sticky-filter-bar #surface-revision-dropdown { width: 205px; }
+.volatility-surface-sticky-filter-bar #surface-comparison-dropdown { width: 190px; }
+.volatility-surface-sticky-filter-bar .dash-dropdown { min-height: 30px; height: 30px; font-size: 11px; border-radius: 4px; box-shadow: none; }
+.volatility-surface-sticky-filter-bar .dash-dropdown-value { white-space: nowrap; }
+.volatility-surface-sticky-filter-bar .volatility-surface-grouping-group { flex: 0 0 auto; }
+.volatility-surface-sticky-filter-bar .volatility-surface-grouping-selector { flex-wrap: nowrap; }
+.volatility-surface-sticky-filter-bar .volatility-surface-grouping-selector label { font-size: 11px; padding: 5px 8px; border-radius: 4px; }
+.volatility-surface-sticky-filter-bar .dash-datepicker-input { width: 112px; font-size: 11px; min-height: 30px; height: 30px; border-radius: 4px; }
+.volatility-surface-sticky-filter-bar #surface-selector-status { flex: 0 0 auto; max-width: 145px; overflow: hidden; text-overflow: ellipsis; margin: 0 0 0 8px; font-size: 10px; line-height: 30px; color: #a16207; }
+.volatility-surface-sticky-filter-bar #surface-selector-status:empty { display: none; }
+.surface-toolbar-source-cards { margin-left: auto; display: inline-flex; gap: 7px; align-items: center; padding-left: 12px; }
+.surface-toolbar-source-card { display: inline-flex; flex-direction: row; gap: 6px; white-space: nowrap; font-size: 10px; line-height: 30px; height: 30px; padding: 0 8px; border: 1px solid #e1e7ef; border-radius: 4px; background: #f8fafc; color: #52637b; }
+.surface-toolbar-source-card strong { font-weight: 600; }

@@ -844,7 +844,7 @@ def _selected_surface_status(product, source, metadata, current, previous):
         f"Anchor: {metadata['settlement_cob']} ({metadata['base_publication_id']}) | "
         f"Months updated: {updated}/{months}; inherited: {months-updated} | "
         f"Comparison: {'available' if not previous.empty else 'unavailable'}. "
-        "This product’s overview uses the same revision. Tables and history remain settlement-based."
+        "Overview and tables use the page selection. History retains settlement observations and labelled revision points."
     )
     return _build_message_span(message, tone='warning' if source == 'draft' else 'success')
 
@@ -1277,23 +1277,8 @@ def _build_vol_surface_filter_bar():
                     html.Div('COB', className='filter-group-header'),
                     html.Div(
                         [
-                            html.Span('Current', className='volatility-surface-date-label'),
                             dcc.DatePickerSingle(
                                 id='table-date-picker',
-                                display_format='YYYY-MM-DD',
-                                with_portal=True,
-                                persistence=True,
-                                persistence_type='session',
-                                className='volatility-surface-date-picker',
-                            ),
-                        ],
-                        className='volatility-surface-date-control',
-                    ),
-                    html.Div(
-                        [
-                            html.Span('Previous', className='volatility-surface-date-label'),
-                            dcc.DatePickerSingle(
-                                id='table-prev-date-picker',
                                 display_format='YYYY-MM-DD',
                                 with_portal=True,
                                 persistence=True,
@@ -1309,6 +1294,7 @@ def _build_vol_surface_filter_bar():
                     'volatility-surface-date-group'
                 ),
             ),
+            surface_selector.layout(),
             html.Div(
                 [
                     html.Div('Group By', className='filter-group-header'),
@@ -1334,6 +1320,7 @@ def _build_vol_surface_filter_bar():
                     'volatility-surface-grouping-group'
                 ),
             ),
+            html.Div(id='surface-toolbar-source-cards', className='surface-toolbar-source-cards'),
         ],
         className='professional-section-header volatility-surface-sticky-filter-bar',
     )
@@ -1406,7 +1393,6 @@ layout = html.Div([
         ),
         html.Div([
             dcc.Tabs(id='surface-product-tabs', value=None, children=[]),
-            surface_selector.layout(),
             html.Div([
                 html.Label('Smile Expiry:', className="inline-filter-label"),
                 dcc.Dropdown(
@@ -1751,11 +1737,11 @@ def initialize_vol_surface_page(
     )
 
 
-def update_tables(n_clicks, selected_date, prev_selected_date, selected_products, grouping_mode):
+def update_tables(n_clicks, selected_date, prev_selected_date, selected_products, grouping_mode, frames=None, source='settlement'):
     if selected_date is None or not selected_products:
         return html.Div()
 
-    current_pivot, changes_pivot, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode)
+    current_pivot, changes_pivot, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, prev_selected_date, selected_products, grouping_mode, frames=frames)
 
     current_table = html.Div([
         _build_vol_table_panel_header(
@@ -1778,10 +1764,10 @@ def update_tables(n_clicks, selected_date, prev_selected_date, selected_products
     if not changes_pivot.empty:
         changes_table = html.Div([
             _build_vol_table_panel_header(
-                'Change vs Previous COB',
+                'Change vs Previous COB' if source == 'settlement' else 'Change vs Comparison',
                 chips=[
                     _build_vol_chart_chip('COB', _format_vol_date(selected_date), tone='primary'),
-                    _build_vol_chart_chip('Prev', _format_vol_date(prev_selected_date)),
+                    *([_build_vol_chart_chip('Prev', _format_vol_date(prev_selected_date))] if source == 'settlement' else []),
                     _build_vol_chart_chip('Tenors', len(sorted_date_cols)),
                 ],
             ),
@@ -1820,6 +1806,8 @@ def update_tables(n_clicks, selected_date, prev_selected_date, selected_products
     Input('table-prev-date-picker', 'date'),
     Input('table-product-dropdown', 'value'),
     Input('table-grouping-dropdown', 'value'),
+    Input('surface-selection-ref', 'data'), Input('surface-source-dropdown', 'value'),
+    Input('surface-revision-dropdown', 'value'), Input('surface-comparison-dropdown', 'value'),
     prevent_initial_call=True,
 )
 def render_volatility_tables(
@@ -1827,10 +1815,12 @@ def render_volatility_tables(
     selected_date,
     prev_selected_date,
     selected_products,
-    grouping_mode,
+    grouping_mode, selection=None, source='settlement', revision=None, comparison=None,
 ):
     surface_data._ensure_cached_data(snapshot_reference)
-    return update_tables(None, selected_date, prev_selected_date, selected_products, grouping_mode)
+    frames = overview.atm_frames(snapshot_reference, selected_date, prev_selected_date, selected_products,
+                                 source, selection, revision, comparison)
+    return update_tables(None, selected_date, prev_selected_date, selected_products, grouping_mode, frames, source)
 
 
 
@@ -2282,7 +2272,9 @@ def update_surface_section(
     [State('table-date-picker', 'date'),
      State('table-product-dropdown', 'value'),
      State('table-grouping-dropdown', 'value'),
-     State('vol-surface-snapshot-ref', 'data')],
+     State('vol-surface-snapshot-ref', 'data'),
+     State('surface-selection-ref','data'), State('surface-source-dropdown','value'),
+     State('surface-revision-dropdown','value'), State('surface-comparison-dropdown','value')],
     prevent_initial_call=True
 )
 def export_volatility_table(
@@ -2290,7 +2282,7 @@ def export_volatility_table(
     selected_date,
     selected_products,
     grouping_mode,
-    snapshot_reference=None,
+    snapshot_reference=None, selection=None, source='settlement', revision=None, comparison=None,
 ):
     if not n_clicks or not selected_date or not selected_products:
         return None
@@ -2298,7 +2290,8 @@ def export_volatility_table(
     try:
         surface_data._ensure_cached_data(snapshot_reference)
 
-        current_pivot, _, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, None, selected_products, grouping_mode)
+        frames = overview.atm_frames(snapshot_reference, selected_date, None, selected_products, source, selection, revision, comparison)
+        current_pivot, _, sorted_date_cols = surface_data._build_atm_table_frames(selected_date, None, selected_products, grouping_mode, frames=frames)
         if current_pivot.empty:
             return None
 
@@ -2306,6 +2299,11 @@ def export_volatility_table(
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             export_df.to_excel(writer, sheet_name='Volatility Data', index=False)
+            pairs = overview.surface_pairs(snapshot_reference, selected_date, None, selected_products,
+                                           None, source, selection, revision, comparison)
+            pd.DataFrame([{'product':p, 'source':pair['source'], 'revision':pair['current_label'],
+                           'comparison':pair['comparison_label'], 'revision_id':((selection or {}).get('products',{}).get(p.upper()) or {}).get('revision'), 'comparison_id':comparison if str(comparison).startswith('settlement:') else ((selection or {}).get('products',{}).get(p.upper()) or {}).get('comparison'), 'status':pair['error'] or 'available'}
+                          for p,pair in pairs.items()]).to_excel(writer, sheet_name='Provenance', index=False)
         output.seek(0)
 
         selected_date_str = pd.to_datetime(selected_date).strftime('%Y%m%d')
@@ -2363,12 +2361,13 @@ def export_surface_table(
                 diff_table_df.to_excel(writer, sheet_name=f'{active_product} Change', index=False)
             if selected_metadata:
                 provenance = {
-                    'Product': active_product, 'Source': source, 'Revision': revision,
+                    'Product': active_product, 'Source': source, 'Revision': selected_metadata.get('revision_id', revision),
                     'Selected': selected_metadata['current_label'],
                     'Valuation date': selected_metadata['business_date'],
                     'Evidence cutoff': selected_metadata['cutoff'],
                     'Comparison': selected_metadata['comparison_label'],
                     'Comparison publication': selected_metadata['comparison_id'],
+                    'Comparison snapshot': json.dumps(selected_metadata.get('comparison_snapshot_reference')),
                     'Settlement anchor': selected_metadata['base_publication_id'],
                     'Settlement COB': selected_metadata['settlement_cob'],
                     'Changed months': ', '.join(selected_metadata['changed_months']),
@@ -2478,9 +2477,8 @@ def render_overview(reference, date, previous_date, products, window, wing_delta
                'fronts': {product: front.strftime('%Y-%m-%d') for product, front in fronts.items() if front is not None}}
     label = f"{months[0]:%b %Y} – {months[-1]:%b %Y} · monthly" if len(months) else 'No unexpired maturities'
     cards = [overview.product_card(product, pair, months, active_product, wing_delta) for product, pair in pairs.items()]
-    message = f'Settlement COB: {date or "n/a"} · comparison: {previous_date or "n/a"}. '
-    if source not in (None, 'settlement') and active_product in pairs:
-        pair = pairs[active_product]
-        message += f'{active_product}: {pair["current_label"]} · compare: {pair["comparison_label"]}. Other products use settlement. '
+    message = (f'Settlement COB: {date or "n/a"} · comparison: {previous_date or "n/a"}. '
+               if source in (None, 'settlement') else
+               f'Selected surfaces · COB: {date or "n/a"} · comparison: {"settlement anchors" if comparison == "anchor" else comparison.replace("settlement:", "settlement ") if str(comparison).startswith("settlement:") else "selected revisions"}. ')
     message += 'All three metrics use the same saved surface. Gaps are unavailable nodes; Δ is in vol points.'
     return _build_message_span(message), html.Div(cards, className='vol-overview-grid'), context, label
