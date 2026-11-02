@@ -203,7 +203,7 @@ def test_selector_callback_is_registered_with_coherent_outputs():
     from dash_options.bootstrap import app
 
     callbacks = {**_callback.GLOBAL_CALLBACK_MAP, **app.callback_map}
-    selector_keys = [key for key in callbacks if "surface-selector-status" in key]
+    selector_keys = [key for key in callbacks if "surface-selector-status.children" in key]
     assert len(selector_keys) == 1
     entry = callbacks[selector_keys[0]]
     assert {i["id"] for i in entry["inputs"]} >= {
