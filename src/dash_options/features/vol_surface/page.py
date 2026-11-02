@@ -381,7 +381,7 @@ def _prepare_heatmap_matrix(current_surface, previous_surface, heatmap_mode):
     return absolute_values, display_values, delta_columns, title_suffix, (colorscale, colorbar_title, zmid, zmin, zmax), hover_template
 
 
-def _create_surface_heatmap_figure(product, current_surface, previous_surface, heatmap_mode):
+def _create_surface_heatmap_figure(product, current_surface, previous_surface, heatmap_mode, selected_expiry=None):
     if current_surface.empty:
         return _empty_figure(f'No surface data available for {product} on the selected date.', f'{product} Surface Heatmap')
 
@@ -427,8 +427,16 @@ def _create_surface_heatmap_figure(product, current_surface, previous_surface, h
         showlegend=False,
     )
     fig.update_xaxes(**_vol_axis('Delta', showgrid=False, tickangle=0))
-    fig.update_yaxes(**_vol_axis('Expiry', showgrid=False, autorange='reversed'))
-
+    fig.update_yaxes(**_vol_axis('Expiry', type='category', showgrid=False, autorange='reversed',
+                                   tickmode='array', tickvals=y_labels[::6],
+                                   ticktext=[pd.Timestamp(m).strftime('%b %Y') for m in y_labels[::6]]))
+    kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
+    if kind == surface_data.SURFACE_EXPIRY_MONTH:
+        selected = pd.Timestamp(month).strftime('%Y-%m')
+        if selected in y_labels:
+            row = y_labels.index(selected)
+            fig.add_shape(type='rect', xref='paper', x0=0, x1=1, yref='y',
+                          y0=row-.5, y1=row+.5, line=dict(color='#2563eb', width=2), fillcolor='rgba(0,0,0,0)')
     return fig
 
 
@@ -1086,6 +1094,7 @@ def _estimate_surface_width(samples, min_width=58, max_width=108, character_px=7
 def _prepare_surface_table_display_df(dataframe, delta_columns, include_diff_colors=False):
     display_df = pd.DataFrame(index=dataframe.index)
     display_df['expiry'] = dataframe['expiry'].apply(_format_surface_expiry_label)
+    display_df['__contract'] = dataframe['expiry'].astype(str).str[:7]
     display_df['dte'] = pd.to_numeric(dataframe['dte'], errors='coerce').round().astype('Int64')
     if 'origin' in dataframe.columns:
         display_df['origin'] = dataframe['origin']
@@ -1195,16 +1204,20 @@ def _column_def_width_sum(column_defs):
     return sum(int(column.get('width') or column.get('minWidth') or 0) for column in column_defs)
 
 
-def _create_surface_ag_grid(dataframe, delta_columns, table_id, include_diff_colors=False):
+def _create_surface_ag_grid(dataframe, delta_columns, table_id, include_diff_colors=False, selected_expiry=None):
     if dataframe.empty or not delta_columns:
         return html.Div('No surface data for the current selection.', className='volatility-table-empty-state')
 
     display_df = _prepare_surface_table_display_df(dataframe, delta_columns, include_diff_colors=include_diff_colors)
     column_defs = _build_surface_grid_column_defs(display_df, delta_columns, include_diff_colors=include_diff_colors)
     content_width = _column_def_width_sum(column_defs) + 30
+    kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
+    selected_month = month[:7] if kind == surface_data.SURFACE_EXPIRY_MONTH else ''
     return dag.AgGrid(
         id=table_id,
         rowData=_clean_vol_table_records(display_df),
+        getRowStyle={'styleConditions': [{'condition': f"params.data.__contract === '{selected_month}'",
+                     'style': {'backgroundColor': '#eff6ff', 'outline': '1px solid #2563eb'}}]},
         columnDefs=column_defs,
         defaultColDef={
             'wrapHeaderText': False,
@@ -1395,7 +1408,8 @@ layout = html.Div([
         html.Div([
             dcc.Tabs(id='surface-product-tabs', value=None, children=[]),
             html.Div([
-                html.Label('Smile Expiry:', className="inline-filter-label"),
+                html.Strong(id='surface-detail-selection-label'),
+                html.Label('Contract:', className="inline-filter-label"),
                 dcc.Dropdown(
                     id='surface-expiry-dropdown',
                     options=[],
@@ -1432,6 +1446,22 @@ layout = html.Div([
             html.Div([
                 _build_vol_chart_card(
                     dcc.Graph(
+                        id='surface-smile-graph',
+                        config=VOL_GRAPH_CONFIG,
+                        className='volatility-chart-graph',
+                        style={'height': '388px'}
+                    ),
+                    'Smile Evolution',
+                    className='volatility-surface-chart-card'
+                ),
+                _build_vol_chart_card(
+                    dcc.Graph(id='surface-term-graph', config=VOL_GRAPH_CONFIG,
+                              className='volatility-chart-graph', style={'height': '388px'}),
+                    'ATM Term Structure', className='volatility-surface-chart-card')
+            ], className='volatility-surface-chart-grid'),
+            html.Div([
+                _build_vol_chart_card(
+                    dcc.Graph(
                         id='surface-heatmap-graph',
                         config=VOL_GRAPH_CONFIG,
                         className='volatility-chart-graph',
@@ -1440,23 +1470,14 @@ layout = html.Div([
                     'Surface Heatmap',
                     className='volatility-surface-chart-card'
                 ),
-                _build_vol_chart_card(
-                    dcc.Graph(
-                        id='surface-smile-graph',
-                        config=VOL_GRAPH_CONFIG,
-                        className='volatility-chart-graph',
-                        style={'height': '388px'}
-                    ),
-                    'Smile Evolution',
-                    className='volatility-surface-chart-card'
-                )
-            ], className='volatility-surface-chart-grid'),
+            ], className='volatility-linked-heatmap'),
             dcc.Store(id='surface-history-context'),
             dcc.Store(id='surface-history-contracts-dropdown', data=[]),
             html.Div([
                 html.Div([html.Label('Contract', htmlFor='surface-rv-contract-dropdown'),
                     dcc.Dropdown(id='surface-rv-contract-dropdown', options=[], value=None, clearable=False,
-                                 className='history-contract-select')], className='history-control'),
+                                 className='history-contract-select')], style={'display': 'none'}),
+                html.Strong(id='surface-history-selection-label'),
                 html.Div([html.Label('Compare', htmlFor='surface-history-compare'),
                     dcc.Dropdown(id='surface-history-compare', options=[], value=None, clearable=True,
                                  placeholder='Optional', className='history-contract-select')], className='history-control'),
@@ -1474,17 +1495,19 @@ layout = html.Div([
                 html.Button('Export history', id='export-surface-history', className='custom-export-btn'),
             ], id='surface-history-contracts-controls', className='volatility-history-toolbar'),
             html.Div('Settlement history · first contract also drives realized vs implied', className='volatility-history-caption'),
+            html.Div([html.Div([
             _build_vol_chart_card(
                 dcc.Graph(
                     id='surface-history-graph',
                     config=VOL_GRAPH_CONFIG,
                     className='volatility-chart-graph',
-                    style={'height': '368px'}
+                    style={'height': '480px'}
                 ),
                 'Delta Vol History',
                 className='volatility-history-chart-card'
             ),
             html.Div(id='surface-history-coverage'),
+            ]),
             html.Div([
                 _build_vol_chart_card(
                     dcc.Graph(id='surface-rv-comparison-graph',config=VOL_GRAPH_CONFIG,
@@ -1492,6 +1515,7 @@ layout = html.Div([
                     'Realized vs Implied Volatility',className='volatility-rv-chart-card'),
                 html.Div(id='surface-rv-comparison-status',className='volatility-rv-comparison-status'),
             ],id='surface-rv-comparison-section',style={'display':'none'}),
+            ], className='volatility-linked-history-grid'),
             html.Div(id='surface-table-container', style={'width': '100%'})
         ], id='surface-content-wrapper', style={'display': 'none'})
     ], id='surface-section-container', className='volatility-section volatility-surface-section')
@@ -1903,7 +1927,7 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
     if current_surface.empty:
         return [], None, hidden_style
 
-    expiry_options = _build_surface_expiry_options(current_surface)
+    expiry_options = [o for o in _build_surface_expiry_options(current_surface) if o['value'].startswith('month:')]
     if not expiry_options:
         return [], None, hidden_style
 
@@ -1919,7 +1943,7 @@ def update_surface_expiry_dropdown(snapshot_reference, selected_date, active_pro
     selected_expiry = (
         normalized_current_expiry
         if normalized_current_expiry in valid_expiries
-        else expiry_options[0]['value']
+        else (None if navigation_triggered and isinstance(navigation, dict) and navigation.get('product') == active_product else expiry_options[0]['value'])
     )
     return expiry_options, selected_expiry, visible_style
 
@@ -2018,9 +2042,14 @@ def update_history_contracts(snapshot_reference,end,product,lookback,current):
           Output('surface-history-context','data'),
           Input('vol-surface-snapshot-ref','data'), Input('table-date-picker','date'),
           Input('surface-product-tabs','value'), Input('surface-history-range','value'),
+          Input('surface-expiry-dropdown', 'value'),
           State('surface-rv-contract-dropdown','value'), State('surface-history-compare','value'),
           State('surface-history-context','data'))
-def select_history_contracts(reference, end, product, lookback, primary, comparison, previous):
+def select_linked_history_contracts(reference, end, product, lookback, selected_expiry, primary, comparison, previous):
+    return select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry)
+
+
+def select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry='legacy'):
     if not reference or not end or product not in delta_history_data.CALENDARS:
         return {'display':'none'}, [], None, [], None, {'product':product}
     frame = overview.snapshot_frame(reference)
@@ -2032,6 +2061,11 @@ def select_history_contracts(reference, end, product, lookback, primary, compari
         primary, comparison = default, None
     elif primary not in months:
         primary = default
+    if selected_expiry != 'legacy':
+        kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
+        primary = month if kind == surface_data.SURFACE_EXPIRY_MONTH else None
+    if primary and primary not in months:
+        months = sorted([*months, primary])
     if comparison not in months or comparison == primary:
         comparison = None
     options = [{'label':pd.Timestamp(m).strftime('%b-%y'), 'value':m} for m in months]
@@ -2200,15 +2234,11 @@ def update_surface_section(
             status_line
         )
 
-    if selected_expiry is None:
-        selected_expiry = surface_data._surface_expiry_value(
-            surface_data.SURFACE_EXPIRY_MONTH,
-            pd.to_datetime(current_surface['contract_date'].min()),
-        )
+    # The shared contract selector owns selection; never substitute another maturity.
 
     selected_history_buckets = (selected_history_buckets or ['ATM'])[:3]
 
-    heatmap_figure = _create_surface_heatmap_figure(active_product, current_surface, previous_surface, heatmap_mode or 'vs_atm')
+    heatmap_figure = _create_surface_heatmap_figure(active_product, current_surface, previous_surface, heatmap_mode or 'vs_atm', selected_expiry)
     smile_figure = _create_smile_evolution_figure(
         active_product, selected_expiry, current_surface, previous_surface, lookback_days,
         (selected_metadata or {}).get('business_date', selected_date),
@@ -2232,7 +2262,7 @@ def update_surface_section(
 
     current_table = _build_surface_table_panel(
         'Surface Matrix',
-        _create_surface_ag_grid(current_table_df, delta_columns, 'surface-current-table'),
+        _create_surface_ag_grid(current_table_df, delta_columns, 'surface-current-table', selected_expiry=selected_expiry),
         chips=[
             _build_vol_chart_chip('Rows', len(current_table_df), 'primary'),
             _build_vol_chart_chip('Deltas', len(delta_columns)),
@@ -2244,7 +2274,7 @@ def update_surface_section(
     if not diff_table_df.empty:
         diff_table = _build_surface_table_panel(
             f"Difference vs. {selected_metadata['comparison_label']}" if selected_metadata else 'Difference vs. Previous Date',
-            _create_surface_ag_grid(diff_table_df, delta_columns, 'surface-diff-table', include_diff_colors=True),
+            _create_surface_ag_grid(diff_table_df, delta_columns, 'surface-diff-table', include_diff_colors=True, selected_expiry=selected_expiry),
             chips=[
                 _build_vol_chart_chip('Rows', len(diff_table_df), 'primary'),
                 _build_vol_chart_chip('Deltas', len(delta_columns)),
@@ -2416,15 +2446,41 @@ def export_surface_table(
     Output('vol-overview-navigation', 'data'),
     Input({'type': 'vol-overview-chart', 'product': ALL, 'metric': ALL}, 'clickData'),
     Input({'type': 'vol-overview-inspect', 'product': ALL}, 'n_clicks'),
+    Input('surface-term-graph', 'clickData'),
+    Input('surface-heatmap-graph', 'clickData'),
+    Input('volatility-table', 'cellClicked', allow_optional=True),
+    Input('changes-table', 'cellClicked', allow_optional=True),
+    Input('surface-current-table', 'cellClicked', allow_optional=True),
+    Input('surface-diff-table', 'cellClicked', allow_optional=True),
+    State('surface-product-tabs', 'value'),
+    State('table-grouping-dropdown', 'value'),
     State({'type': 'vol-overview-chart', 'product': ALL, 'metric': ALL}, 'id'),
     State({'type': 'vol-overview-inspect', 'product': ALL}, 'id'),
     State('vol-overview-context', 'data'),
     State('vol-overview-navigation', 'data'),
     prevent_initial_call=True,
 )
-def navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous):
+def navigate_workspace(clicks, inspections, term_click, heat_click, table_click, changes_click,
+                       matrix_click, diff_click, active_product, grouping, chart_ids, link_ids, context, previous):
+    return navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous,
+        term_click, heat_click, table_click, changes_click, matrix_click, diff_click, active_product, grouping)
+
+
+def navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous,
+                      term_click=None, heat_click=None, table_click=None, changes_click=None,
+                      matrix_click=None, diff_click=None, active_product=None, grouping='monthly'):
     valid = (context or {}).get('months', [])
     trigger = ctx.triggered_id
+    if isinstance(trigger, str):
+        events = {'surface-term-graph': term_click, 'surface-heatmap-graph': heat_click,
+                  'volatility-table': table_click, 'changes-table': changes_click,
+                  'surface-current-table': matrix_click, 'surface-diff-table': diff_click}
+        event = events.get(trigger)
+        picked = detail_click_selection(trigger, event, active_product, grouping)
+        if picked is None:
+            return no_update
+        product, chosen = picked
+        return {'product': product, 'month': chosen, 'sequence': (previous or {}).get('sequence', 0) + 1}
     if not valid or not isinstance(trigger, dict):
         return no_update
     product = trigger.get('product')
@@ -2481,3 +2537,79 @@ def render_overview(reference, date, previous_date, products, window, wing_delta
     label = f"{months[0]:%b %Y} – {months[-1]:%b %Y} · monthly" if len(months) else 'No unexpired maturities'
     cards = [overview.product_card(product, pair, months, active_product, wing_delta) for product, pair in pairs.items()]
     return '', html.Div(cards, className='vol-overview-grid'), context, label
+
+
+def detail_click_selection(trigger, event, product, grouping='monthly'):
+    """Decode only real monthly cells; aggregates never become a single option."""
+    if not isinstance(event, dict):
+        return None
+    try:
+        if trigger in {'surface-term-graph', 'surface-heatmap-graph'}:
+            point = event['points'][0]
+            value = point['x'] if trigger == 'surface-term-graph' else point['y']
+            month = pd.Timestamp(value).to_period('M').to_timestamp()
+        elif trigger in {'volatility-table', 'changes-table'}:
+            if grouping != 'monthly':
+                return None
+            product = event['data']['product']
+            month = pd.to_datetime(event['colId'], format='%m-%y')
+        else:
+            month = pd.to_datetime(event['data']['expiry'], format="%b'%y")
+        if pd.isna(month) or not product:
+            return None
+        return product, month.strftime('%Y-%m-%d')
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+
+
+def create_term_figure(product, current, previous, selected_expiry, metadata=None):
+    """Display saved ATM nodes from the exact page selection, without fitting."""
+    fig = go.Figure()
+    metadata = metadata or {}
+    months = sorted(set(current.contract_date.dropna()) | set(previous.contract_date.dropna()))
+    if not months:
+        return _empty_figure('No selected surface available.', 'ATM Term Structure')
+    axis = pd.DatetimeIndex(months)
+    for frame, label, color, dash in (
+        (current, metadata.get('current_label', 'Current'), overview.CURRENT_COLOR, 'solid'),
+        (previous, metadata.get('comparison_label', 'Comparison'), overview.COMPARE_COLOR, 'dash'),
+    ):
+        values = overview.metric_frame(frame, 25).reindex(axis).atm / 100
+        fig.add_trace(go.Scatter(x=axis, y=values, mode='lines+markers', name=label,
+            connectgaps=False, line=dict(color=color, dash=dash, width=2),
+            marker=dict(size=5), hovertemplate='%{x|%b %Y}<br>ATM %{y:.2%}<extra>%{fullData.name}</extra>'))
+    kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
+    if kind == surface_data.SURFACE_EXPIRY_MONTH:
+        fig.add_shape(type='line', x0=month, x1=month, xref='x', y0=0, y1=1, yref='paper',
+                      line=dict(color='#2563eb', width=1.5))
+        fig.add_annotation(x=month, y=1, xref='x', yref='paper',
+                           text=pd.Timestamp(month).strftime("%b '%y"), showarrow=False,
+                           yshift=10, font=dict(color='#2563eb', size=11))
+    _apply_vol_chart_theme(fig, None, margin=dict(l=48, r=16, t=18, b=76))
+    fig.update_yaxes(**_vol_axis('ATM IV', tickformat='.0%'))
+    fig.update_xaxes(**_vol_axis('Delivery month', type='date', tickformat="%b '%y"))
+    fig.layout.transition = None
+    fig.update_layout(uirevision=f'term:{product}:{selected_expiry}', meta={'product':product, 'contract':month,
+        'surface_selection': metadata})
+    return fig
+
+
+@callback(Output('surface-term-graph', 'figure'),
+          Output('surface-detail-selection-label', 'children'),
+          Output('surface-history-selection-label', 'children'),
+          Input('vol-surface-snapshot-ref', 'data'), Input('table-date-picker', 'date'),
+          Input('table-prev-date-picker', 'date'), Input('surface-product-tabs', 'value'),
+          Input('surface-expiry-dropdown', 'value'), Input('surface-selection-ref', 'data'),
+          Input('surface-source-dropdown', 'value'), Input('surface-revision-dropdown', 'value'),
+          Input('surface-comparison-dropdown', 'value'))
+def linked_term_view(reference, date, previous_date, product, expiry, selection, source, revision, comparison):
+    label = f'{product or "Select product"} · {_format_surface_expiry_selection_label(expiry) or "Select contract"}'
+    if not reference or not date or not product:
+        return _empty_figure('Select a product and contract.', 'ATM Term Structure'), product or 'Select product', label
+    surface_data._ensure_cached_data(reference)
+    try:
+        current, previous, metadata = _selected_surface_pair(product, date, previous_date,
+                                                            source, selection, revision, comparison)
+        return create_term_figure(product, current, previous, expiry, metadata), product or 'Select product', label
+    except surface_selector.SelectionError as exc:
+        return _empty_figure(str(exc), 'ATM Term Structure'), product or 'Select product', label
