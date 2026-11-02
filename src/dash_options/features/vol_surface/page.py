@@ -1065,15 +1065,14 @@ def _format_surface_expiry_label(value):
 
 def _format_surface_cell(value, signed=False):
     if value is None or pd.isna(value):
-        return ''
+        return '—'
     try:
         number = float(value) * 100
     except (TypeError, ValueError):
         return str(value)
-    if signed:
-        sign = '+' if number > 0 else ''
-        return f'{sign}{number:.2f} pp'
-    return f'{number:.2f}%'
+    number = 0.0 if abs(number) < .005 else number
+    sign = '+' if signed and number > 0 else ''
+    return f'{sign}{number:.2f}'
 
 
 def _surface_raw_field(column):
@@ -1150,11 +1149,6 @@ def _build_surface_grid_column_defs(display_df, delta_columns, include_diff_colo
 
     for column in delta_columns:
         raw_field = _surface_raw_field(column)
-        width = _estimate_surface_width(
-            [column, *display_df[column].dropna().astype(str).tolist()[:200]],
-            min_width=64,
-            max_width=104 if include_diff_colors else 92,
-        )
         column_def = {
             'headerName': str(column),
             'field': str(column),
@@ -1162,11 +1156,11 @@ def _build_surface_grid_column_defs(display_df, delta_columns, include_diff_colo
             'sortable': False,
             'filter': False,
             'resizable': True,
-            'width': width,
-            'minWidth': 58,
-            'maxWidth': max(width, 108),
+            'width': 70,
+            'minWidth': 64,
+            'flex': 1,
             'cellClass': 'mckinsey-ag-grid-cell mckinsey-ag-grid-number-cell volatility-surface-delta-cell',
-            'headerClass': 'mckinsey-ag-grid-header volatility-surface-delta-header',
+            'headerClass': 'mckinsey-ag-grid-header volatility-surface-delta-header' + (' volatility-surface-atm-header' if column == 'ATM' else ''),
             'headerTooltip': str(column),
             'cellClassRules': {
                 'volatility-missing-cell': (
@@ -1185,7 +1179,7 @@ def _build_surface_grid_column_defs(display_df, delta_columns, include_diff_colo
 
     if 'origin' in display_df.columns:
         column_defs.append({
-            'headerName': 'Origin', 'field': 'origin', 'width': 172, 'minWidth': 140,
+            'headerName': 'Origin', 'field': 'origin', 'width': 152, 'minWidth': 140,
             'sortable': True, 'filter': False, 'resizable': True, 'tooltipField': 'origin',
             'headerTooltip': 'Updated months or the original settlement date inherited by this revision',
             'cellClass': 'mckinsey-ag-grid-cell volatility-surface-origin-cell',
@@ -1198,20 +1192,20 @@ def _column_def_width_sum(column_defs):
     return sum(int(column.get('width') or column.get('minWidth') or 0) for column in column_defs)
 
 
-def _create_surface_ag_grid(dataframe, delta_columns, table_id, include_diff_colors=False, selected_expiry=None):
+def _create_surface_ag_grid(dataframe, delta_columns, table_id, include_diff_colors=False, selected_expiry=None, aligned_table_id=None):
     if dataframe.empty or not delta_columns:
         return html.Div('No surface data for the current selection.', className='volatility-table-empty-state')
 
     display_df = _prepare_surface_table_display_df(dataframe, delta_columns, include_diff_colors=include_diff_colors)
     column_defs = _build_surface_grid_column_defs(display_df, delta_columns, include_diff_colors=include_diff_colors)
-    content_width = _column_def_width_sum(column_defs) + 30
     kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
     selected_month = month[:7] if kind == surface_data.SURFACE_EXPIRY_MONTH else ''
     return dag.AgGrid(
         id=table_id,
         rowData=_clean_vol_table_records(display_df),
         getRowStyle={'styleConditions': [{'condition': f"params.data.__contract === '{selected_month}'",
-                     'style': {'backgroundColor': '#eff6ff', 'outline': '1px solid #2563eb'}}]},
+                     'style': {'backgroundColor': '#f1f5f9', 'borderTop': '1px solid #cbd5e1',
+                               'borderBottom': '1px solid #cbd5e1'}}]},
         columnDefs=column_defs,
         defaultColDef={
             'wrapHeaderText': False,
@@ -1231,12 +1225,13 @@ def _create_surface_ag_grid(dataframe, delta_columns, table_id, include_diff_col
             'animateRows': False,
             'alwaysShowHorizontalScroll': False,
             'alwaysShowVerticalScroll': False,
+            **({'alignedGrids': [aligned_table_id]} if aligned_table_id else {}),
         },
         className=(
             'ag-theme-alpine mckinsey-ag-grid supply-dest-summary-grid volatility-surface-grid'
             + (' volatility-surface-change-grid' if include_diff_colors else '')
         ),
-        style={'width': f'{content_width}px', 'maxWidth': '100%', 'height': 'auto'},
+        style={'width': '100%', 'height': 'auto'},
         dangerously_allow_code=True,
     )
 
@@ -2270,25 +2265,19 @@ def update_surface_section(
             }})
 
     current_table = _build_surface_table_panel(
-        'Surface Matrix',
-        _create_surface_ag_grid(current_table_df, delta_columns, 'surface-current-table', selected_expiry=selected_expiry),
-        chips=[
-            _build_vol_chart_chip('Rows', len(current_table_df), 'primary'),
-            _build_vol_chart_chip('Deltas', len(delta_columns)),
-            _build_vol_chart_chip('Format', 'Vol %'),
-        ],
+        'Surface matrix (%)',
+        _create_surface_ag_grid(current_table_df, delta_columns, 'surface-current-table',
+                                selected_expiry=selected_expiry,
+                                aligned_table_id='surface-diff-table' if not diff_table_df.empty else None),
         className='volatility-surface-current-panel',
     )
 
     if not diff_table_df.empty:
         diff_table = _build_surface_table_panel(
-            f"Difference vs. {selected_metadata['comparison_label']}" if selected_metadata else 'Difference vs. Previous Date',
-            _create_surface_ag_grid(diff_table_df, delta_columns, 'surface-diff-table', include_diff_colors=True, selected_expiry=selected_expiry),
-            chips=[
-                _build_vol_chart_chip('Rows', len(diff_table_df), 'primary'),
-                _build_vol_chart_chip('Deltas', len(delta_columns)),
-                _build_vol_chart_chip('Format', 'pp'),
-            ],
+            'Change vs comparison (vol pts)',
+            _create_surface_ag_grid(diff_table_df, delta_columns, 'surface-diff-table',
+                                    include_diff_colors=True, selected_expiry=selected_expiry,
+                                    aligned_table_id='surface-current-table'),
             className='volatility-surface-diff-panel',
         )
     else:
