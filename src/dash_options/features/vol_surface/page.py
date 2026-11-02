@@ -1540,7 +1540,9 @@ def poll_surface_publications(_tick, selected_date, previous, refresh_count, sna
         status = load_publication_status(get_database_engine(), selected_date, owner=owner)
     except Exception:
         return no_update, _build_message_span('Publication status is temporarily unavailable.', 'warning'), no_update
-    notices = status_notices(status)
+    display_status = {**status, 'jobs': [row for row in status.get('jobs', [])
+                                       if row.get('stage') != 'verified' or row.get('status') == 'failed']}
+    notices = status_notices(display_status)
     if status.get('latest_cob') and status['latest_cob'] > selected_date:
         notices.insert(0, {'message':f"Settlements are available through {status['latest_cob']}; selected date is {selected_date}.",
                            'tone':'warning'})
