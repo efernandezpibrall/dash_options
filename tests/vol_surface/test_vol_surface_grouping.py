@@ -228,7 +228,7 @@ def test_atm_render_resolves_shared_snapshot_once(monkeypatch):
         lambda reference=None: calls.append(reference),
     )
 
-    vol_surface.render_atm_section(
+    vol_surface.render_volatility_tables(
         {'snapshot_id': 'shared'},
         None,
         None,

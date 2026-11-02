@@ -150,6 +150,51 @@ python -m gunicorn -w 1 -k gthread --threads 8 -b 127.0.0.1:8071 --timeout 180 d
 Use an available bind address/port. The root `Procfile` provides a configurable
 production startup command.
 
+### Volatility Surface revisions
+
+The selector below the product tabs opens **Settlement**, **Published intraday**,
+or **My saved draft**. Brent and TTF reuse the immutable publications and private
+drafts saved in Vol Trades. Choose an exact revision and compare it with its
+original settlement anchor (the default) or another intraday publication.
+Refreshing discovers new revisions while keeping the selected revision pinned.
+Discovery lists the latest 60 publications and 30 drafts; an already selected
+older revision remains readable.
+
+The heatmap, smile, matrices, and **Export Surface** use the same selected
+revision. The Origin column identifies fitted and inherited months; the export
+includes a Surface Selection provenance sheet. Older revisions are labeled as
+replay, with DTE and smile history evaluated at that revision's business date.
+The **Volatility Overview** shows ATM, risk reversal, and butterfly together in
+every product card. A shared **Wing delta** selector defaults to 25Δ and offers
+1Δ, 5Δ, 10Δ, 15Δ, 20Δ, 25Δ, 30Δ, 35Δ, 40Δ and 45Δ; the choice is remembered in
+the browser. ATM is unaffected. Readouts always show each product's first
+unexpired contract, labelled before each number. Changes compare that same
+contract with its comparison surface; missing comparison values stay unavailable.
+The shared monthly 12/24/all-maturity window starts at the earliest front contract,
+including when viewing an intraday replay. Click a curve to inspect that delivery's
+smile below, or **Inspect smile** to open the product's front contract. Neither
+changes the front-contract readouts. Existing delta nodes are used exactly.
+Intermediate deltas use linear IV interpolation within the saved grid via the
+analytics API; `≈` marks these indicative RR/BF values. There is no extrapolation
+or interpolation across missing advertised nodes. These diagnostics do not
+replace evaluation of an accepted pricing model. Call-delta grids use the
+complementary call delta for the put wing. No calibration runs in these cards.
+
+The active product’s overview follows its selected intraday revision or saved
+draft and comparison; other products remain on their explicit settlement COB.
+An unavailable replay never substitutes settlement in its card. Volatility Data
+tables, Delta Vol History, and realized comparison remain settlement-based. The
+Group By control applies to the tables; overview curves retain monthly delivery.
+
+Draft access uses the same authenticated trader as Vol Trades. Selecting a
+draft previews its saved months against its original settlement anchor; it does
+not recalibrate or publish anything. Missing revisions, disabled product reads,
+or unauthorized drafts show an unavailable state without substituting settlement.
+The independent `OPTIONS_BRENT_INTRADAY_READS_ENABLED` and
+`OPTIONS_TFO_INTRADAY_READS_ENABLED` flags are respected. No schema change is
+required; deployment needs the paired analytics package containing the public
+intraday surface reader and saved-node smile diagnostics.
+
 ## Database migrations
 
 The active graph contains one frozen baseline, `20261029_03`. A database already

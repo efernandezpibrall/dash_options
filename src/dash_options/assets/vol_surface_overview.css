@@ -1,0 +1,32 @@
+.vol-overview-controls {display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;padding:10px 14px 4px;}
+.vol-overview-field {display:flex;align-items:center;gap:8px;min-width:0;}
+.vol-overview-field label {font-size:12px;color:#475569;white-space:nowrap;margin:0;}
+.vol-overview-field .dash-dropdown {width:155px;min-width:0;font-size:12px;}
+.vol-overview-delta-field .dash-dropdown {width:85px;}
+.vol-overview-window-label {font-size:11px;color:#64748b;}
+.vol-overview-legend {display:flex;gap:14px;align-items:center;margin-left:auto;font-size:11px;color:#64748b;}
+.vol-overview-legend span {display:inline-flex;align-items:center;gap:5px;}
+.vol-overview-line {display:inline-block;width:19px;border-top:2px solid #111827;}
+.vol-overview-line.comparison {border-top:2px dashed #2563eb;}
+.vol-overview-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,295px),1fr));gap:11px;align-items:start;}
+.vol-overview-card-active {border-color:#779dbd;}
+.vol-overview-card-header {display:flex;justify-content:space-between;gap:8px;align-items:center;padding:10px;background:linear-gradient(#fbfdff,#f1f6fb);border-bottom:1px solid #e2e8f0;font-size:13px;}
+.vol-overview-error {color:#92400e;background:#fff7ed;font-size:11px;padding:8px 10px;}
+.vol-overview-metric {border-top:1px solid #e2e8f0;padding-top:5px;min-width:0;}
+.vol-overview-metric-header {display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:4px 8px;padding:0 10px;}
+.vol-overview-metric-name {font-size:11px;font-weight:600;color:#334155;}
+.vol-overview-readout {display:flex;gap:7px;font-size:11px;color:#64748b;font-variant-numeric:tabular-nums;}
+.vol-overview-readout strong {font-size:12px;color:#172132;}
+.vol-overview-contract {white-space:nowrap;font-size:10px;color:#64748b;}
+.vol-overview-graph {min-width:0;}
+.vol-overview-card-footer {display:flex;justify-content:flex-end;padding:6px 10px 10px;font-size:11px;}
+.vol-overview-card-footer a {color:#356f9f;text-decoration:none;}
+.vol-overview-footnote {font-size:11px;color:#64748b;padding:0 14px 10px;}
+#surface-section-container {scroll-margin-top:150px;}
+@media(max-width:600px) {
+ .vol-overview-controls {gap:9px;}
+ .vol-overview-field {flex:1 1 100%;}
+ .vol-overview-field .dash-dropdown {flex:1;width:auto;}
+ .vol-overview-legend {margin-left:0;}
+ .vol-overview-grid {grid-template-columns:1fr;}
+}
