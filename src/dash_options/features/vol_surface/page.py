@@ -1386,6 +1386,9 @@ layout = html.Div([
         _build_volatility_section_header(
             'Volatility Surface',
             actions=[
+                dcc.Tabs(id='surface-product-tabs', value=None, children=[],
+                         className='surface-header-product-tabs',
+                         parent_className='surface-header-product-selector'),
                 dcc.Link(
                     'Open Vol Trades',
                     id='open-vol-trades-link',
@@ -1406,9 +1409,7 @@ layout = html.Div([
             className='volatility-empty-message'
         ),
         html.Div([
-            dcc.Tabs(id='surface-product-tabs', value=None, children=[]),
             html.Div([
-                html.Strong(id='surface-detail-selection-label'),
                 html.Label('Contract:', className="inline-filter-label"),
                 dcc.Dropdown(
                     id='surface-expiry-dropdown',
@@ -1455,12 +1456,6 @@ layout = html.Div([
                     className='volatility-surface-chart-card'
                 ),
                 _build_vol_chart_card(
-                    dcc.Graph(id='surface-term-graph', config=VOL_GRAPH_CONFIG,
-                              className='volatility-chart-graph', style={'height': '388px'}),
-                    'ATM Term Structure', className='volatility-surface-chart-card')
-            ], className='volatility-surface-chart-grid'),
-            html.Div([
-                _build_vol_chart_card(
                     dcc.Graph(
                         id='surface-heatmap-graph',
                         config=VOL_GRAPH_CONFIG,
@@ -1470,7 +1465,7 @@ layout = html.Div([
                     'Surface Heatmap',
                     className='volatility-surface-chart-card'
                 ),
-            ], className='volatility-linked-heatmap'),
+            ], className='volatility-surface-chart-grid'),
             dcc.Store(id='surface-history-context'),
             dcc.Store(id='surface-history-contracts-dropdown', data=[]),
             html.Div([
@@ -1870,7 +1865,8 @@ def update_surface_tabs(snapshot_reference, selected_products, selected_date, na
     if not supported_products:
         return [], None, {'display': 'none'}, 'Full surface data is available only for Brent, HH, TTF, JKM, and NBP.'
 
-    tabs = [dcc.Tab(label=product, value=product) for product in supported_products]
+    tabs = [dcc.Tab(label=product, value=product, className='surface-header-product-tab',
+                    selected_className='surface-header-product-tab-selected') for product in supported_products]
     current_date_products = supported_products
     if selected_date is not None and not surface_data.surface_dataset.empty:
         selected_date_dt = pd.to_datetime(selected_date).normalize()
@@ -2195,7 +2191,7 @@ def update_surface_section(
     history_expiry = 'month:' + history_contracts[0] if history_contracts else selected_expiry
 
     if selected_date is None or not active_product:
-        status_line = _build_surface_status_line(selected_date, prev_selected_date, active_product)
+        status_line = ''
         empty_heatmap = _empty_figure('Select a supported product to view the surface.', 'Surface Heatmap')
         empty_smile = _empty_figure('Select a supported product to view smile details.', 'Smile Evolution')
         empty_history = _empty_figure('Select a supported product, expiry, and delta bucket to view history.', 'Delta Vol History')
@@ -2213,13 +2209,8 @@ def update_surface_section(
                     history_contracts=history_contracts, snapshot_reference=snapshot_reference),
                 html.Div(message, className='volatility-table-empty-state'),
                 _build_message_span(message, tone='warning'))
-    status_line = (
-        _selected_surface_status(active_product, source, selected_metadata, current_surface, previous_surface)
-        if selected_metadata else _build_surface_status_line(
-            selected_date, prev_selected_date, active_product,
-            current_surface=current_surface, previous_surface=previous_surface,
-        )
-    )
+    # Routine source identity is already controlled in the page toolbar and exports.
+    status_line = ''
 
     if current_surface.empty:
         no_data_message = html.Div(
@@ -2446,7 +2437,6 @@ def export_surface_table(
     Output('vol-overview-navigation', 'data'),
     Input({'type': 'vol-overview-chart', 'product': ALL, 'metric': ALL}, 'clickData'),
     Input({'type': 'vol-overview-inspect', 'product': ALL}, 'n_clicks'),
-    Input('surface-term-graph', 'clickData'),
     Input('surface-heatmap-graph', 'clickData'),
     Input('volatility-table', 'cellClicked', allow_optional=True),
     Input('changes-table', 'cellClicked', allow_optional=True),
@@ -2460,19 +2450,19 @@ def export_surface_table(
     State('vol-overview-navigation', 'data'),
     prevent_initial_call=True,
 )
-def navigate_workspace(clicks, inspections, term_click, heat_click, table_click, changes_click,
+def navigate_workspace(clicks, inspections, heat_click, table_click, changes_click,
                        matrix_click, diff_click, active_product, grouping, chart_ids, link_ids, context, previous):
     return navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous,
-        term_click, heat_click, table_click, changes_click, matrix_click, diff_click, active_product, grouping)
+        heat_click, table_click, changes_click, matrix_click, diff_click, active_product, grouping)
 
 
 def navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous,
-                      term_click=None, heat_click=None, table_click=None, changes_click=None,
+                      heat_click=None, table_click=None, changes_click=None,
                       matrix_click=None, diff_click=None, active_product=None, grouping='monthly'):
     valid = (context or {}).get('months', [])
     trigger = ctx.triggered_id
     if isinstance(trigger, str):
-        events = {'surface-term-graph': term_click, 'surface-heatmap-graph': heat_click,
+        events = {'surface-heatmap-graph': heat_click,
                   'volatility-table': table_click, 'changes-table': changes_click,
                   'surface-current-table': matrix_click, 'surface-diff-table': diff_click}
         event = events.get(trigger)
@@ -2544,9 +2534,9 @@ def detail_click_selection(trigger, event, product, grouping='monthly'):
     if not isinstance(event, dict):
         return None
     try:
-        if trigger in {'surface-term-graph', 'surface-heatmap-graph'}:
+        if trigger == 'surface-heatmap-graph':
             point = event['points'][0]
-            value = point['x'] if trigger == 'surface-term-graph' else point['y']
+            value = point['y']
             month = pd.Timestamp(value).to_period('M').to_timestamp()
         elif trigger in {'volatility-table', 'changes-table'}:
             if grouping != 'monthly':
@@ -2562,54 +2552,7 @@ def detail_click_selection(trigger, event, product, grouping='monthly'):
         return None
 
 
-def create_term_figure(product, current, previous, selected_expiry, metadata=None):
-    """Display saved ATM nodes from the exact page selection, without fitting."""
-    fig = go.Figure()
-    metadata = metadata or {}
-    months = sorted(set(current.contract_date.dropna()) | set(previous.contract_date.dropna()))
-    if not months:
-        return _empty_figure('No selected surface available.', 'ATM Term Structure')
-    axis = pd.DatetimeIndex(months)
-    for frame, label, color, dash in (
-        (current, metadata.get('current_label', 'Current'), overview.CURRENT_COLOR, 'solid'),
-        (previous, metadata.get('comparison_label', 'Comparison'), overview.COMPARE_COLOR, 'dash'),
-    ):
-        values = overview.metric_frame(frame, 25).reindex(axis).atm / 100
-        fig.add_trace(go.Scatter(x=axis, y=values, mode='lines+markers', name=label,
-            connectgaps=False, line=dict(color=color, dash=dash, width=2),
-            marker=dict(size=5), hovertemplate='%{x|%b %Y}<br>ATM %{y:.2%}<extra>%{fullData.name}</extra>'))
-    kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
-    if kind == surface_data.SURFACE_EXPIRY_MONTH:
-        fig.add_shape(type='line', x0=month, x1=month, xref='x', y0=0, y1=1, yref='paper',
-                      line=dict(color='#2563eb', width=1.5))
-        fig.add_annotation(x=month, y=1, xref='x', yref='paper',
-                           text=pd.Timestamp(month).strftime("%b '%y"), showarrow=False,
-                           yshift=10, font=dict(color='#2563eb', size=11))
-    _apply_vol_chart_theme(fig, None, margin=dict(l=48, r=16, t=18, b=76))
-    fig.update_yaxes(**_vol_axis('ATM IV', tickformat='.0%'))
-    fig.update_xaxes(**_vol_axis('Delivery month', type='date', tickformat="%b '%y"))
-    fig.layout.transition = None
-    fig.update_layout(uirevision=f'term:{product}:{selected_expiry}', meta={'product':product, 'contract':month,
-        'surface_selection': metadata})
-    return fig
-
-
-@callback(Output('surface-term-graph', 'figure'),
-          Output('surface-detail-selection-label', 'children'),
-          Output('surface-history-selection-label', 'children'),
-          Input('vol-surface-snapshot-ref', 'data'), Input('table-date-picker', 'date'),
-          Input('table-prev-date-picker', 'date'), Input('surface-product-tabs', 'value'),
-          Input('surface-expiry-dropdown', 'value'), Input('surface-selection-ref', 'data'),
-          Input('surface-source-dropdown', 'value'), Input('surface-revision-dropdown', 'value'),
-          Input('surface-comparison-dropdown', 'value'))
-def linked_term_view(reference, date, previous_date, product, expiry, selection, source, revision, comparison):
-    label = f'{product or "Select product"} · {_format_surface_expiry_selection_label(expiry) or "Select contract"}'
-    if not reference or not date or not product:
-        return _empty_figure('Select a product and contract.', 'ATM Term Structure'), product or 'Select product', label
-    surface_data._ensure_cached_data(reference)
-    try:
-        current, previous, metadata = _selected_surface_pair(product, date, previous_date,
-                                                            source, selection, revision, comparison)
-        return create_term_figure(product, current, previous, expiry, metadata), product or 'Select product', label
-    except surface_selector.SelectionError as exc:
-        return _empty_figure(str(exc), 'ATM Term Structure'), product or 'Select product', label
+@callback(Output('surface-history-selection-label', 'children'),
+          Input('surface-product-tabs', 'value'), Input('surface-expiry-dropdown', 'value'))
+def linked_history_label(product, expiry):
+    return f"{product or 'Select product'} · {_format_surface_expiry_selection_label(expiry) or 'Select contract'}"

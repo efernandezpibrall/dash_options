@@ -19,11 +19,9 @@
 
 /* Shared contract workspace; the ATM tables retain their original position. */
 #surface-expiry-controls { scroll-margin-top: 120px; }
-#surface-detail-selection-label, #surface-history-selection-label {
+#surface-history-selection-label {
   color: #1e293b; font-size: 13px; white-space: nowrap;
 }
-.volatility-linked-heatmap { margin-top: 16px; }
-.volatility-linked-heatmap .volatility-surface-chart-card { width: 100%; }
 .volatility-linked-history-grid {
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px; align-items: start;
@@ -31,4 +29,25 @@
 .volatility-linked-history-grid > * { min-width: 0; }
 @media (max-width: 1000px) {
   .volatility-linked-history-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Product selection lives inline with the section title and actions. */
+.volatility-surface-section > .volatility-section-header { flex-wrap: nowrap; gap: 20px; }
+.volatility-surface-section > .volatility-section-header .volatility-section-actions {
+  flex: 1; flex-wrap: nowrap; gap: 12px; min-width: 0;
+}
+.surface-header-product-selector { flex: 0 1 auto; margin-right: auto; min-width: 0; }
+.surface-header-product-tabs { display: flex; flex-direction: row !important; gap: 3px; border: 0 !important; }
+.surface-header-product-tab {
+  flex: 0 0 auto !important; padding: 6px 12px !important; font-size: 12px;
+  line-height: 18px; font-weight: 600; border: 1px solid transparent !important;
+  border-radius: 5px; background: transparent !important; color: #64748b;
+}
+.surface-header-product-tab-selected {
+  color: #1d4ed8 !important; background: #eff6ff !important; border-color: #bfdbfe !important;
+}
+#surface-status-line:empty { display: none; }
+@media (max-width: 1000px) {
+  .volatility-surface-section > .volatility-section-header { flex-wrap: wrap; }
+  .volatility-surface-section > .volatility-section-header .volatility-section-actions { overflow-x: auto; }
 }
