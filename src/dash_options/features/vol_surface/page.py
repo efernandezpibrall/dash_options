@@ -2051,6 +2051,12 @@ def linked_history_contracts(primary, comparison):
     return list(dict.fromkeys(m for m in (primary, comparison) if m))
 
 
+@callback(Output('surface-history-compare', 'disabled'),
+          Input('surface-history-mode-dropdown', 'value'))
+def disable_rolling_contract_comparison(mode):
+    return mode == 'rolling_tenor'
+
+
 @callback(Output('surface-history-coverage','children'), Input('surface-history-graph','figure'))
 def history_coverage(figure):
     meta = (figure or {}).get('layout', {}).get('meta') or {}
