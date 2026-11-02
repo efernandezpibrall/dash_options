@@ -575,6 +575,8 @@ def _activate_surface_snapshot(reference):
     global atm_dataset, surface_dataset, DATA_CACHE_STATE
     global _SURFACE_SNAPSHOT_GENERATION, _ACTIVE_SURFACE_SNAPSHOT_ID
 
+    # A warm process is not proof that this immutable reference still exists.
+    payload = resolve_snapshot(reference, expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE)
     snapshot_id = reference.get('snapshot_id') if isinstance(reference, dict) else None
     if (
         snapshot_id
@@ -583,10 +585,6 @@ def _activate_surface_snapshot(reference):
     ):
         return reference
 
-    payload = resolve_snapshot(
-        reference,
-        expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE,
-    )
     loaded_atm = payload.get('atm_dataset')
     loaded_surface = payload.get('surface_dataset')
     loaded_state = payload.get('data_cache_state')
@@ -966,11 +964,18 @@ def _select_rolling_tenor_history(history_df, tenor_rank):
         return history_df
 
     selected_rows = []
+    universe = None
+    if 'option_expiration_date' in history_df:
+        universe = history_df[['contract_date', 'option_expiration_date']].dropna().drop_duplicates()
+        universe = universe.loc[~universe.contract_date.duplicated(keep=False)]
     for cob_date, cob_slice in history_df.groupby('cob_date'):
-        expiries = sorted(pd.to_datetime(cob_slice['contract_date']).drop_duplicates())
-        if not expiries:
+        # Missing quotes must not change which contract is M1, M2, etc.
+        eligible = (universe.loc[universe.option_expiration_date.gt(cob_date)]
+                    if universe is not None else cob_slice)
+        expiries = sorted(pd.to_datetime(eligible['contract_date']).drop_duplicates())
+        if tenor_rank >= len(expiries):
             continue
-        selected_expiry = expiries[min(tenor_rank, len(expiries) - 1)]
+        selected_expiry = expiries[tenor_rank]
         selected_rows.append(cob_slice[cob_slice['contract_date'] == selected_expiry])
 
     if not selected_rows:

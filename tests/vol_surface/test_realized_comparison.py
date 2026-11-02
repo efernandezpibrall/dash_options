@@ -18,7 +18,7 @@ def fixture(product='TTF'):
 @pytest.mark.parametrize('product',data.CALENDARS)
 def test_five_products_real_prices_and_iv_remain_aligned(product):
     sessions,prices,iv=fixture(product)
-    rows,meta=data.build_comparison(product,'2027-01-01','2026-10-28',90,iv,{'settlements':prices})
+    rows,meta=data.build_comparison(product,'2027-01-01','2026-10-28',90,iv,{'Bloomberg PX_SETTLE':prices})
     assert rows.realized_volatility.notna().all()
     assert rows.volatility.eq(.4).all()
     assert np.allclose(rows.spread,.4-rows.realized_volatility)
@@ -28,7 +28,7 @@ def test_five_products_real_prices_and_iv_remain_aligned(product):
 def test_missing_session_invalidates_window_but_retains_iv():
     sessions,prices,iv=fixture()
     prices=prices.loc[prices.cob_date.ne('2026-10-19')]
-    rows,_=data.build_comparison('TTF','2027-01-01','2026-10-28',90,iv,{'settlements':prices})
+    rows,_=data.build_comparison('TTF','2027-01-01','2026-10-28',90,iv,{'Bloomberg PX_SETTLE':prices})
     last=rows.iloc[-1]
     assert np.isnan(last.realized_volatility) and last.volatility==.4 and np.isnan(last.spread)
     assert rows.loc[rows.cob_date.eq('2026-10-19'),'volatility'].iloc[0]==.4
@@ -39,8 +39,8 @@ def test_sources_never_spliced_and_deterministic_selection():
     first=prices.loc[prices.cob_date.le('2026-09-01')]
     second=prices.loc[prices.cob_date.gt('2026-09-01')].copy()
     second.settlement_price*=10
-    rows,meta=data.build_comparison('TTF','2027-01-01','2026-10-28',90,iv,{'first':first,'second':second})
-    assert meta['price_source'] in ('first','second')
+    rows,meta=data.build_comparison('TTF','2027-01-01','2026-10-28',90,iv,{'Bloomberg PX_SETTLE':first,'Shared final curve':second})
+    assert meta['price_source'] == 'Bloomberg PX_SETTLE'
     assert rows.loc[rows.cob_date.eq('2026-09-02'),'realized_volatility'].isna().all()
 
 
@@ -74,12 +74,12 @@ def test_product_controls_and_empty_contracts(monkeypatch):
 
 def test_graph_exposes_source_and_gaps(monkeypatch):
     _,prices,iv=fixture()
-    rows,meta=data.build_comparison('TTF','2027-01-01','2026-10-28',90,iv,{'settlements':prices})
+    rows,meta=data.build_comparison('TTF','2027-01-01','2026-10-28',90,iv,{'Bloomberg PX_SETTLE':prices})
     monkeypatch.setattr(data,'load_comparison',lambda *a:(rows,meta))
     fig,status=vol_surface._create_realized_comparison_figure('TTF','2027-01-01',90,'2026-10-28',iv)
     assert len(fig.data)==3 and fig.layout.yaxis.tickformat=='.0%'
     assert not fig.data[0].connectgaps and not fig.data[1].connectgaps
-    assert 'settlements' in status and '2026-10-28' in status
+    assert 'Bloomberg PX_SETTLE' in status and '2026-10-28' in status
 
 
 def test_jkm_uses_only_existing_curve_and_recovers_after_backfill(monkeypatch):
@@ -103,7 +103,7 @@ def test_price_capture_is_immutable_across_lookbacks(monkeypatch,tmp_path):
     calls=[]
     def read(*args):
         calls.append(args)
-        return {'settlements':prices.copy()},[]
+        return {'Bloomberg PX_SETTLE':prices.copy()},[]
     monkeypatch.setattr(data,'load_price_sources',read)
     reference=store.publish('vol-surface-v2','test-iv',{})
     first,meta=data.load_comparison('TTF','2027-01-01','2026-10-28',90,iv,reference)

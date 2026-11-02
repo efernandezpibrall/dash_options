@@ -110,3 +110,45 @@ def load_history(product, contracts, end, lookback, surface, revision=None):
         'calendar':calendar.code,'calendar_version':calendar.version,'policy':POLICY,
         'prices':price_metadata,'price_unit':price_unit,'errors':list(dict.fromkeys(errors)),
         'iv_snapshot_reference':revision}
+
+
+def rolling_schedule(surface, product, contract, end, lookback):
+    """Exact expiry-based tenor membership, independent of missing daily quotes."""
+    start, end, sessions, _ = comparison_calendar(product, end, lookback or 90)
+    universe = surface.loc[surface.code.eq(product), ['contract_date', 'option_expiration_date']].dropna().drop_duplicates()
+    # Ambiguous expiry definitions cannot establish a roll schedule.
+    universe = universe.loc[~universe.contract_date.duplicated(keep=False)].sort_values('contract_date')
+    current = universe.loc[universe.option_expiration_date.gt(end), 'contract_date'].tolist()
+    if pd.Timestamp(contract) not in current:
+        raise ValueError('Rolling history requires a contract unexpired on the selected COB')
+    rank = current.index(pd.Timestamp(contract))
+    rows=[]
+    for day in sessions[sessions >= start]:
+        eligible = universe.loc[universe.option_expiration_date.gt(day), 'contract_date'].tolist()
+        rows.append({'cob_date':day, 'contract_date':eligible[rank] if rank < len(eligible) else pd.NaT})
+    return pd.DataFrame(rows), rank+1
+
+
+def load_rolling_comparison(product, contract, end, lookback, surface, revision=None):
+    schedule, rank = rolling_schedule(surface, product, contract, end, lookback)
+    frames, sources = [], {}
+    for month in schedule.contract_date.dropna().unique():
+        key = pd.Timestamp(month).strftime('%Y-%m-%d')
+        rows, meta = realized_comparison_data.load_comparison(product, key, end, lookback, surface, revision)
+        rows = rows.copy()
+        rows['contract_date'] = month
+        frames.append(rows)
+        sources[key] = meta
+    if not frames:
+        raise ValueError('No contracts available for the selected rolling tenor')
+    rows = schedule.merge(pd.concat(frames, ignore_index=True), on=['cob_date','contract_date'], how='left', validate='one_to_one')
+    first = next(iter(sources.values()))
+    observed = rows.loc[rows.settlement_price.notna(), 'cob_date']
+    meta = {**first, 'contract':contract, 'tenor_rank':rank, 'history_mode':'rolling_tenor',
+            'contract_sources':sources,
+            'last_price_date':observed.max().strftime('%Y-%m-%d') if len(observed) else 'unavailable',
+            'input_fingerprint':hashlib.sha256(pd.util.hash_pandas_object(rows,index=False).values.tobytes()).hexdigest()}
+    meta['coverage'] = {**first['coverage'], 'sessions':len(rows), 'iv_expected':len(rows),
+                        'iv_observed':int(rows.volatility.notna().sum()),
+                        'rv_observed':int(rows.realized_volatility.notna().sum())}
+    return rows, meta

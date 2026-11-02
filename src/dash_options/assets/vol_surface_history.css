@@ -1,0 +1,18 @@
+.volatility-history-toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  margin: 16px 0 6px; padding: 12px 14px;
+  border: 1px solid #dbe3ef; border-radius: 8px; background: #f8fafc;
+}
+.volatility-history-toolbar label { font-size: 12px; color: #475569; margin: 0; }
+.volatility-history-toolbar .history-contract-select { width: 155px; min-width: 140px; }
+.volatility-history-toolbar .history-small-select { width: 80px; }
+.volatility-history-toolbar .inline-dropdown-multi { min-width: 150px; max-width: 230px; flex: 1; }
+.volatility-history-caption { font-size: 11px; color: #64748b; margin: 4px 0 12px; }
+.volatility-history-quality { font-size: 11px; color: #64748b; margin: 6px 0 12px; }
+.volatility-history-quality summary { cursor: pointer; color: #475569; }
+.volatility-history-quality > div { padding: 5px 12px; overflow-wrap: anywhere; }
+.volatility-rv-comparison-status { font-size: 11px; }
+.volatility-history-toolbar .history-control { display: flex; align-items: center; gap: 7px; }
+.volatility-history-toolbar .history-contract-select { width: 130px; min-width: 130px; }
+.volatility-history-toolbar .history-buckets-select { width: 155px; }
+.volatility-history-toolbar .history-mode-select { width: 135px; }

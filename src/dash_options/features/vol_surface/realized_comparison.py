@@ -10,6 +10,7 @@ from options.market_data.realized_comparison import (
     SETTLEMENT_SOURCES,
     comparison_calendar,
     evaluate_prices,
+    comparison_price_source,
 )
 from dash_options.core.config import get_database_engine
 from dash_options.core.database_reads import safe_exception_message
@@ -33,7 +34,8 @@ def load_price_sources(product, start, end, revision=None):
         specification = SETTLEMENT_SOURCES.get(product)
         if specification:
             _,params['series'],params['source'] = specification
-        query = """SELECT settlement_date AS cob_date,contract_month AS contract_date,settlement_price
+        query = """SELECT settlement_date AS cob_date,contract_month AS contract_date,settlement_price,
+                security, unit, source, update_timestamp
                 FROM at_lng.bbg_settlements WHERE series_type=:series AND source=:source
                 AND field='PX_SETTLE' AND tenor_type='month' AND settlement_date BETWEEN :start AND :end"""
         if specification:
@@ -80,10 +82,13 @@ def build_comparison(product, contract, end_date, lookback, surface_frame, sourc
         # Prefer the greatest complete-window coverage, then latest observed price.
         latest=selected.cob_date.max() if not selected.empty else pd.Timestamp.min
         candidates.append((int(visible.realized_volatility.notna().sum()),latest,priority,label,result))
-    if candidates:
-        _,_,_,label,rows=max(candidates,key=lambda x:x[:3])
+    contract_sources = {label: frame.loc[frame.contract_date.eq(month)].copy()
+                        for label, frame in sources.items()}
+    label = comparison_price_source(product, contract_sources, end)
+    match = next((candidate for candidate in candidates if candidate[3] == label), None)
+    if match is not None:
+        rows = match[4]
     else:
-        label='Unavailable'
         rows=evaluate_prices(pd.DataFrame(columns=['cob_date','settlement_price']),sessions)
     implied=surface_frame.loc[surface_frame.code.eq(product)&surface_frame.contract_date.eq(month)
         &surface_frame.delta_bucket.eq('ATM')&surface_frame.put_call.eq('call'),
@@ -93,11 +98,22 @@ def build_comparison(product, contract, end_date, lookback, surface_frame, sourc
     if implied.cob_date.duplicated().any():
         raise ValueError('Conflicting 50-delta call observations')
     rows=rows.loc[rows.cob_date.ge(start)].merge(implied,on='cob_date',how='outer',validate='one_to_one').sort_values('cob_date')
+    expiries = surface_frame.loc[surface_frame.code.eq(product) & surface_frame.contract_date.eq(month),
+                                'option_expiration_date'].dropna().unique()
+    if len(expiries) == 1:
+        rows['option_expiration_date'] = rows.option_expiration_date.fillna(pd.Timestamp(expiries[0]))
     expired=rows.cob_date.ge(rows.option_expiration_date)
     rows.loc[expired,'volatility']=np.nan
     rows['days_to_expiry']=(rows.option_expiration_date-rows.cob_date).dt.days
-    rows['iv_source']='Operational surface · 50Δ call'
+    rows['iv_source']='Settlement surface · 50Δ call'
     rows['source_security']=label
+    raw = contract_sources.get(label, pd.DataFrame())
+    if 'security' in raw:
+        identities = raw.loc[~raw.cob_date.duplicated(keep=False)].set_index('cob_date').security
+        rows['source_security'] = rows.cob_date.map(identities).fillna(label)
+    rows['iv_status'] = np.where(rows.volatility.notna(), 'observed', 'missing IV')
+    rows.loc[expired, 'iv_status'] = 'option expired'
+    rows['rv_status'] = np.where(rows.realized_volatility.notna(), 'complete', 'incomplete settlement window')
     rows['spread']=rows.volatility-rows.realized_volatility
     rows['window_start']=rows.cob_date-pd.Timedelta(days=30)
     rows['window_end']=rows.cob_date
@@ -108,6 +124,17 @@ def build_comparison(product, contract, end_date, lookback, surface_frame, sourc
         'input_fingerprint':fingerprint,'policy':POLICY,'price_source':label,'last_price_date':last,
         'calendar':calendar.code,'calendar_version':calendar.version,'source_errors':list(errors),
         'source_coverage':{c[3]:c[0] for c in candidates}}
+    eligible = ~expired
+    meta['coverage'] = {
+        'sessions': len(rows), 'iv_expected': int(eligible.sum()),
+        'iv_observed': int(rows.volatility.notna().sum()),
+        'rv_observed': int(rows.realized_volatility.notna().sum()),
+        'paired_observed': int((rows.volatility.notna() & rows.realized_volatility.notna()).sum()),
+        'missing_iv_dates': rows.loc[eligible & rows.volatility.isna(), 'cob_date'].dt.strftime('%Y-%m-%d').tolist(),
+        'missing_price_dates': rows.loc[rows.settlement_price.isna(), 'cob_date'].dt.strftime('%Y-%m-%d').tolist(),
+        'incomplete_rv_dates': rows.loc[rows.realized_volatility.isna(), 'cob_date'].dt.strftime('%Y-%m-%d').tolist(),
+    }
+    meta['price_source_pinned'] = product in ('Brent', 'HH', 'TTF')
     meta['price_unit']={'Brent':'USD/bbl','HH':'USD/MMBtu','JKM':'USD/MMBtu','TTF':'EUR/MWh','NBP':'GBp/therm'}[product]
     if label=='Shared final curve':
         raw=sources[label].loc[sources[label].contract_date.eq(month)]

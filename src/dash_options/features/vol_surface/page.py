@@ -1,5 +1,6 @@
 """Volatility surface dashboard page."""
 import io
+import json
 
 from dash import html, dcc, callback, Output, Input, State, no_update, ALL, ctx
 import dash_ag_grid as dag
@@ -558,13 +559,14 @@ def _create_shared_delta_history_figure(product, contracts, buckets, days, end, 
         return _empty_figure('Select one or more history contracts.', 'Delta Vol History')
     try:
         published, archived, prices, meta = delta_history_data.load_history(
-            product,contracts,end,days,surface_data.surface_dataset,revision)
+            product,contracts,end,days,
+            overview.snapshot_frame(revision) if isinstance(revision, dict) else surface_data.surface_dataset,revision)
         fig = make_subplots(specs=[[{'secondary_y': True}]])
         for month_index,month in enumerate(contracts):
             label = pd.Timestamp(month).strftime('%b-%y')
             for bucket_index,bucket in enumerate(buckets):
                 color = VOL_LINE_PALETTE[(month_index*3+bucket_index)%len(VOL_LINE_PALETTE)]
-                for frame,origin,dash in ((published,'Published','solid'),(archived,'Archived reconstruction','dot')):
+                for frame,origin,dash in ((published,'Settlement','solid'),(archived,'Archived reconstruction','dot')):
                     series = frame.loc[frame.contract_date.eq(pd.Timestamp(month))&frame.delta_bucket.eq(bucket)]
                     if series.empty:
                         continue
@@ -587,7 +589,9 @@ def _create_shared_delta_history_figure(product, contracts, buckets, days, end, 
         fig.update_xaxes(**_vol_axis('COB',tickformat='%d %b',range=[meta['requested_start'],meta['requested_end']]))
         fig.update_yaxes(**_vol_axis('Implied volatility (%)',tickformat='.0%'),secondary_y=False)
         fig.update_yaxes(**_vol_axis('Settlement ('+meta['price_unit']+')',tickformat='.2f',showgrid=False),secondary_y=True)
-        note = 'Published IV and archived reconstructions are separate series; missing dates remain gaps.'
+        note = 'Settlement IV · missing sessions remain gaps.'
+        if not archived.empty:
+            note += ' Dotted lines: archived reconstruction.'
         if meta['errors']:
             note += ' '+ ' | '.join(meta['errors'])
         fig.add_annotation(text=note,xref='paper',yref='paper',x=0,y=1.12,showarrow=False,xanchor='left',font=dict(size=10))
@@ -599,12 +603,42 @@ def _create_shared_delta_history_figure(product, contracts, buckets, days, end, 
         return _empty_figure(f'{product} history unavailable: {safe_exception_message(exc)}','Delta Vol History')
 
 
-def _create_realized_comparison_figure(product, contract, lookback_days, end_date, surface_frame, revision=None):
+def _add_selected_history_points(fig, frame, metadata, contracts, buckets, *, rv=False):
+    """Overlay a selected saved revision without rewriting settlement history."""
+    if not metadata or frame.empty or not contracts:
+        return
+    date = pd.Timestamp(metadata['business_date'])
+    window = fig.layout.meta or {}
+    if (window.get('requested_start') is not None and
+            not pd.Timestamp(window['requested_start']) <= date <= pd.Timestamp(window['requested_end'])):
+        return
+    points = frame.loc[frame.contract_date.isin(pd.to_datetime(contracts)) & frame.delta_bucket.isin(buckets)]
+    for (month, bucket), rows in points.groupby(['contract_date','delta_bucket']):
+        if bucket == 'ATM':
+            rows = rows.loc[rows.put_call.eq('call')]
+        if len(rows) != 1:
+            continue
+        trace = go.Scatter(x=[date], y=[float(rows.volatility.iloc[0])], mode='markers',
+            marker=dict(symbol='diamond', size=10, color='#d97706', line=dict(color='white',width=1)),
+            name=f"{pd.Timestamp(month):%b-%y} {bucket} · {metadata['current_label']}",
+            hovertemplate='%{x|%Y-%m-%d}<br>%{fullData.name}<br>IV %{y:.2%}<extra></extra>')
+        if rv:
+            fig.add_trace(trace,row=1,col=1)
+        else:
+            fig.add_trace(trace,secondary_y=False)
+    fig.update_layout(meta={**window, 'selected_surface':metadata})
+
+
+def _create_realized_comparison_figure(product, contract, lookback_days, end_date, surface_frame, revision=None, history_mode="fixed_expiry"):
     try:
-        rows,meta=realized_comparison_data.load_comparison(product,contract,end_date,lookback_days,surface_frame,revision)
+        loader = (delta_history_data.load_rolling_comparison if history_mode == 'rolling_tenor'
+                  else realized_comparison_data.load_comparison)
+        rows,meta=loader(product,contract,end_date,lookback_days,surface_frame,revision)
         if rows.empty:
             return _empty_figure('No trading sessions for this maturity in the selected range.','Realized vs Implied Volatility'), 'No observations in the selected range.'
         label=product+' '+pd.Timestamp(contract).strftime('%b-%y')
+        if meta.get('tenor_rank'):
+            label = f"{product} M{meta['tenor_rank']} · expiry-based roll"
         fig=make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[.72,.28],vertical_spacing=.10)
         common=np.column_stack([rows.window_start.dt.strftime('%Y-%m-%d'),rows.window_end.dt.strftime('%Y-%m-%d'),
                                 rows.return_count,rows.days_to_expiry.astype('Int64').astype(str).replace('<NA>',''),rows.iv_source.fillna('Unavailable'),rows.source_security])
@@ -632,14 +666,11 @@ def _create_realized_comparison_figure(product, contract, lookback_days, end_dat
                                 'rv_observations':int(rows.realized_volatility.notna().sum()),
                                 'rolling_window_calendar_days':30,'annualization_trading_days':252,'standard_deviation_ddof':1},
                           uirevision=f"{meta['input_fingerprint']}:{contract}:{lookback_days}")
-        iv_dates=rows.loc[rows.volatility.notna(),'cob_date']
-        last_iv=iv_dates.max().strftime('%d %b %Y') if not iv_dates.empty else 'unavailable'
-        status=(f"{label} · Realized: {rows.realized_volatility.notna().sum()}/{len(rows)} sessions"
-                f" · Implied: {rows.volatility.notna().sum()}/{len(rows)} sessions · Last IV: {last_iv}"
-                f" · Prices: {meta['price_source']} through {meta['last_price_date']}"
-                ' · Missing settlements leave RV gaps; sources are never spliced.'
-                ' · Trailing RV and remaining-life IV measure different periods.'
-                + (' · Some price sources unavailable.' if meta.get('source_errors') else ''))
+        coverage = meta.get('coverage', {})
+        expected = coverage.get('iv_expected', len(rows))
+        status = (f"{label} · IV {rows.volatility.notna().sum()}/{expected} · RV {rows.realized_volatility.notna().sum()}/{len(rows)}"
+                  f" · {meta['price_source']} through {meta['last_price_date']}"
+                  ' · IV − trailing RV compares different periods')
         return fig,status
     except Exception as exc:
         message=f'{product} comparison unavailable: {safe_exception_message(exc)}'
@@ -660,13 +691,13 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
-    history_df = surface_data.surface_dataset.copy()
+    history_df = (overview.snapshot_frame(snapshot_reference) if isinstance(snapshot_reference, dict)
+                  else surface_data.surface_dataset).copy()
     if history_df.empty:
         return _empty_figure('No surface history available.', 'Delta Vol History')
 
     history_df = history_df[
         (history_df['code'] == product) &
-        (history_df['delta_bucket'].isin(selected_buckets)) &
         (history_df['cob_date'] >= start_date) &
         (history_df['cob_date'] <= end_date)
     ].copy()
@@ -674,8 +705,11 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     if history_mode == 'fixed_expiry' or expiry_type != surface_data.SURFACE_EXPIRY_MONTH:
         history_df = surface_data._filter_surface_by_expiry_selection(history_df, selected_expiry)
     else:
-        tenor_rank = surface_data._get_selected_tenor_rank(product, selected_expiry, end_date)
-        history_df = surface_data._select_rolling_tenor_history(history_df, tenor_rank)
+        full = overview.snapshot_frame(snapshot_reference) if isinstance(snapshot_reference, dict) else surface_data.surface_dataset
+        schedule, tenor_rank = delta_history_data.rolling_schedule(full, product, expiry_key, end_date, lookback_days)
+        history_df = history_df.merge(schedule, on=['cob_date', 'contract_date'], how='inner', validate='many_to_one')
+
+    history_df = history_df.loc[history_df.delta_bucket.isin(selected_buckets)]
 
     if history_df.empty:
         return _empty_figure(
@@ -683,7 +717,12 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
             'Delta Vol History'
         )
 
-    history_df = history_df.groupby(['cob_date', 'delta_bucket'], as_index=False)['volatility'].mean().sort_values(['delta_bucket', 'cob_date'])
+    # Preserve the underlying contract behind a rolling point. No substitution
+    # or connecting lines across absent settlement sessions.
+    history_df = history_df.groupby(['cob_date', 'delta_bucket'], as_index=False).agg(
+        volatility=('volatility', 'mean'), contract_date=('contract_date', 'first'))
+    start_date, end_date, sessions, _ = delta_history_data.comparison_calendar(product, end_date, lookback_days)
+    sessions = sessions[sessions >= start_date]
 
     fig = go.Figure()
     color_palette = VOL_SURFACE_PALETTE
@@ -691,6 +730,7 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
         bucket_df = history_df[history_df['delta_bucket'] == bucket].copy()
         if bucket_df.empty:
             continue
+        bucket_df = bucket_df.set_index('cob_date').reindex(sessions).rename_axis('cob_date').reset_index()
 
         color = color_palette[index % len(color_palette)]
         fig.add_trace(go.Scatter(
@@ -698,9 +738,11 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
             y=bucket_df['volatility'],
             mode='lines+markers',
             name=bucket,
+            connectgaps=False,
+            customdata=bucket_df.contract_date.dt.strftime('%b-%y').fillna('Unavailable'),
             line=dict(color=color, width=2),
             marker=dict(size=6, color=color, line=dict(width=1, color='white')),
-            hovertemplate='COB %{x|%Y-%m-%d}<br>Bucket %{fullData.name}<br>Vol %{y:.2%}<extra></extra>',
+            hovertemplate='COB %{x|%Y-%m-%d}<br>Contract %{customdata}<br>Bucket %{fullData.name}<br>Vol %{y:.2%}<extra></extra>',
         ))
 
     _apply_vol_chart_theme(
@@ -708,8 +750,17 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
         None,
         margin=dict(l=46, r=16, t=18, b=76),
     )
-    fig.update_xaxes(**_vol_axis('COB'))
+    fig.update_xaxes(**_vol_axis('COB', range=[start_date, end_date]))
     fig.update_yaxes(**_vol_axis('IV', tickformat='.0%'))
+    if history_mode == 'rolling_tenor':
+        changes = schedule.loc[schedule.contract_date.ne(schedule.contract_date.shift()) & schedule.contract_date.notna()]
+        for row in changes.iloc[1:].itertuples():
+            fig.add_vline(x=row.cob_date, line_dash='dot', line_width=1, line_color=VOL_CHART_MUTED)
+        fig.add_annotation(text=f'M{tenor_rank} · expiry-based roll · hover for contract', xref='paper', yref='paper',
+                           x=0, y=1.1, showarrow=False, xanchor='left', font=dict(size=10))
+        fig.update_layout(meta={'history_mode':'rolling_tenor', 'tenor_rank':tenor_rank,
+                               'iv_snapshot_reference':snapshot_reference})
+
 
     if not fig.data:
         return _empty_figure(
@@ -1308,6 +1359,7 @@ layout = html.Div([
     # Download component for table export
     dcc.Download(id="download-volatility-table"),
     dcc.Download(id="download-surface-table"),
+    dcc.Download(id='download-surface-history'),
 
     _build_vol_surface_filter_bar(),
     html.Div(id='options-refresh-message', className='volatility-refresh-message'),
@@ -1364,16 +1416,7 @@ layout = html.Div([
                     clearable=False,
                     className="inline-dropdown-aggregation"
                 ),
-                html.Label('Delta Buckets:', className="inline-filter-label"),
-                dcc.Dropdown(
-                    id='surface-history-buckets-dropdown',
-                    options=[],
-                    value=[],
-                    multi=True,
-                    placeholder='Select 1-3 buckets...',
-                    className="inline-dropdown-multi"
-                ),
-                html.Label('Lookback:', className="inline-filter-label"),
+                html.Label('Smile history:', className="inline-filter-label"),
                 dcc.Dropdown(
                     id='surface-lookback-dropdown',
                     options=[
@@ -1398,17 +1441,6 @@ layout = html.Div([
                     clearable=False,
                     className="inline-dropdown-aggregation"
                 ),
-                html.Label('History Mode:', className="inline-filter-label"),
-                dcc.Dropdown(
-                    id='surface-history-mode-dropdown',
-                    options=[
-                        {'label': 'Fixed Expiry', 'value': 'fixed_expiry'},
-                        {'label': 'Rolling Tenor', 'value': 'rolling_tenor'}
-                    ],
-                    value='fixed_expiry',
-                    clearable=False,
-                    className="inline-dropdown-aggregation"
-                )
             ], id='surface-expiry-controls', style={'display': 'none', 'align-items': 'center', 'gap': '16px', 'margin': '16px 0', 'flex-wrap': 'wrap'}),
             html.Div([
                 _build_vol_chart_card(
@@ -1432,13 +1464,29 @@ layout = html.Div([
                     className='volatility-surface-chart-card'
                 )
             ], className='volatility-surface-chart-grid'),
+            dcc.Store(id='surface-history-context'),
+            dcc.Store(id='surface-history-contracts-dropdown', data=[]),
             html.Div([
-                html.Label('History contracts:',className='inline-filter-label',htmlFor='surface-history-contracts-dropdown'),
-                dcc.Dropdown(id='surface-history-contracts-dropdown',
-                    options=[],value=[],multi=True,clearable=True,
-                    className='inline-dropdown-multi'),
-            ],id='surface-history-contracts-controls',style={'display':'none'},
-                className='volatility-history-contracts-controls'),
+                html.Div([html.Label('Contract', htmlFor='surface-rv-contract-dropdown'),
+                    dcc.Dropdown(id='surface-rv-contract-dropdown', options=[], value=None, clearable=False,
+                                 className='history-contract-select')], className='history-control'),
+                html.Div([html.Label('Compare', htmlFor='surface-history-compare'),
+                    dcc.Dropdown(id='surface-history-compare', options=[], value=None, clearable=True,
+                                 placeholder='Optional', className='history-contract-select')], className='history-control'),
+                html.Div([html.Label('Range', htmlFor='surface-history-range'),
+                    dcc.Dropdown(id='surface-history-range', options=[{'label':f'{d}D','value':d} for d in (10,30,60,90)],
+                                 value=90, clearable=False, className='history-small-select')], className='history-control'),
+                html.Div([html.Label('Deltas', htmlFor='surface-history-buckets-dropdown'),
+                    dcc.Dropdown(id='surface-history-buckets-dropdown', options=[], value=[], multi=True,
+                                 placeholder='Select buckets', className='history-buckets-select')], className='history-control'),
+                html.Div([html.Label('Mode', htmlFor='surface-history-mode-dropdown'),
+                    dcc.Dropdown(id='surface-history-mode-dropdown', options=[
+                        {'label':'Fixed expiry','value':'fixed_expiry'},
+                        {'label':'Rolling tenor','value':'rolling_tenor'}], value='fixed_expiry', clearable=False,
+                        className='history-mode-select')], className='history-control'),
+                html.Button('Export history', id='export-surface-history', className='custom-export-btn'),
+            ], id='surface-history-contracts-controls', className='volatility-history-toolbar'),
+            html.Div('Settlement history · first contract also drives realized vs implied', className='volatility-history-caption'),
             _build_vol_chart_card(
                 dcc.Graph(
                     id='surface-history-graph',
@@ -1449,13 +1497,8 @@ layout = html.Div([
                 'Delta Vol History',
                 className='volatility-history-chart-card'
             ),
+            html.Div(id='surface-history-coverage'),
             html.Div([
-                html.Div([
-                    html.Label('Comparison contract:',className='inline-filter-label',htmlFor='surface-rv-contract-dropdown'),
-                    dcc.Dropdown(id='surface-rv-contract-dropdown',options=[],value='2027-01-01',clearable=False,
-                                 className='inline-dropdown-aggregation'),
-                    html.Span('Rolling window: 30 calendar days',className='volatility-rv-window-label'),
-                ],className='volatility-rv-controls'),
                 _build_vol_chart_card(
                     dcc.Graph(id='surface-rv-comparison-graph',config=VOL_GRAPH_CONFIG,
                               className='volatility-chart-graph',style={'height':'480px'}),
@@ -1517,12 +1560,12 @@ def poll_surface_publications(_tick, selected_date, previous, refresh_count, sna
                            'tone':'warning'})
     changed = (isinstance(previous, dict) and previous.get('cob') == selected_date
                and previous.get('revision') != status['revision'])
-    if not previous and isinstance(snapshot_reference, dict):
+    if isinstance(snapshot_reference, dict):
         from dash_options.core.snapshots import resolve_snapshot
         try:
             snapshot = resolve_snapshot(snapshot_reference, expected_namespace=surface_data.VOL_SURFACE_SNAPSHOT_NAMESPACE)
             cached = snapshot['data_cache_state']['surface'].get('publications', {})
-            changed = any(row['commodity'] in surface_data.PUBLISHED_SURFACE_PRODUCTS
+            changed = changed or any(row['commodity'] in surface_data.PUBLISHED_SURFACE_PRODUCTS
                           and cached.get(f"{row['commodity']}:{selected_date}", {}).get('publication_id') != row['publication_id']
                           for row in status['publications'])
             cached_latest = max((key.rsplit(':', 1)[-1] for key in cached), default='')
@@ -1902,51 +1945,21 @@ def update_vol_trades_link(active_product):
     return vol_trades_link_style(active_product)
 
 
-@callback(
-    [Output('surface-history-buckets-dropdown', 'options'),
-     Output('surface-history-buckets-dropdown', 'value')],
-    [Input('vol-surface-snapshot-ref', 'data'),
-     Input('table-date-picker', 'date'),
-     Input('surface-product-tabs', 'value'),
-     Input('surface-expiry-dropdown', 'value'),
-     Input('surface-selection-ref', 'data'),
-     Input('surface-source-dropdown', 'value'),
-     Input('surface-revision-dropdown', 'value'),
-     Input('surface-comparison-dropdown', 'value')],
-    State('surface-history-buckets-dropdown', 'value'),
-    prevent_initial_call=True
-)
-def update_surface_delta_dropdown(snapshot_reference, selected_date, active_product, selected_expiry,
-                                  selection, source, revision, comparison, current_history_buckets):
-    surface_data._ensure_cached_data(snapshot_reference)
-    if selected_date is None or not active_product or not selected_expiry:
+@callback(Output('surface-history-buckets-dropdown','options'), Output('surface-history-buckets-dropdown','value'),
+          Input('vol-surface-snapshot-ref','data'), Input('surface-product-tabs','value'),
+          Input('surface-rv-contract-dropdown','value'), State('surface-history-buckets-dropdown','value'))
+def update_history_buckets(reference, product, contract, current):
+    if not product or not contract:
         return [], []
-
-    try:
-        current_surface, _, _ = _selected_surface_pair(
-            active_product, selected_date, None, source, selection, revision, comparison,
-        )
-    except surface_selector.SelectionError:
-        return [], []
-    if current_surface.empty:
-        return [], []
-
-    expiry_surface = surface_data._filter_surface_by_expiry_selection(current_surface, selected_expiry)
-    delta_options = _get_delta_bucket_options(expiry_surface)
-    valid_deltas = {option['value'] for option in delta_options}
-    history_buckets = [bucket for bucket in (current_history_buckets or []) if bucket in valid_deltas]
-    preferred_delta = 'ATM' if 'ATM' in valid_deltas else (delta_options[0]['value'] if delta_options else None)
-    if not history_buckets and preferred_delta:
-        history_buckets = [preferred_delta]
-    history_buckets = history_buckets[:3]
-
-    return delta_options, history_buckets
+    frame = overview.snapshot_frame(reference)
+    selected = frame.loc[frame.code.eq(product) & frame.contract_date.eq(pd.Timestamp(contract))]
+    options = _get_delta_bucket_options(selected)
+    valid = {o['value'] for o in options}
+    values = [v for v in (current or []) if v in valid][:3]
+    return options, values or (['ATM'] if 'ATM' in valid else sorted(valid)[:1])
 
 
-@callback(Output('surface-rv-comparison-section','style'),
-          Output('surface-rv-contract-dropdown','options'),Output('surface-rv-contract-dropdown','value'),
-          Input('vol-surface-snapshot-ref','data'),Input('table-date-picker','date'),Input('surface-product-tabs','value'),
-          State('surface-rv-contract-dropdown','value'),prevent_initial_call=True)
+
 def update_comparison_contracts(snapshot_reference,selected_date,product,current):
     if product not in realized_comparison_data.CALENDARS or not selected_date:
         return {'display':'none'},[],current
@@ -1959,29 +1972,35 @@ def update_comparison_contracts(snapshot_reference,selected_date,product,current
 
 @callback(Output('surface-rv-comparison-graph','figure'),Output('surface-rv-comparison-status','children'),
           Input('vol-surface-snapshot-ref','data'),Input('table-date-picker','date'),Input('surface-product-tabs','value'),
-          Input('surface-rv-contract-dropdown','value'),Input('surface-lookback-dropdown','value'),prevent_initial_call=True)
-def update_realized_comparison(snapshot_reference,selected_date,product,contract,lookback):
+          Input('surface-rv-contract-dropdown','value'),Input('surface-history-range','value'),
+          Input('surface-history-mode-dropdown','value'),
+          Input('surface-selection-ref','data'), Input('surface-source-dropdown','value'),
+          Input('surface-revision-dropdown','value'), Input('surface-comparison-dropdown','value'),prevent_initial_call=True)
+def update_realized_comparison(snapshot_reference,selected_date,product,contract,lookback,history_mode="fixed_expiry",
+                               selection=None,source='settlement',revision=None,comparison=None):
     if product not in realized_comparison_data.CALENDARS or not selected_date or not contract:
         return _empty_figure('Select a product and maturity.','Realized vs Implied Volatility'),''
     surface_data._ensure_cached_data(snapshot_reference)
-    fig,status=_create_realized_comparison_figure(product,contract,lookback,selected_date,surface_data.surface_dataset, snapshot_reference)
+    frame = overview.snapshot_frame(snapshot_reference) if isinstance(snapshot_reference, dict) else surface_data.surface_dataset
+    fig,status=_create_realized_comparison_figure(product,contract,lookback,selected_date,frame, snapshot_reference, history_mode)
     if fig.layout.meta:
         fig.update_layout(meta={**fig.layout.meta,'iv_snapshot_reference':snapshot_reference})
-    return fig,status
+    if source not in (None, 'settlement') and history_mode == 'fixed_expiry' and fig.data:
+        try:
+            current, _, metadata = _selected_surface_pair(product,selected_date,None,source,selection,revision,comparison)
+            _add_selected_history_points(fig,current,metadata,[contract],['ATM'],rv=True)
+        except surface_selector.SelectionError as exc:
+            return fig, str(exc)
+
+    return fig, (status if history_mode == 'rolling_tenor' or not fig.data else
+                 'RV: 30 calendar days · IV − trailing RV compares different periods')
 
 
-@callback(Output('surface-history-contracts-controls','style'),
-          Input('surface-product-tabs','value'),Input('surface-history-mode-dropdown','value'))
 def show_history_contracts(product,mode):
     return {'display':'flex' if product in delta_history_data.CALENDARS and mode == 'fixed_expiry' else 'none',
             'alignItems':'center','gap':'12px','flexWrap':'wrap','marginBottom':'12px'}
 
 
-@callback(Output('surface-history-contracts-dropdown','options'),
-          Output('surface-history-contracts-dropdown','value'),
-          Input('vol-surface-snapshot-ref','data'),Input('table-date-picker','date'),
-          Input('surface-product-tabs','value'),Input('surface-lookback-dropdown','value'),
-          State('surface-history-contracts-dropdown','value'))
 def update_history_contracts(snapshot_reference,end,product,lookback,current):
     if product not in delta_history_data.CALENDARS or not end:
         return [],[]
@@ -1997,10 +2016,105 @@ def update_history_contracts(snapshot_reference,end,product,lookback,current):
     return options,(defaults or months)[:2]
 
 
-@callback(Output('surface-lookback-dropdown','value'),Input('surface-product-tabs','value'),
-          State('surface-lookback-dropdown','value'))
-def default_brent_history_lookback(product,current):
-    return 90 if product == 'Brent' else (current or 30)
+
+
+
+@callback(Output('surface-rv-comparison-section','style'),
+          Output('surface-rv-contract-dropdown','options'), Output('surface-rv-contract-dropdown','value'),
+          Output('surface-history-compare','options'), Output('surface-history-compare','value'),
+          Output('surface-history-context','data'),
+          Input('vol-surface-snapshot-ref','data'), Input('table-date-picker','date'),
+          Input('surface-product-tabs','value'), Input('surface-history-range','value'),
+          State('surface-rv-contract-dropdown','value'), State('surface-history-compare','value'),
+          State('surface-history-context','data'))
+def select_history_contracts(reference, end, product, lookback, primary, comparison, previous):
+    if not reference or not end or product not in delta_history_data.CALENDARS:
+        return {'display':'none'}, [], None, [], None, {'product':product}
+    frame = overview.snapshot_frame(reference)
+    months = delta_history_data.available_contracts(product, end, lookback, frame)
+    current = overview.settlement_slice(frame, product, end)
+    front = overview.front_month(current)
+    default = front.strftime('%Y-%m-%d') if front is not None else (months[0] if months else None)
+    if not isinstance(previous, dict) or previous.get('product') != product:
+        primary, comparison = default, None
+    elif primary not in months:
+        primary = default
+    if comparison not in months or comparison == primary:
+        comparison = None
+    options = [{'label':pd.Timestamp(m).strftime('%b-%y'), 'value':m} for m in months]
+    return {'display':'block'}, options, primary, options, comparison, {'product':product}
+
+
+@callback(Output('surface-history-contracts-dropdown','data'),
+          Input('surface-rv-contract-dropdown','value'), Input('surface-history-compare','value'))
+def linked_history_contracts(primary, comparison):
+    return list(dict.fromkeys(m for m in (primary, comparison) if m))
+
+
+@callback(Output('surface-history-coverage','children'), Input('surface-history-graph','figure'))
+def history_coverage(figure):
+    meta = (figure or {}).get('layout', {}).get('meta') or {}
+    items = []
+    for month, source in meta.get('prices', {}).items():
+        coverage = source.get('coverage', {})
+        if not coverage:
+            continue
+        label = pd.Timestamp(month).strftime('%b-%y')
+        summary = f"{label} · IV {coverage['iv_observed']}/{coverage['iv_expected']} · RV {coverage['rv_observed']}/{coverage['sessions']} · Prices through {source['last_price_date']}"
+        missing = coverage.get('missing_iv_dates', [])
+        prices = coverage.get('missing_price_dates', [])
+        items.append(html.Details([html.Summary(summary),
+            html.Div(f"Price source: {source['price_source']} · Calendar: {source['calendar']} · RV: 30 calendar days, sample standard deviation × √252"),
+            html.Div('Missing IV: ' + (', '.join(missing) or 'none')),
+            html.Div('Missing/invalid settlements: ' + (', '.join(prices) or 'none')),
+            html.Div('Incomplete RV windows: ' + (', '.join(coverage.get('incomplete_rv_dates', [])) or 'none')),
+            html.Div('Archive is a separate reconstruction, never substituted for settlement IV.'),
+        ], className='volatility-history-quality'))
+    return items
+
+
+@callback(Output('download-surface-history','data'), Input('export-surface-history','n_clicks'),
+          State('vol-surface-snapshot-ref','data'), State('table-date-picker','date'),
+          State('surface-product-tabs','value'), State('surface-history-contracts-dropdown','data'),
+          State('surface-history-range','value'), State('surface-history-mode-dropdown','value'),
+          State('surface-selection-ref','data'), State('surface-source-dropdown','value'),
+          State('surface-revision-dropdown','value'), State('surface-comparison-dropdown','value'),
+          prevent_initial_call=True)
+def export_surface_history(clicks, reference, end, product, contracts, lookback, mode,
+                           selection=None, source='settlement', revision=None, comparison=None):
+    if not clicks or not contracts:
+        return no_update
+    frame = overview.snapshot_frame(reference)
+    primary = contracts[0]
+    if mode == 'rolling_tenor':
+        schedule, _ = delta_history_data.rolling_schedule(frame, product, primary, end, lookback)
+        exported_contracts = schedule.contract_date.dropna().dt.strftime('%Y-%m-%d').unique().tolist()
+        rv, rv_meta = delta_history_data.load_rolling_comparison(product, primary, end, lookback, frame, reference)
+    else:
+        exported_contracts = contracts
+        rv, rv_meta = realized_comparison_data.load_comparison(product, primary, end, lookback, frame, reference)
+    settlement, archive, prices, meta = delta_history_data.load_history(product, exported_contracts, end, lookback, frame, reference)
+    if mode == 'rolling_tenor':
+        settlement = settlement.merge(schedule, on=['cob_date','contract_date'], validate='many_to_one')
+        archive = archive.merge(schedule, on=['cob_date','contract_date'], validate='many_to_one')
+        prices = prices.merge(schedule, on=['cob_date','contract_date'], validate='one_to_one')
+    buffer = io.BytesIO()
+    selected = None
+    if source not in (None, 'settlement') and mode == 'fixed_expiry':
+        selected, _, selected_meta = _selected_surface_pair(product,end,None,source,selection,revision,comparison)
+        selected = selected.loc[selected.contract_date.isin(pd.to_datetime(contracts))]
+        meta['selected_surface'] = selected_meta
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        if selected is not None:
+            selected.to_excel(writer, sheet_name='Selected revision', index=False)
+        settlement.to_excel(writer, sheet_name='Settlement IV', index=False)
+        archive.to_excel(writer, sheet_name='Reconstruction', index=False)
+        prices.to_excel(writer, sheet_name='Settlements', index=False)
+        rv.to_excel(writer, sheet_name='Realized vs implied', index=False)
+        pd.DataFrame([{'field':k, 'value':json.dumps(v, default=str)} for k,v in
+                      {**meta, 'rv_metadata':rv_meta, 'history_mode':mode}.items() if k!='sessions']).to_excel(
+                          writer, sheet_name='Provenance', index=False)
+    return dcc.send_bytes(buffer.getvalue(), f'{product.lower()}_volatility_history_{end}.xlsx')
 
 
 @callback(
@@ -2018,11 +2132,12 @@ def default_brent_history_lookback(product,current):
      Input('surface-lookback-dropdown', 'value'),
      Input('surface-heatmap-mode-dropdown', 'value'),
      Input('surface-history-mode-dropdown', 'value'),
-     Input('surface-history-contracts-dropdown','value'),
+     Input('surface-history-contracts-dropdown','data'),
      Input('surface-selection-ref', 'data'),
      Input('surface-source-dropdown', 'value'),
      Input('surface-revision-dropdown', 'value'),
-     Input('surface-comparison-dropdown', 'value')],
+     Input('surface-comparison-dropdown', 'value'),
+     Input('surface-history-range', 'value')],
     prevent_initial_call=True
 )
 def update_surface_section(
@@ -2040,8 +2155,11 @@ def update_surface_section(
     source='settlement',
     revision=None,
     comparison=None,
+    history_range=None,
 ):
     surface_data._ensure_cached_data(snapshot_reference)
+    history_range = history_range or lookback_days
+    history_expiry = 'month:' + history_contracts[0] if history_contracts else selected_expiry
 
     if selected_date is None or not active_product:
         status_line = _build_surface_status_line(selected_date, prev_selected_date, active_product)
@@ -2057,8 +2175,8 @@ def update_surface_section(
     except surface_selector.SelectionError as exc:
         message = str(exc)
         return (_empty_figure(message, 'Surface Heatmap'), _empty_figure(message, 'Smile Evolution'),
-                _create_delta_history_figure(active_product, selected_expiry, selected_history_buckets,
-                    lookback_days, selected_date, history_mode or 'fixed_expiry',
+                _create_delta_history_figure(active_product, history_expiry, selected_history_buckets,
+                    history_range, selected_date, history_mode or 'fixed_expiry',
                     history_contracts=history_contracts, snapshot_reference=snapshot_reference),
                 html.Div(message, className='volatility-table-empty-state'),
                 _build_message_span(message, tone='warning'))
@@ -2078,7 +2196,7 @@ def update_surface_section(
         return (
             _create_surface_heatmap_figure(active_product, current_surface, previous_surface, heatmap_mode or 'vs_atm'),
             _create_smile_evolution_figure(active_product, None, current_surface, previous_surface, lookback_days, selected_date),
-            _create_delta_history_figure(active_product, None, None, lookback_days, selected_date, history_mode or 'fixed_expiry'),
+            _create_delta_history_figure(active_product, None, None, history_range, selected_date, history_mode or 'fixed_expiry'),
             no_data_message,
             status_line
         )
@@ -2089,14 +2207,7 @@ def update_surface_section(
             pd.to_datetime(current_surface['contract_date'].min()),
         )
 
-    expiry_surface = surface_data._filter_surface_by_expiry_selection(current_surface, selected_expiry)
-    delta_options = _get_delta_bucket_options(expiry_surface)
-    valid_deltas = {option['value'] for option in delta_options}
-    selected_history_buckets = [bucket for bucket in (selected_history_buckets or []) if bucket in valid_deltas]
-    preferred_bucket = 'ATM' if 'ATM' in valid_deltas else (delta_options[0]['value'] if delta_options else None)
-    if not selected_history_buckets and preferred_bucket:
-        selected_history_buckets = [preferred_bucket]
-    selected_history_buckets = selected_history_buckets[:3]
+    selected_history_buckets = (selected_history_buckets or ['ATM'])[:3]
 
     heatmap_figure = _create_surface_heatmap_figure(active_product, current_surface, previous_surface, heatmap_mode or 'vs_atm')
     smile_figure = _create_smile_evolution_figure(
@@ -2105,7 +2216,10 @@ def update_surface_section(
         current_label=(selected_metadata or {}).get('current_label'),
         comparison_label=(selected_metadata or {}).get('comparison_label'),
     )
-    history_figure = _create_delta_history_figure(active_product, selected_expiry, selected_history_buckets, lookback_days, selected_date, history_mode or 'fixed_expiry',history_contracts=history_contracts,snapshot_reference=snapshot_reference)
+    history_figure = _create_delta_history_figure(active_product, history_expiry, selected_history_buckets, history_range, selected_date, history_mode or 'fixed_expiry',history_contracts=history_contracts,snapshot_reference=snapshot_reference)
+    if selected_metadata and history_mode in (None,'fixed_expiry') and history_figure.data:
+        _add_selected_history_points(history_figure,current_surface,selected_metadata,history_contracts,selected_history_buckets)
+
     current_table_df, diff_table_df, delta_columns = _build_surface_tables(
         current_surface, previous_surface, (selected_metadata or {}).get('business_date', selected_date),
     )
