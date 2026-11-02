@@ -225,10 +225,6 @@ def product_card(product, pair, months, active_product, wing_delta=25):
                       config={'displayModeBar': False, 'displaylogo': False, 'responsive': True},
                       className='vol-overview-graph'),
         ], className='vol-overview-metric'))
-    children.append(html.Div([
-        html.A('Inspect smile ↓', href='#surface-section-container',
-               id={'type': 'vol-overview-inspect', 'product': product}, n_clicks=0),
-    ], className='vol-overview-card-footer'))
     return html.Div(children, className='volatility-chart-card vol-overview-card' +
                     (' vol-overview-card-active' if product == active_product else ''))
 

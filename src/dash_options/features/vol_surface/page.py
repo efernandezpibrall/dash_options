@@ -430,13 +430,6 @@ def _create_surface_heatmap_figure(product, current_surface, previous_surface, h
     fig.update_yaxes(**_vol_axis('Expiry', type='category', showgrid=False, autorange='reversed',
                                    tickmode='array', tickvals=y_labels[::6],
                                    ticktext=[pd.Timestamp(m).strftime('%b %Y') for m in y_labels[::6]]))
-    kind, month = surface_data._parse_surface_expiry_selection(selected_expiry)
-    if kind == surface_data.SURFACE_EXPIRY_MONTH:
-        selected = pd.Timestamp(month).strftime('%Y-%m')
-        if selected in y_labels:
-            row = y_labels.index(selected)
-            fig.add_shape(type='rect', xref='paper', x0=0, x1=1, yref='y',
-                          y0=row-.5, y1=row+.5, line=dict(color='#2563eb', width=2), fillcolor='rgba(0,0,0,0)')
     return fig
 
 
