@@ -105,3 +105,9 @@ def test_window_preserves_saved_revision_comparison_and_inherited_nodes(selected
     inherited = overview.filter_delivery(view['current'],scope('2027-02-01',1))
     assert inherited.loc[inherited.delta_bucket.eq('ATM'),'volatility'].tolist() == [.6]
     assert view['metadata']['month_origins']['2027-02'] == 'Inherited 2026-10-29'
+
+
+def test_unavailable_source_empty_atm_frames_clear_delivery_tables():
+    frame=pd.DataFrame(columns=['code','cob_date','contract_date','volatility'])
+    for grouping in ['monthly','quarterly','season','calendar']:
+        pd.testing.assert_frame_equal(overview.complete_bucket_frames(frame,scope(),grouping),frame)

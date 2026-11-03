@@ -288,7 +288,7 @@ def atm_frames(reference, date, previous_date, products, source='settlement', se
 
 def filter_delivery(frame, context):
     """Apply the shared monthly display scope without touching historical warm-up."""
-    if context is None:
+    if context is None or frame.empty:
         return frame.copy()
     months = pd.to_datetime(context.get('months', []))
     return frame.loc[frame.contract_date.dt.to_period('M').dt.to_timestamp().isin(months)].copy()
