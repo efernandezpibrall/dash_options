@@ -4,6 +4,8 @@ import pandas as pd
 from dash import html, no_update
 import dash_bootstrap_components as dbc
 
+from .tape_quality import tape_quality_details
+
 
 def expiry_information(quality, raw, trade_tape):
     quality = dict(quality)
@@ -53,7 +55,10 @@ def expiry_information(quality, raw, trade_tape):
         if pd.notna(latest):
             detail += f"; latest execution {latest.tz_convert('Asia/Dubai'):%H:%M:%S} GST"
         if not trade_tape.empty and "coverage_status" in trade_tape:
-            detail += f"; tape coverage {trade_tape['coverage_status'].iloc[0]}"
+            metadata = trade_tape["tape_metadata"].iloc[0] if "tape_metadata" in trade_tape else None
+            diagnostics = tape_quality_details(metadata)
+            detail += ("; Snapshot: " + "; ".join(diagnostics) if diagnostics
+                       else f"; tape coverage {trade_tape['coverage_status'].iloc[0]}")
     summary = " · ".join(activity) or (f"{executable_count:,} quoted options" if executable_count else "")
     return {**quality, "detail": detail.strip(" ·"), "band_label": band_label, "summary": summary,
             "active_trade_count": active_count, "active_trade_lots": lots,

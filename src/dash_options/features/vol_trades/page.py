@@ -360,6 +360,8 @@ def _worker_readiness_message(readiness, product_label: str) -> str:
 
 
 def _intraday_success_message(job) -> str:
+    from .tape_quality import tape_quality_details
+
     metrics = dict(getattr(job, "metrics", None) or {})
     total = metrics.get("active_event_count", metrics.get("event_count"))
     resolved = metrics.get("resolved_event_count")
@@ -373,11 +375,9 @@ def _intraday_success_message(job) -> str:
         details.append(f"{int(resolved):,} IVs resolved")
     if total is not None and resolved is not None and int(total) > int(resolved):
         details.append(f"{int(total) - int(resolved):,} IVs unavailable")
-    if partial:
+    if partial and metrics.get("coverage_status") != "partial" and not metrics.get("volume_reconciliation"):
         details.append("tape coverage partial")
-    reasons = metrics.get("coverage_reasons") or []
-    if reasons:
-        details.append("; ".join(str(reason) for reason in reasons))
+    details.extend(tape_quality_details(metrics))
     return prefix + (" · " + " · ".join(details) if details else "") + "."
 
 
@@ -557,7 +557,10 @@ def manage_bloomberg_refresh(
             if status_class.endswith("-danger"):
                 status_label = "Failed"
             elif status_class.endswith("-warning"):
-                status_label = "Partial"
+                payload = updated_jobs.get(product) or {}
+                status_label = ("Saved · warnings" if payload.get("status") == "succeeded"
+                                and (payload.get("metrics") or {}).get("volume_reconciliation")
+                                else "Partial")
             elif status_class.endswith("-active"):
                 status_label = "Running"
             elif status_class.endswith("-success") and updated_jobs:
