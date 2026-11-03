@@ -160,3 +160,46 @@ def test_history_failure_does_not_replace_the_current_surface(monkeypatch):
     pd.testing.assert_frame_equal(current,frame)
     assert meta['history_surface_dataset'].empty and meta['history_publications']=={}
     assert 'unavailable' in meta['history_error']
+
+
+@pytest.mark.parametrize('warm',[False,True])
+def test_old_session_snapshot_rebuilds_without_changing_immutable_payload(monkeypatch,tmp_path,warm):
+    from contextlib import nullcontext
+    store=SnapshotStore(tmp_path/'migration')
+    frame=nodes('Brent','2026-10-29')
+    state={'initialized':True,'surface':{'source':'test','rows':len(frame),
+           'latest_cob_date':'2026-10-29','fallback_used':False,'error':None}}
+    old=store.publish(surfaces.VOL_SURFACE_SNAPSHOT_NAMESPACE,'old',{
+        'atm_dataset':frame,'surface_dataset':frame,'data_cache_state':state})
+    monkeypatch.setattr(surfaces,'resolve_snapshot',store.resolve)
+    monkeypatch.setattr(surfaces,'latest_snapshot',store.latest)
+    monkeypatch.setattr(surfaces,'publish_snapshot',store.publish)
+    monkeypatch.setattr(surfaces,'snapshot_lock',lambda *a,**k:nullcontext())
+    monkeypatch.setattr(surfaces,'DATA_CACHE_STATE',state.copy())
+    monkeypatch.setattr(surfaces,'_ACTIVE_SURFACE_SNAPSHOT_ID',old['snapshot_id'] if warm else None)
+    monkeypatch.setattr(surfaces,'atm_dataset',frame)
+    monkeypatch.setattr(surfaces,'surface_dataset',frame)
+    new_state={**state,'history':{'publications':{'BRENT:2026-10-29':{'publication_id':'new'}}}}
+    monkeypatch.setattr(surfaces,'_build_surface_snapshot_payload',lambda *a:({
+        'atm_dataset':frame,'surface_dataset':frame,'history_surface_dataset':frame,
+        'data_cache_state':new_state},'new-schema'))
+    with pytest.raises(SnapshotReferenceError,match='outdated'):
+        surfaces._activate_surface_snapshot(old)
+    result=page.initialize_vol_surface_page(None,old,'2026-10-29',None,['Brent'],'monthly')
+    assert result[0]['snapshot_id']!=old['snapshot_id']
+    assert 'history_surface_dataset' in store.resolve(result[0])
+    assert 'history_surface_dataset' not in store.resolve(old)
+    assert result[2]=='2026-10-29' and result[5]==['Brent']
+    store.close()
+
+
+def test_history_error_does_not_blank_current_smile_or_surface_matrix(monkeypatch):
+    current=nodes('Brent','2026-10-29')
+    monkeypatch.setattr(surfaces,'_ensure_cached_data',lambda *a:None)
+    monkeypatch.setattr(page,'_selected_surface_pair',lambda *a:(current,surfaces._empty_surface_df(),None))
+    def unavailable(*a):raise SnapshotReferenceError('Published history unavailable')
+    monkeypatch.setattr(overview,'history_frame',unavailable)
+    heat,smile,history,tables,_=page.update_surface_section(
+        {},'2026-10-29',None,'Brent','month:2027-01-01',['ATM'],30,'vs_atm','fixed_expiry')
+    assert heat.data and smile.data and tables.children
+    assert not history.data

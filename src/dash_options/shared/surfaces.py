@@ -617,6 +617,11 @@ def _activate_surface_snapshot(reference):
 
     # A warm process is not proof that this immutable reference still exists.
     payload = resolve_snapshot(reference, expected_namespace=VOL_SURFACE_SNAPSHOT_NAMESPACE)
+    loaded_state = payload.get('data_cache_state')
+    if (not isinstance(payload.get('history_surface_dataset'), pd.DataFrame)
+            or not isinstance(loaded_state, dict)
+            or not isinstance(loaded_state.get('history'), dict)):
+        raise SnapshotReferenceError('Volatility snapshot schema is outdated; refresh required')
     snapshot_id = reference.get('snapshot_id') if isinstance(reference, dict) else None
     if (
         snapshot_id
@@ -627,7 +632,6 @@ def _activate_surface_snapshot(reference):
 
     loaded_atm = payload.get('atm_dataset')
     loaded_surface = payload.get('surface_dataset')
-    loaded_state = payload.get('data_cache_state')
     if not isinstance(loaded_atm, pd.DataFrame) or not isinstance(loaded_surface, pd.DataFrame):
         raise SnapshotReferenceError('Volatility snapshot payload is invalid')
     if not isinstance(loaded_state, dict):

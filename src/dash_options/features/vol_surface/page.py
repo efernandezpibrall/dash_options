@@ -690,7 +690,11 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
-    history_df = (overview.history_frame(snapshot_reference)).copy()
+    try:
+        full_history = overview.history_frame(snapshot_reference)
+    except SnapshotReferenceError as exc:
+        return _empty_figure(str(exc), 'Delta Vol History')
+    history_df = full_history.copy()
     if history_df.empty:
         return _empty_figure('No surface history available.', 'Delta Vol History')
 
@@ -703,8 +707,7 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     if history_mode == 'fixed_expiry' or expiry_type != surface_data.SURFACE_EXPIRY_MONTH:
         history_df = surface_data._filter_surface_by_expiry_selection(history_df, selected_expiry)
     else:
-        full = overview.history_frame(snapshot_reference)
-        schedule, tenor_rank = delta_history_data.rolling_schedule(full, product, expiry_key, end_date, lookback_days)
+        schedule, tenor_rank = delta_history_data.rolling_schedule(full_history, product, expiry_key, end_date, lookback_days)
         history_df = history_df.merge(schedule, on=['cob_date', 'contract_date'], how='inner', validate='many_to_one')
 
     history_df = history_df.loc[history_df.delta_bucket.isin(selected_buckets)]
@@ -2248,12 +2251,17 @@ def update_surface_section(
     selected_history_buckets = (selected_history_buckets or ['ATM'])[:3]
 
     heatmap_figure = _create_surface_heatmap_figure(active_product, current_surface, previous_surface, heatmap_mode or 'vs_atm', selected_expiry)
+    try:
+        history_surface = overview.history_frame(snapshot_reference)
+    except SnapshotReferenceError:
+        # Historical overlays are optional; preserve the selected current/replay surface.
+        history_surface = surface_data._empty_surface_df()
     smile_figure = _create_smile_evolution_figure(
         active_product, selected_expiry, current_surface, previous_surface, lookback_days,
         (selected_metadata or {}).get('business_date', selected_date),
         current_label=(selected_metadata or {}).get('current_label'),
         comparison_label=(selected_metadata or {}).get('comparison_label'),
-        history_surface=overview.history_frame(snapshot_reference),
+        history_surface=history_surface,
     )
     history_figure = _create_delta_history_figure(active_product, history_expiry, selected_history_buckets, history_range, selected_date, history_mode or 'fixed_expiry',history_contracts=history_contracts,snapshot_reference=snapshot_reference)
     if selected_metadata and history_mode in (None,'fixed_expiry') and history_figure.data:
