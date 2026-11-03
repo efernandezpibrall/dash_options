@@ -453,7 +453,7 @@ def _build_smile_series(surface_slice, ordered_buckets):
 
 
 def _create_smile_evolution_figure(product, selected_expiry, current_surface, previous_surface, lookback_days, end_date,
-                                 *, current_label=None, comparison_label=None):
+                                 *, current_label=None, comparison_label=None, history_surface=None):
     if current_surface.empty or selected_expiry is None:
         return _empty_figure('Select an expiry with available surface data to see the smile.', f'{product} Smile Evolution')
 
@@ -477,7 +477,7 @@ def _create_smile_evolution_figure(product, selected_expiry, current_surface, pr
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
-    history_df = surface_data.surface_dataset.copy()
+    history_df = (history_surface.copy() if history_surface is not None else surface_data._empty_surface_df())
     if not history_df.empty:
         history_df = history_df[
             (history_df['code'] == product) &
@@ -559,25 +559,24 @@ def _create_shared_delta_history_figure(product, contracts, buckets, days, end, 
     if not contracts:
         return _empty_figure('Select one or more history contracts.', 'Delta Vol History')
     try:
-        published, archived, prices, meta = delta_history_data.load_history(
+        published, prices, meta = delta_history_data.load_history(
             product,contracts,end,days,
-            overview.snapshot_frame(revision) if isinstance(revision, dict) else surface_data.surface_dataset,revision)
+            overview.history_frame(revision),revision)
         fig = make_subplots(specs=[[{'secondary_y': True}]])
         for month_index,month in enumerate(contracts):
             label = pd.Timestamp(month).strftime('%b-%y')
             for bucket_index,bucket in enumerate(buckets):
                 color = VOL_LINE_PALETTE[(month_index*3+bucket_index)%len(VOL_LINE_PALETTE)]
-                for frame,origin,dash in ((published,'Settlement','solid'),(archived,'Archived reconstruction','dot')):
-                    series = frame.loc[frame.contract_date.eq(pd.Timestamp(month))&frame.delta_bucket.eq(bucket)]
-                    if series.empty:
-                        continue
-                    # A trading-date grid exposes missing/rejected sessions instead of bridging them.
-                    dates = meta['sessions'].union(pd.DatetimeIndex(series.cob_date)).sort_values()
-                    series = series.set_index('cob_date').reindex(dates)
-                    fig.add_trace(go.Scatter(x=series.index,y=series.volatility,mode='lines+markers',
-                        name=f'{label} {bucket} · {origin}',line=dict(color=color,width=2,dash=dash),
-                        marker=dict(size=3),connectgaps=False,
-                        hovertemplate='COB %{x|%Y-%m-%d}<br>%{fullData.name}<br>IV %{y:.2%}<extra></extra>'),secondary_y=False)
+                series = published.loc[published.contract_date.eq(pd.Timestamp(month))&published.delta_bucket.eq(bucket)]
+                if series.empty:
+                    continue
+                # A trading-date grid exposes missing/rejected sessions instead of bridging them.
+                dates = meta['sessions'].union(pd.DatetimeIndex(series.cob_date)).sort_values()
+                series = series.set_index('cob_date').reindex(dates)
+                fig.add_trace(go.Scatter(x=series.index,y=series.volatility,mode='lines+markers',
+                    name=f'{label} {bucket} · Settlement',line=dict(color=color,width=2,dash='solid'),
+                    marker=dict(size=3),connectgaps=False,
+                    hovertemplate='COB %{x|%Y-%m-%d}<br>%{fullData.name}<br>IV %{y:.2%}<extra></extra>'),secondary_y=False)
             selected = prices.loc[prices.contract_date.eq(pd.Timestamp(month))]
             if selected.settlement_price.notna().any():
                 fig.add_trace(go.Scatter(x=selected.cob_date,y=selected.settlement_price,
@@ -590,9 +589,8 @@ def _create_shared_delta_history_figure(product, contracts, buckets, days, end, 
         fig.update_xaxes(**_vol_axis('COB',tickformat='%d %b',range=[meta['requested_start'],meta['requested_end']]))
         fig.update_yaxes(**_vol_axis('Implied volatility (%)',tickformat='.0%'),secondary_y=False)
         fig.update_yaxes(**_vol_axis('Settlement ('+meta['price_unit']+')',tickformat='.2f',showgrid=False),secondary_y=True)
-        note = 'Settlement IV · missing sessions remain gaps.'
-        if not archived.empty:
-            note += ' Dotted lines: archived reconstruction.'
+        note = ('Settlement IV · missing sessions remain gaps.' if not published.empty else
+                'No published IV for this contract and period; settlement prices remain available.')
         if meta['errors']:
             note += ' '+ ' | '.join(meta['errors'])
         fig.add_annotation(text=note,xref='paper',yref='paper',x=0,y=1.12,showarrow=False,xanchor='left',font=dict(size=10))
@@ -692,8 +690,7 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     lookback_days = int(lookback_days) if lookback_days is not None else 30
     start_date = end_date - pd.Timedelta(days=lookback_days)
 
-    history_df = (overview.snapshot_frame(snapshot_reference) if isinstance(snapshot_reference, dict)
-                  else surface_data.surface_dataset).copy()
+    history_df = (overview.history_frame(snapshot_reference)).copy()
     if history_df.empty:
         return _empty_figure('No surface history available.', 'Delta Vol History')
 
@@ -706,7 +703,7 @@ def _create_delta_history_figure(product, selected_expiry, selected_buckets, loo
     if history_mode == 'fixed_expiry' or expiry_type != surface_data.SURFACE_EXPIRY_MONTH:
         history_df = surface_data._filter_surface_by_expiry_selection(history_df, selected_expiry)
     else:
-        full = overview.snapshot_frame(snapshot_reference) if isinstance(snapshot_reference, dict) else surface_data.surface_dataset
+        full = overview.history_frame(snapshot_reference)
         schedule, tenor_rank = delta_history_data.rolling_schedule(full, product, expiry_key, end_date, lookback_days)
         history_df = history_df.merge(schedule, on=['cob_date', 'contract_date'], how='inner', validate='many_to_one')
 
@@ -1217,6 +1214,7 @@ def _create_surface_ag_grid(dataframe, delta_columns, table_id, include_diff_col
         dashGridOptions={
             'domLayout': 'autoHeight',
             'rowHeight': 28,
+            'rowSelection': {'mode':'singleRow', 'checkboxes':False, 'enableClickSelection':True},
             'headerHeight': 34,
             'pagination': False,
             'suppressPaginationPanel': True,
@@ -1957,7 +1955,10 @@ def update_vol_trades_link(active_product):
 def update_history_buckets(reference, product, contract, current):
     if not product or not contract:
         return [], []
-    frame = overview.snapshot_frame(reference)
+    try:
+        frame = overview.history_frame(reference)
+    except SnapshotReferenceError:
+        return [], []
     selected = frame.loc[frame.code.eq(product) & frame.contract_date.eq(pd.Timestamp(contract))]
     options = _get_delta_bucket_options(selected)
     valid = {o['value'] for o in options}
@@ -1989,7 +1990,10 @@ def update_realized_comparison(snapshot_reference,selected_date,product,contract
     if product not in realized_comparison_data.CALENDARS or not selected_date or not contract:
         return _empty_figure('Select a product and maturity.','Realized vs Implied Volatility'),''
     surface_data._ensure_cached_data(snapshot_reference)
-    frame = overview.snapshot_frame(snapshot_reference) if isinstance(snapshot_reference, dict) else surface_data.surface_dataset
+    try:
+        frame = overview.history_frame(snapshot_reference)
+    except SnapshotReferenceError as exc:
+        return _empty_figure(str(exc), 'Realized vs Implied Volatility'), str(exc)
     fig,status=_create_realized_comparison_figure(product,contract,lookback,selected_date,frame, snapshot_reference, history_mode)
     if fig.layout.meta:
         fig.update_layout(meta={**fig.layout.meta,'iv_snapshot_reference':snapshot_reference})
@@ -2013,7 +2017,7 @@ def update_history_contracts(snapshot_reference,end,product,lookback,current):
     if product not in delta_history_data.CALENDARS or not end:
         return [],[]
     surface_data._ensure_cached_data(snapshot_reference)
-    months = delta_history_data.available_contracts(product,end,lookback,surface_data.surface_dataset)
+    months = delta_history_data.available_contracts(product,end,lookback,overview.history_frame(snapshot_reference))
     options = [{'label':pd.Timestamp(m).strftime('%b-%y'),'value':m} for m in months]
     if current:
         valid = [m for m in current if m in months]
@@ -2045,7 +2049,10 @@ def select_linked_history_contracts(reference, end, product, lookback, selected_
 def select_history_contracts(reference, end, product, lookback, primary, comparison, previous, selected_expiry='legacy', delivery_context=None):
     if not reference or not end or product not in delta_history_data.CALENDARS:
         return {'display':'none'}, [], None, [], None, {'product':product}
-    frame = overview.snapshot_frame(reference)
+    try:
+        frame = overview.history_frame(reference)
+    except SnapshotReferenceError:
+        return {'display':'block'}, [], None, [], None, {'product':product}
     months = delta_history_data.available_contracts(product, end, lookback, frame)
     current = overview.settlement_slice(frame, product, end)
     front = overview.front_month(current)
@@ -2099,7 +2106,7 @@ def history_coverage(figure):
             html.Div('Missing IV: ' + (', '.join(missing) or 'none')),
             html.Div('Missing/invalid settlements: ' + (', '.join(prices) or 'none')),
             html.Div('Incomplete RV windows: ' + (', '.join(coverage.get('incomplete_rv_dates', [])) or 'none')),
-            html.Div('Archive is a separate reconstruction, never substituted for settlement IV.'),
+            html.Div('Historical IV requires an active published surface; missing observations remain gaps.'),
         ], className='volatility-history-quality'))
     return items
 
@@ -2118,7 +2125,7 @@ def export_surface_history(clicks, reference, end, product, contracts, lookback,
         contracts = [m for m in (contracts or []) if m in delivery_context.get('months', [])]
     if not clicks or not contracts:
         return no_update
-    frame = overview.snapshot_frame(reference)
+    frame = overview.history_frame(reference)
     primary = contracts[0]
     if mode == 'rolling_tenor':
         schedule, _ = delta_history_data.rolling_schedule(frame, product, primary, end, lookback)
@@ -2127,10 +2134,9 @@ def export_surface_history(clicks, reference, end, product, contracts, lookback,
     else:
         exported_contracts = contracts
         rv, rv_meta = realized_comparison_data.load_comparison(product, primary, end, lookback, frame, reference)
-    settlement, archive, prices, meta = delta_history_data.load_history(product, exported_contracts, end, lookback, frame, reference)
+    settlement, prices, meta = delta_history_data.load_history(product, exported_contracts, end, lookback, frame, reference)
     if mode == 'rolling_tenor':
         settlement = settlement.merge(schedule, on=['cob_date','contract_date'], validate='many_to_one')
-        archive = archive.merge(schedule, on=['cob_date','contract_date'], validate='many_to_one')
         prices = prices.merge(schedule, on=['cob_date','contract_date'], validate='one_to_one')
     buffer = io.BytesIO()
     selected = None
@@ -2142,7 +2148,6 @@ def export_surface_history(clicks, reference, end, product, contracts, lookback,
         if selected is not None:
             selected.to_excel(writer, sheet_name='Selected revision', index=False)
         settlement.to_excel(writer, sheet_name='Settlement IV', index=False)
-        archive.to_excel(writer, sheet_name='Reconstruction', index=False)
         prices.to_excel(writer, sheet_name='Settlements', index=False)
         rv.to_excel(writer, sheet_name='Realized vs implied', index=False)
         pd.DataFrame([{'field':k, 'value':json.dumps(v, default=str)} for k,v in
@@ -2248,6 +2253,7 @@ def update_surface_section(
         (selected_metadata or {}).get('business_date', selected_date),
         current_label=(selected_metadata or {}).get('current_label'),
         comparison_label=(selected_metadata or {}).get('comparison_label'),
+        history_surface=overview.history_frame(snapshot_reference),
     )
     history_figure = _create_delta_history_figure(active_product, history_expiry, selected_history_buckets, history_range, selected_date, history_mode or 'fixed_expiry',history_contracts=history_contracts,snapshot_reference=snapshot_reference)
     if selected_metadata and history_mode in (None,'fixed_expiry') and history_figure.data:
@@ -2453,27 +2459,39 @@ def export_surface_table(
 @callback(
     Output('vol-overview-navigation', 'data'),
     Input({'type': 'vol-overview-chart', 'product': ALL, 'metric': ALL}, 'clickData'),
-    Input({'type': 'vol-overview-inspect', 'product': ALL}, 'n_clicks'),
     Input('surface-heatmap-graph', 'clickData'),
     Input('volatility-table', 'cellClicked', allow_optional=True),
     Input('changes-table', 'cellClicked', allow_optional=True),
-    Input('surface-current-table', 'cellClicked', allow_optional=True),
-    Input('surface-diff-table', 'cellClicked', allow_optional=True),
+    Input('surface-current-table', 'selectedRows', allow_optional=True),
+    Input('surface-diff-table', 'selectedRows', allow_optional=True),
     State('surface-product-tabs', 'value'),
     State('table-grouping-dropdown', 'value'),
     State({'type': 'vol-overview-chart', 'product': ALL, 'metric': ALL}, 'id'),
-    State({'type': 'vol-overview-inspect', 'product': ALL}, 'id'),
     State('vol-overview-context', 'data'),
     State('vol-overview-navigation', 'data'),
+    State('volatility-table', 'rowData', allow_optional=True),
+    State('changes-table', 'rowData', allow_optional=True),
     prevent_initial_call=True,
 )
-def navigate_workspace(clicks, inspections, heat_click, table_click, changes_click,
-                       matrix_click, diff_click, active_product, grouping, chart_ids, link_ids, context, previous):
-    return navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous,
-        heat_click, table_click, changes_click, matrix_click, diff_click, active_product, grouping)
+def navigate_workspace(clicks, heat_click, table_click, changes_click,
+                       matrix_click, diff_click, active_product, grouping, chart_ids, context, previous,
+                       table_rows=None, change_rows=None):
+    return navigate_overview(clicks, chart_ids, context, previous,
+        heat_click, _overview_grid_event(table_click, table_rows),
+        _overview_grid_event(changes_click, change_rows), matrix_click, diff_click, active_product, grouping)
 
 
-def navigate_overview(clicks, inspections, chart_ids, link_ids, context, previous,
+
+def _overview_grid_event(event, rows):
+    """Dash AG Grid cell clicks carry a row index, not the full row data."""
+    if not isinstance(event, dict) or 'data' in event:
+        return event
+    index = event.get('rowIndex')
+    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(rows or []):
+        return None
+    return {**event, 'data': rows[index]}
+
+def navigate_overview(clicks, chart_ids, context, previous,
                       heat_click=None, table_click=None, changes_click=None,
                       matrix_click=None, diff_click=None, active_product=None, grouping='monthly'):
     valid = (context or {}).get('months', [])
@@ -2483,6 +2501,8 @@ def navigate_overview(clicks, inspections, chart_ids, link_ids, context, previou
                   'volatility-table': table_click, 'changes-table': changes_click,
                   'surface-current-table': matrix_click, 'surface-diff-table': diff_click}
         event = events.get(trigger)
+        if trigger in {'surface-current-table','surface-diff-table'} and isinstance(event,list):
+            event = {'data':event[0]} if event else None
         picked = detail_click_selection(trigger, event, active_product, grouping)
         if picked is None:
             return no_update
@@ -2495,15 +2515,11 @@ def navigate_overview(clicks, inspections, chart_ids, link_ids, context, previou
         if trigger not in (chart_ids or []):
             return no_update
         chosen = overview.click_selection(clicks[chart_ids.index(trigger)], product, valid)
-    elif trigger.get('type') == 'vol-overview-inspect':
-        if trigger not in (link_ids or []) or not inspections[link_ids.index(trigger)]:
-            return no_update
-        chosen = (context or {}).get('fronts', {}).get(product)
     else:
         return no_update
     if chosen not in valid:
         return no_update
-    # A repeated Inspect click must reopen the front even after a manual smile change.
+    # Repeated clicks remain explicit navigation requests.
     sequence = (previous or {}).get('sequence', 0)
     sequence = sequence if isinstance(sequence, int) and sequence >= 0 else 0
     return {'product': product, 'month': chosen, 'sequence': sequence + 1}

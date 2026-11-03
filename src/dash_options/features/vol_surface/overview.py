@@ -49,6 +49,42 @@ def snapshot_frame(reference):
     return frame
 
 
+
+def history_frame(reference):
+    """Only immutable nodes backed by active calibrated-surface publications.
+
+    The operational payload also serves legacy current surfaces. Those rows must
+    never be used to backfill IV history, even before the first publication.
+    """
+    if not isinstance(reference, dict):
+        return surfaces._empty_surface_df().astype({
+            'cob_date':'datetime64[ns]', 'contract_date':'datetime64[ns]',
+            'option_expiration_date':'datetime64[ns]', 'volatility':'float64'})
+    payload = resolve_snapshot(reference, expected_namespace=surfaces.VOL_SURFACE_SNAPSHOT_NAMESPACE)
+    frame = payload.get('history_surface_dataset')
+    if not isinstance(frame, pd.DataFrame):
+        raise SnapshotReferenceError('Published history snapshot unavailable; refresh Options Data')
+    status = payload.get('data_cache_state', {}).get('history', {})
+    if status.get('error'):
+        raise SnapshotReferenceError('Published history source unavailable; refresh Options Data')
+    publications = status.get('publications', {})
+    if not isinstance(publications, dict):
+        raise SnapshotReferenceError('Volatility publication provenance is invalid')
+    if frame.empty:
+        selected = frame.astype({'cob_date':'datetime64[ns]', 'contract_date':'datetime64[ns]',
+                                 'option_expiration_date':'datetime64[ns]', 'volatility':'float64'})
+        selected.attrs.update(iv_source=surfaces.PUBLISHED_SURFACE_SOURCE_LABEL, publication_ids={})
+        return selected
+    keys = frame.code.str.upper() + ':' + frame.cob_date.dt.strftime('%Y-%m-%d')
+    valid = {key for key, value in publications.items()
+             if isinstance(value, dict) and value.get('publication_id')}
+    selected = frame.loc[keys.isin(valid)].copy()
+    selected.attrs['iv_source'] = surfaces.PUBLISHED_SURFACE_SOURCE_LABEL
+    present = set(keys.loc[keys.isin(valid)])
+    selected.attrs['publication_ids'] = {key: value['publication_id'] for key, value in publications.items()
+                                         if key in present}
+    return selected
+
 def settlement_slice(frame, product, date):
     if frame.empty or not date:
         return surfaces._empty_surface_df()

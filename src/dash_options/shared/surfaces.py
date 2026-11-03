@@ -398,7 +398,7 @@ def _load_legacy_surface_data():
     }
 
 
-def _load_published_surface_data():
+def _load_published_surface_data(*, history_only=False):
     """Read exact sharing nodes from active publications, never refit or round IV."""
     query = text(f"""
         WITH points AS (
@@ -423,6 +423,23 @@ def _load_published_surface_data():
             IN (0.01, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.99)
         ORDER BY product, cob_date, maturity_date, delta
     """)
+    if history_only:
+        # Historical consumers need the saved delta nodes, not a dense strike-grid
+        # scan or recalibration. The publication registry remains the authority.
+        query = text(f"""
+            SELECT p.publication_id::text, p.published_at, p.commodity AS product,
+                   p.cob_date, s.contract_date AS maturity_date, s.option_expiration_date,
+                   s.put_call, s.delta, s.volatility AS value,
+                   count(*) OVER (PARTITION BY p.publication_id,s.contract_date) AS dense_count,
+                   count(*) OVER (PARTITION BY p.publication_id,s.contract_date) AS anchor_count
+            FROM {DB_SCHEMA}.vol_surface_publications p
+            JOIN {PUBLISHED_SURFACE_SOURCE_LABEL} s ON s.publication_id=p.publication_id
+              AND s.commodity=p.commodity AND s.cob_date=p.cob_date
+            WHERE p.is_active AND p.status='published'
+              AND p.commodity IN ('BRENT', 'HH', 'TTF', 'JKM', 'NBP')
+              AND s.delta IN (0.01,0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,0.99)
+            ORDER BY product,cob_date,maturity_date,delta
+        """)
     rows = pd.read_sql(query, get_database_engine())
     if rows.empty:
         return _empty_surface_df(), {}
@@ -430,7 +447,7 @@ def _load_published_surface_data():
     deltas = pd.to_numeric(rows['delta'], errors='coerce').round(8)
     values = pd.to_numeric(rows['value'], errors='coerce')
     valid = (
-        rows['dense_count'].eq(401).all()
+        (history_only or rows['dense_count'].eq(401).all())
         and rows['anchor_count'].eq(11).all()
         and deltas.isin(PUBLISHED_SURFACE_DELTAS).all()
         and rows['option_expiration_date'].notna().all()
@@ -442,7 +459,7 @@ def _load_published_surface_data():
         and rows.groupby(['product', 'cob_date'])['publication_id'].nunique().eq(1).all()
     )
     if not valid:
-        raise SnapshotReferenceError('Published Brent/HH sharing nodes are incomplete or invalid')
+        raise SnapshotReferenceError('Published surface sharing nodes are incomplete or invalid')
     rows['delta'] = deltas
     normalized = _normalize_surface_data(rows, volatility_in_percent=False)
     publications = {
@@ -455,24 +472,37 @@ def _load_published_surface_data():
     return normalized, publications
 
 
+def _load_published_history_data():
+    return _load_published_surface_data(history_only=True)
+
+
 def load_surface_data():
     legacy, metadata = _load_legacy_surface_data()
     published, publications = _load_published_surface_data()
-    if published.empty:
-        return legacy, metadata
-    # Preserve pre-publication history, but never use an old operational row to
-    # fill a missing publication date after the governed history begins.
+    history_error = None
+    try:
+        history, history_publications = _load_published_history_data()
+    except Exception as exc:
+        history, history_publications = _empty_surface_df(), {}
+        history_error = safe_exception_message(exc)
+    # Preserve the existing current-surface selection. Historical IV has its own
+    # publication-only payload for all five products, with no legacy fallback.
     for product, frame in published.groupby('code'):
         legacy = legacy.loc[~(legacy['code'].eq(product)
                               & legacy['cob_date'].ge(frame['cob_date'].min()))]
-    combined = concat_dataframes([legacy, published]).sort_values(
-        ['code', 'cob_date', 'contract_date', 'delta_sort_key']
-    ).reset_index(drop=True)
+    combined = (legacy.copy() if published.empty else
+                concat_dataframes([legacy, published]).sort_values(
+                    ['code', 'cob_date', 'contract_date', 'delta_sort_key']
+                ).reset_index(drop=True))
     return combined, {
         **metadata,
         'legacy_source': metadata['source'],
-        'source': f"{PUBLISHED_SURFACE_SOURCE_LABEL} (Brent/HH); {metadata['source']} (legacy/other products)",
+        'source': (f"{PUBLISHED_SURFACE_SOURCE_LABEL} (Brent/HH); {metadata['source']} (legacy/other products)"
+                   if not published.empty else metadata['source']),
         'publications': publications,
+        'history_surface_dataset': history,
+        'history_publications': history_publications,
+        'history_error': history_error,
     }
 
 
@@ -514,12 +544,17 @@ def _surface_source_revision(surface_df, source_meta):
             surface_df['cob_date'], errors='coerce'
         ).max()
     revision = {
-        'schema_version': 1,
+        'schema_version': 2,
         'source': source_meta.get('source'),
         'latest_cob': str(latest_cob),
         'rows': int(len(surface_df)),
         'frame_sha256': frame_digest,
         'publications': source_meta.get('publications', {}),
+        'history_publications': source_meta.get('history_publications', {}),
+        'history_error': source_meta.get('history_error'),
+        'history_sha256': hashlib.sha256(pd.util.hash_pandas_object(
+            source_meta.get('history_surface_dataset', _empty_surface_df()), index=True
+        ).values.tobytes()).hexdigest(),
     }
     encoded = json.dumps(revision, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
@@ -563,7 +598,12 @@ def _build_surface_snapshot_payload(refresh_token=None):
     }
     state['surface'].update({key: surface_meta[key] for key in ('legacy_source', 'publications')
                              if key in surface_meta})
+    history = surface_meta.get('history_surface_dataset', _empty_surface_df())
+    state['history'] = _build_source_status(history, PUBLISHED_SURFACE_SOURCE_LABEL,
+                                           surface_meta.get('history_error') or surface_meta['error'], fallback_used=False)
+    state['history']['publications'] = surface_meta.get('history_publications', {})
     payload = {
+        'history_surface_dataset': history,
         'atm_dataset': loaded_atm_df,
         'surface_dataset': loaded_surface_df,
         'data_cache_state': state,

@@ -25,6 +25,7 @@
     --ag-row-border-color: #f0f3f7;
     --ag-odd-row-background-color: #fafbfd;
     --ag-row-hover-color: #f1f5f9;
+    --ag-selected-row-background-color: #f1f5f9;
 }
 .volatility-surface-page .ag-theme-alpine.mckinsey-ag-grid.volatility-surface-grid .ag-header-cell {
     background: #f1f5f9 !important;

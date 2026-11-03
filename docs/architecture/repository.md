@@ -4,7 +4,7 @@ The installable package is `dash_options`; the distribution name is `at-options-
 
 ## Dependency direction
 
-`routes` assembles feature pages. Features use shared readers, core infrastructure and calibration workspaces. Calibration workspaces use execution services and the public `options.vol_calibration.api`. Analytics must not import Dash. Browser assets and required archive observations ship with the application package.
+`routes` assembles feature pages. Features use shared readers, core infrastructure and calibration workspaces. Calibration workspaces use execution services and the public `options.vol_calibration.api`. Analytics must not import Dash. Browser assets and runtime resources ship with the application package.
 
 `core` owns configuration, source identity, database pool ownership, immutable snapshot storage and health. `shared` owns market/surface readers and reusable display components. A feature owns its page, callbacks, data projections and presentation. Different product or source-selection policies are explicit; visual similarity alone is not a reason to combine policies.
 
@@ -21,9 +21,9 @@ Three retained compatibility bridges still import analytics internals: `calibrat
 
 ## Runtime resources and migrations
 
-`resources/volatility_history_archive/` is required fallback history, not disposable output. Its manifest checksums and observation identifiers remain unchanged. The active `migrations/` graph contains one frozen `20261029_03` baseline. The checksum-pinned original upgrade chain is packaged in `resources/migration_history/` for older databases and backups; see [baseline recovery](../operations/migration-baseline.md).
+Historical IV comes exclusively from active published nodes in `implied_volatility_surface_calibrated` and `vol_surface_publications`. The packaged reconstruction archive and its chart/export consumers have been removed. Missing history remains unavailable until governed calibration and publication backfill it. The active `migrations/` graph contains one frozen `20261029_03` baseline. The checksum-pinned original upgrade chain is packaged in `resources/migration_history/` for older databases and backups; see [baseline recovery](../operations/migration-baseline.md).
 
-An installed wheel finds CSS, JavaScript and history inside its package. Set `OPTIONS_APP_ROOT` to the paired deployment directory containing `alembic.ini` and `migrations/`. A source checkout discovers that root automatically. Set `OPTIONS_CONFIG_PATH` for deployments instead of relying on working-directory configuration.
+An installed wheel finds CSS, JavaScript and runtime resources inside its package. Set `OPTIONS_APP_ROOT` to the paired deployment directory containing `alembic.ini` and `migrations/`. A source checkout discovers that root automatically. Set `OPTIONS_CONFIG_PATH` for deployments instead of relying on working-directory configuration.
 
 ## Commands
 

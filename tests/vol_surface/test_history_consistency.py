@@ -56,7 +56,7 @@ def test_product_change_resets_to_own_front_and_preserves_explicit_contract(monk
     front = iv.copy()
     front.contract_date = pd.Timestamp("2026-12-01")
     frame = pd.concat([iv, front], ignore_index=True)
-    monkeypatch.setattr(page.overview, "snapshot_frame", lambda *_: frame)
+    monkeypatch.setattr(page.overview, "history_frame", lambda *_: frame)
     monkeypatch.setattr(page.delta_history_data, "available_contracts", lambda *a: ["2026-12-01", "2027-01-01"])
     values = page.select_history_contracts({"snapshot_id": "test"}, "2026-10-28", "HH", 90, "2027-01-01", None, {"product": "Brent"})
     assert values[2] == "2026-12-01" and values[4] is None

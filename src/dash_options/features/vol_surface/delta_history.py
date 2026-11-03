@@ -1,9 +1,5 @@
-"""Shared operational IV/prices with separately labelled immutable reconstructions."""
-from functools import lru_cache
-import gzip
+"""Published settlement IV history and independently sourced futures prices."""
 import hashlib
-import json
-from dash_options.core.paths import PACKAGE_ROOT
 
 import numpy as np
 import pandas as pd
@@ -11,61 +7,14 @@ import pandas as pd
 import dash_options.features.vol_surface.realized_comparison as realized_comparison_data
 from options.market_data.realized_comparison import CALENDARS, comparison_calendar
 
-ARCHIVE = PACKAGE_ROOT / 'resources' / 'volatility_history_archive'
 PRICE_UNITS = {'Brent':'USD/bbl','HH':'USD/MMBtu','JKM':'USD/MMBtu',
                'TTF':'EUR/MWh','NBP':'GBp/therm'}
-POLICY = 'shared-fixed-month-delta-history-with-separated-archive-v1'
-
-
-@lru_cache(maxsize=1)
-def load_archive():
-    manifest = json.loads((ARCHIVE/'manifest.json').read_text())
-    content = gzip.decompress((ARCHIVE/'observations.json.gz').read_bytes())
-    if hashlib.sha256(content).hexdigest() != manifest['sha256']:
-        raise ValueError('Historical reconstruction archive checksum mismatch')
-    payload = json.loads(content)
-    if payload['schema_version'] != 1:
-        raise ValueError('Unsupported historical archive schema')
-    points = pd.DataFrame(payload['points'])
-    runs = pd.DataFrame(payload['runs'])
-    if len(points) != manifest['points'] or len(runs) != manifest['runs']:
-        raise ValueError('Historical archive row count mismatch')
-    if runs.run_id.duplicated().any() or not set(points.run_id).issubset(set(runs.run_id)):
-        raise ValueError('Historical archive run identity mismatch')
-    for column in ('cob_date','contract_date','option_expiration_date'):
-        points[column] = pd.to_datetime(points[column])
-    for column in ('delta','volatility','settlement_price','strike','total_variance'):
-        points[column] = pd.to_numeric(points[column], errors='raise')
-        if not np.isfinite(points[column]).all() or points[column].le(0).any():
-            raise ValueError('Invalid archived reconstruction values')
-    if (points.duplicated(['run_id','cob_date','contract_date','delta','put_call']).any()
-            or not points.delta.lt(1).all()
-            or not points.option_expiration_date.gt(points.cob_date).all()
-            or not points['product'].isin(CALENDARS).all()):
-        raise ValueError('Invalid archived reconstruction keys or expiry')
-    # A scoped replacement run supersedes only its own contracts, not other months.
-    chosen = {}
-    for row in runs.sort_values(['end_date','created_at','run_id'],ascending=False).to_dict('records'):
-        if row['status'] not in ('ready','complete'):
-            continue
-        for month in row['contracts']:
-            chosen.setdefault((row['product'],pd.Timestamp(month)),row['run_id'])
-    selected = points.loc[[chosen.get((r.product,r.contract_date)) == r.run_id
-                           for r in points.itertuples()]].copy()
-    selected['delta_bucket'] = (selected.delta*100).round().astype(int).astype(str)+'C'
-    selected.loc[selected.delta.eq(.5),'delta_bucket'] = 'ATM'
-    return selected, {'archive_sha256':manifest['sha256'],'runs':payload['runs']}
+POLICY = 'published-only-fixed-month-delta-history-v2'
 
 
 def available_contracts(product, end, lookback, surface):
     start,end,_,_ = comparison_calendar(product,end,lookback or 90)
     months = set(surface.loc[surface.code.eq(product)&surface.cob_date.between(start,end),'contract_date'])
-    try:
-        archive,_ = load_archive()
-        months.update(archive.loc[archive['product'].eq(product)&archive.cob_date.between(start,end),'contract_date'])
-    except (OSError,ValueError,KeyError):
-        # The chart reports archive errors while operational data remains available.
-        pass
     return sorted(pd.Timestamp(m).strftime('%Y-%m-%d') for m in months)
 
 
@@ -74,6 +23,9 @@ def load_history(product, contracts, end, lookback, surface, revision=None):
     months = pd.to_datetime(list(dict.fromkeys(contracts)))
     published = surface.loc[surface.code.eq(product)&surface.contract_date.isin(months)
                             &surface.cob_date.between(start,end)].copy()
+    published['cob_date'] = pd.to_datetime(published.cob_date)
+    published['option_expiration_date'] = pd.to_datetime(published.option_expiration_date)
+    published['volatility'] = pd.to_numeric(published.volatility, errors='coerce')
     # ATM is defined consistently as the 50-delta call, not an average of calls/puts.
     published = published.loc[~published.delta_bucket.eq('ATM')|published.put_call.eq('call')]
     if published.duplicated(['cob_date','contract_date','delta_bucket']).any():
@@ -81,14 +33,6 @@ def load_history(product, contracts, end, lookback, surface, revision=None):
     published = published.loc[published.cob_date.lt(published.option_expiration_date)
                               &published.volatility.gt(0)&np.isfinite(published.volatility)]
     errors = []
-    try:
-        archive,meta = load_archive()
-        archive = archive.loc[archive['product'].eq(product)&archive.contract_date.isin(months)
-                              &archive.cob_date.between(start,end)].copy()
-    except (OSError,ValueError,KeyError) as exc:
-        archive = pd.DataFrame(columns=['cob_date','contract_date','delta_bucket','volatility'])
-        meta = {}
-        errors.append('Archived reconstructions unavailable: '+str(exc))
     prices,price_metadata = [],{}
     for month in months:
         rows,source = realized_comparison_data.load_comparison(
@@ -105,11 +49,15 @@ def load_history(product, contracts, end, lookback, surface, revision=None):
         # Never compare USD-converted curves with native quotes on one price axis.
         prices.loc[:,'settlement_price'] = np.nan
         errors.append('Settlement overlay omitted: selected sources have different price units.')
-    return published,archive,prices,{**meta,'product':product,'contracts':list(contracts),
+    observed_keys = set(published.code.str.upper() + ':' + published.cob_date.dt.strftime('%Y-%m-%d'))
+    publication_ids = {key:value for key,value in surface.attrs.get('publication_ids',{}).items()
+                       if key in observed_keys}
+    return published,prices,{'product':product,'contracts':list(contracts),
         'requested_start':start,'requested_end':end,'sessions':sessions[sessions>=start],
         'calendar':calendar.code,'calendar_version':calendar.version,'policy':POLICY,
         'prices':price_metadata,'price_unit':price_unit,'errors':list(dict.fromkeys(errors)),
-        'iv_snapshot_reference':revision}
+        'iv_snapshot_reference':revision,'iv_source':surface.attrs.get('iv_source'),
+        'publication_ids':publication_ids}
 
 
 def rolling_schedule(surface, product, contract, end, lookback):

@@ -123,10 +123,10 @@ def test_navigation_uses_the_clicked_product_and_validates_month(monkeypatch):
     monkeypatch.setattr(page, 'ctx', SimpleNamespace(triggered_id=graph))
     context = {'months': ['2027-01-01', '2027-02-01'], 'fronts': {'HH': '2027-01-01'}}
     click = {'points': [{'customdata': ['HH', '2027-02-01', 'Settlement']}]}
-    result = page.navigate_overview([click], [], [graph], [], context, None)
+    result = page.navigate_overview([click], [graph], context, None)
     assert result == {'product': 'HH', 'month': '2027-02-01', 'sequence': 1}
     click['points'][0]['customdata'][0] = 'TTF'
-    assert page.navigate_overview([click], [], [graph], [], context, None) is no_update
+    assert page.navigate_overview([click], [graph], context, None) is no_update
     assert overview.click_selection({'points': [{'customdata': 'bad'}]}, 'HH', ['2027-02-01']) is None
 
 
@@ -156,7 +156,7 @@ def test_month_navigation_updates_existing_smile(immutable_snapshot, monkeypatch
 def test_graph_reset_does_not_navigate(monkeypatch):
     graph = {'type': 'vol-overview-chart', 'product': 'TTF', 'metric': 'atm'}
     monkeypatch.setattr(page, 'ctx', SimpleNamespace(triggered_id=graph))
-    output = page.navigate_overview([None], [], [graph], [], {'months': ['2027-02-01'], 'fronts': {}},
+    output = page.navigate_overview([None], [graph], {'months': ['2027-02-01'], 'fronts': {}},
                                    {'product': 'TTF', 'month': '2027-01-01'})
     assert output is no_update
 
@@ -227,10 +227,10 @@ def test_front_readouts_label_each_products_contract_and_compare_that_same_month
     assert ttf_atm.title == 'Comparison: —'
 
 
-def test_inspect_always_opens_its_front_contract_including_repeated_clicks(monkeypatch):
-    link = {'type': 'vol-overview-inspect', 'product': 'TTF'}
-    monkeypatch.setattr(page, 'ctx', SimpleNamespace(triggered_id=link))
-    context = {'months': ['2026-12-01', '2027-01-01'], 'fronts': {'TTF': '2026-12-01'}}
-    previous = {'product': 'TTF', 'month': '2026-12-01', 'sequence': 1}
-    result = page.navigate_overview([], [2], [], [link], context, previous)
-    assert result == {'product': 'TTF', 'month': '2026-12-01', 'sequence': 2}
+def test_matrix_navigation_selects_the_clicked_month_and_preserves_product(monkeypatch):
+    monkeypatch.setattr(page,'ctx',SimpleNamespace(triggered_id='surface-current-table'))
+    context={'months':['2026-12-01','2027-01-01','2027-02-01']}
+    previous={'product':'TTF','month':'2027-01-01','sequence':1}
+    result=page.navigate_overview([],[],context,previous,
+        matrix_click=[{'expiry':"Feb'27"}],active_product='TTF')
+    assert result=={'product':'TTF','month':'2027-02-01','sequence':2}

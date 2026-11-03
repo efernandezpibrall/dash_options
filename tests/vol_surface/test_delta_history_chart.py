@@ -1,6 +1,4 @@
 """The shared reader replaces the formerly Brent-only chart contract."""
-import gzip
-import json
 import numpy as np
 import pandas as pd
 import pytest
@@ -20,11 +18,10 @@ def fixture(product='Brent'):
     return frame,sessions
 
 
-def patch(monkeypatch,product='Brent',archived=None):
+def patch(monkeypatch,product='Brent'):
     frame,sessions=fixture(product)
     monkeypatch.setattr(vol_surface.surface_data,'surface_dataset',frame)
-    empty=pd.DataFrame(columns=['product','cob_date','contract_date','delta_bucket','volatility'])
-    monkeypatch.setattr(data,'load_archive',lambda:(empty if archived is None else archived,{'archive_sha256':'abc'}))
+    monkeypatch.setattr(vol_surface.overview,'history_frame',lambda *a:frame)
     def price(product,month,*args):
         return pd.DataFrame({'cob_date':sessions,'settlement_price':75.,'source_security':'Shared settlement'}),{
             'price_unit':data.PRICE_UNITS[product],'last_price_date':'2026-10-28','source_errors':[]}
@@ -46,46 +43,25 @@ def test_fixed_history_all_products_has_distinct_contracts_and_correct_units(mon
     assert 'transition' not in fig.to_plotly_json()['layout']
 
 
-def test_archived_and_published_values_remain_separate(monkeypatch):
-    frame,_=fixture()
-    archive=frame.rename(columns={'code':'product'}).copy()
-    archive.volatility=.7
-    patch(monkeypatch,archived=archive)
+def test_history_has_only_settlement_iv_and_futures_price(monkeypatch):
+    patch(monkeypatch)
     fig=vol_surface._create_shared_delta_history_figure('Brent',['2027-01-01'],['ATM'],90,'2026-10-28')
-    assert len(fig.data)==3
-    assert set(fig.data[0].y)=={.4} and set(fig.data[1].y)=={.7}
-    assert fig.data[0].line.dash=='solid' and fig.data[1].line.dash=='dot'
-    assert 'Archived reconstruction' in fig.data[1].name
+    assert len(fig.data)==2
+    assert set(fig.data[0].y)=={.4}
+    assert fig.data[0].name=='Jan-27 ATM · Settlement'
+    assert fig.data[0].line.dash=='solid'
+    assert not any('reconstruction' in str(t.name).lower() for t in fig.data)
 
 
 def test_missing_and_expired_iv_remain_gaps_while_prices_continue(monkeypatch):
     frame,_=patch(monkeypatch)
     frame.loc[frame.contract_date.eq('2027-01-01'),'option_expiration_date']=pd.Timestamp('2026-10-26')
     frame=frame.loc[frame.cob_date.ne('2026-10-19')]
-    monkeypatch.setattr(vol_surface.surface_data,'surface_dataset',frame)
+    monkeypatch.setattr(vol_surface.overview,'history_frame',lambda *a:frame)
     fig=vol_surface._create_shared_delta_history_figure('Brent',['2027-01-01'],['ATM'],90,'2026-10-28')
     iv=pd.Series(fig.data[0].y,index=fig.data[0].x)
     assert np.isnan(iv.loc['2026-10-19']) and iv.loc['2026-10-26':].isna().all()
     assert fig.data[1].y[-1]==75
-
-
-def test_archive_failure_preserves_operational_data_and_warns(monkeypatch):
-    patch(monkeypatch)
-    def fail():raise ValueError('checksum mismatch')
-    monkeypatch.setattr(data,'load_archive',fail)
-    fig=vol_surface._create_shared_delta_history_figure('Brent',['2027-01-01'],['ATM'],90,'2026-10-28')
-    assert len(fig.data)==2
-    assert 'checksum mismatch' in fig.layout.annotations[0].text
-
-
-def test_corrupt_archive_is_rejected(monkeypatch,tmp_path):
-    (tmp_path/'manifest.json').write_text(json.dumps({'sha256':'wrong','points':0,'runs':0}))
-    (tmp_path/'observations.json.gz').write_bytes(gzip.compress(b'{}'))
-    monkeypatch.setattr(data,'ARCHIVE',tmp_path)
-    data.load_archive.cache_clear()
-    with pytest.raises(ValueError,match='checksum'):
-        data.load_archive()
-    data.load_archive.cache_clear()
 
 
 def test_contract_controls_use_data_for_all_products(monkeypatch):

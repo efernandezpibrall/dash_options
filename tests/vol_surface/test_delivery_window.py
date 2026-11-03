@@ -56,7 +56,7 @@ def test_shrinking_window_clears_contract_instead_of_substitution(monkeypatch):
 def test_history_limits_contracts_without_truncating_historical_frame(monkeypatch):
     frame = nodes()
     seen = []
-    monkeypatch.setattr(overview,'snapshot_frame',lambda _: frame)
+    monkeypatch.setattr(overview,'history_frame',lambda _: frame)
     def contracts(product,end,lookback,history):
         seen.append((lookback,history))
         return ['2027-01-01','2027-02-01','2027-03-01']
